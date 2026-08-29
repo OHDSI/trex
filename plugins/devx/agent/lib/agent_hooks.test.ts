@@ -6,6 +6,8 @@
 // contract each is called under.
 import { assert, assertEquals } from "jsr:@std/assert";
 import { buildUserMessage, onCompact, onToolCall, onToolResult, onTurnEnd } from "../agent.ts";
+import { ensureAppWorkspace } from "../../functions/tools/workspace.ts";
+import { safeJoin } from "../../functions/tools/path_safety.ts";
 
 // `captured` records `${query}::${params}` -- loadHooks (functions/skills/
 // hooks.ts) binds the event name as $1, it is never inlined into the query
@@ -211,6 +213,47 @@ Deno.test("onToolResult is a no-op when no PostToolUse hooks are configured", as
   const ctx = ctxWithHooks([]);
   const out = await onToolResult({ name: "Read", input: {}, result: "file contents" }, ctx);
   assertEquals(out, "file contents");
+});
+
+// The pointer capHookOutput leaves in the prompt is read by the CODING MODEL,
+// whose Read resolves through safeJoin — which throws on any absolute path.
+// So an over-cap spill has to be named workspace-relative or it names a file
+// its only reader cannot open.
+Deno.test("an over-cap UserPromptSubmit hook leaves a workspace-RELATIVE pointer the coder's Read can resolve", async () => {
+  const big = "x".repeat(40_000);
+  const originalTrex = (globalThis as any).Trex;
+  (globalThis as any).Trex = {
+    databaseManager: () => ({
+      getConnection: () => ({
+        connection: {
+          execute: () => Promise.resolve([{ column0: JSON.stringify({ exit_code: 0, output: big }) }]),
+          close: () => {},
+        },
+      }),
+    }),
+  };
+  const base = await Deno.makeTempDir();
+  const prevWorkspaceDir = Deno.env.get("DEVX_WORKSPACE_DIR");
+  Deno.env.set("DEVX_WORKSPACE_DIR", base);
+  try {
+    const ctx = ctxWithHooks([
+      { id: "h1", event: "UserPromptSubmit", matcher: null, hook_type: "command", command: "bash -c ctx", enabled: true, sort_order: 0 },
+    ]);
+    const out = await buildUserMessage("build it", ctx);
+    const workspacePath = await ensureAppWorkspace("u1", "a1");
+    const pointer = out.match(/full output saved to (\S+)\]/)?.[1];
+    assert(pointer, `expected a spill pointer in ${out.slice(0, 400)}`);
+    assert(!pointer.startsWith("/"), `pointer must not be absolute: ${pointer}`);
+    assert(pointer.startsWith(".devx/hook-spill/"), `pointer must be workspace-relative: ${pointer}`);
+    // The real reader's resolution, not a reimplementation of it.
+    assertEquals(await Deno.readTextFile(safeJoin(workspacePath, pointer)), big);
+    assert(!out.includes(big), "the full output must not reach the prompt");
+  } finally {
+    (globalThis as any).Trex = originalTrex;
+    if (prevWorkspaceDir === undefined) Deno.env.delete("DEVX_WORKSPACE_DIR");
+    else Deno.env.set("DEVX_WORKSPACE_DIR", prevWorkspaceDir);
+    await Deno.remove(base, { recursive: true }).catch(() => {});
+  }
 });
 
 // The attachment test performs a fetch that would otherwise go out over the

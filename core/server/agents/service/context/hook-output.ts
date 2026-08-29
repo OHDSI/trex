@@ -10,6 +10,11 @@ export const DEFAULT_MAX_HOOK_OUTPUT_TOKENS = 2500;
 export interface CapHookOutputOpts {
   maxTokens?: number;
   spillPath?: string;
+  // The root the POINTER is expressed relative to (the spill file is still
+  // written to `spillPath`). Callers whose reader resolves paths against a
+  // workspace root pass that root: an absolute pointer is one such a reader
+  // cannot open at all — devx's own Read rejects absolute paths outright.
+  spillRoot?: string;
 }
 
 export interface CapHookOutputResult {
@@ -34,7 +39,8 @@ function truncateNote(text: string, tokens: number, maxTokens: number): string {
  * Returns `text` unchanged when it fits `maxTokens`.
  *
  * Otherwise, if `opts.spillPath` names a directory, writes the full text to
- * a file under it and returns a short pointer naming that file. A pointer is
+ * a file under it and returns a short pointer naming that file — relative to
+ * `opts.spillRoot` when given, absolute otherwise. A pointer is
  * only honest when its reader can actually open the file — so with no
  * `spillPath`, this truncates inline instead of inventing a temp-file
  * location no caller asked for and no reader can reach (see this module's
@@ -55,8 +61,10 @@ export async function capHookOutput(text: string, opts: CapHookOutputOpts = {}):
       await Deno.mkdir(opts.spillPath, { recursive: true });
       const filePath = `${opts.spillPath}/hook-output-${crypto.randomUUID()}.txt`;
       await Deno.writeTextFile(filePath, text);
+      const root = opts.spillRoot?.replace(/\/+$/, "");
+      const pointer = root && filePath.startsWith(`${root}/`) ? filePath.slice(root.length + 1) : filePath;
       return {
-        text: `[hook output truncated: ~${tokens} tokens exceeds the ${maxTokens}-token cap; full output saved to ${filePath}]`,
+        text: `[hook output truncated: ~${tokens} tokens exceeds the ${maxTokens}-token cap; full output saved to ${pointer}]`,
         spilled: filePath,
       };
     } catch (err) {

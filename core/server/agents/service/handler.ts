@@ -123,20 +123,137 @@ const json = (body: unknown, status = 200, headers: Record<string, string> = {})
 // already rules out shell injection). Distinguishes "nothing to show" from
 // "couldn't look" — fix round 1: a swallowed failure is indistinguishable
 // from a clean turn, which is worse than surfacing it.
-async function gitDiffForPaths(cwd: string, paths: string[]): Promise<{ ok: true; diff: string } | { ok: false; error: string }> {
+//
+// SECURITY (final review, finding 1): `git diff` is SCRIPTABLE by the repo it
+// runs in — `diff.external` and a `diff.<driver>.textconv` reachable through
+// .gitattributes both execute arbitrary commands — and the coder writing into
+// that workspace can author .git/config. So this child is (a) given a cleared,
+// explicitly rebuilt environment, so a driver that does run never sees
+// ANTHROPIC_API_KEY/DATABASE_URL/the DEK/Discord/Logto secrets, (b) told not
+// to run drivers at all, and (c) time-bounded so a slow one cannot wedge the
+// request.
+const GIT_DIFF_TIMEOUT_MS = 15_000;
+
+// Mirrors plugins/devx-ext/src/subprocess.rs's run_git (GIT_TERMINAL_PROMPT
+// plus the safe.directory GIT_CONFIG_* triple, on an otherwise cleared
+// environment) — the two are the same non-interactive-git contract and must
+// not drift. Only PATH/HOME are carried over from the worker.
+function gitChildEnv(): Record<string, string> {
+  return {
+    PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin",
+    HOME: Deno.env.get("HOME") ?? "/tmp",
+    GIT_TERMINAL_PROMPT: "0",
+    // Containers run git as a different uid than the workspace's owner.
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "safe.directory",
+    GIT_CONFIG_VALUE_0: "*",
+  };
+}
+
+// `-c` pairs must precede the subcommand. These neutralize the CONFIGURED
+// drivers; the per-command --no-ext-diff/--no-textconv below neutralize the
+// invocation. Both, deliberately: either alone is one forgotten flag away
+// from executing a repo-authored command.
+const GIT_SAFE_CONFIG = ["-c", "diff.external=", "-c", "core.attributesFile=/dev/null"];
+const GIT_DIFF_FLAGS = ["--no-ext-diff", "--no-textconv"];
+
+// One environment-stripped, time-bounded git child. `okCodes` is a parameter
+// because `diff --no-index` reports "the files differ" as exit 1 — the
+// SUCCESS case for an untracked file.
+async function runGit(
+  cwd: string,
+  args: string[],
+  okCodes: number[] = [0],
+): Promise<{ ok: true; out: string } | { ok: false; error: string }> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), GIT_DIFF_TIMEOUT_MS);
   try {
-    const { code, stdout, stderr } = await new Deno.Command("git", { args: ["diff", "--", ...paths], cwd }).output();
-    if (code !== 0) {
-      const error = new TextDecoder().decode(stderr).trim() || `git diff exited ${code}`;
-      console.error(`agents: git diff failed (exit ${code}) in ${cwd}: ${error}`);
+    const { code, stdout, stderr } = await new Deno.Command("git", {
+      args: [...GIT_SAFE_CONFIG, ...args],
+      cwd,
+      clearEnv: true,
+      env: gitChildEnv(),
+      signal: ac.signal,
+      stdin: "null",
+    }).output();
+    if (!okCodes.includes(code)) {
+      const error = ac.signal.aborted
+        ? `git ${args[0]} timed out after ${GIT_DIFF_TIMEOUT_MS}ms`
+        : new TextDecoder().decode(stderr).trim() || `git ${args[0]} exited ${code}`;
       return { ok: false, error };
     }
-    return { ok: true, diff: new TextDecoder().decode(stdout) };
+    return { ok: true, out: new TextDecoder().decode(stdout) };
   } catch (e) {
-    const error = e instanceof Error ? e.message : String(e);
-    console.error(`agents: git diff failed in ${cwd}:`, e);
-    return { ok: false, error };
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+async function pathExists(cwd: string, p: string): Promise<boolean> {
+  try {
+    await Deno.lstat(p.startsWith("/") ? p : `${cwd}/${p}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function gitDiffForPaths(cwd: string, paths: string[]): Promise<{ ok: true; diff: string } | { ok: false; error: string }> {
+  // Which recorded paths git already knows about. One child, and its failure
+  // doubles as the "is this even a repo" probe.
+  const listed = await runGit(cwd, ["ls-files", "-z", "--", ...paths]);
+  if (!listed.ok) {
+    console.error(`agents: git ls-files failed in ${cwd}: ${listed.error}`);
+    return { ok: false, error: listed.error };
+  }
+  const tracked = new Set(listed.out.split("\0").filter((p) => p.length > 0));
+  const trackedPaths = paths.filter((p) => tracked.has(p));
+  const untracked: string[] = [];
+  for (const p of paths) {
+    // A path neither tracked nor on disk (deleted outright, or a workspace
+    // that never held it) contributes nothing — `--no-index` errors on it.
+    if (!tracked.has(p) && await pathExists(cwd, p)) untracked.push(p);
+  }
+  // Every recorded path is invisible here: almost always a workspace/root
+  // mismatch, never "the turn changed nothing". Reported as "couldn't look"
+  // so it cannot be read as a clean turn (see the route's three shapes).
+  if (trackedPaths.length === 0 && untracked.length === 0) {
+    return {
+      ok: false,
+      error: `none of this turn's ${paths.length} touched path(s) are tracked by, or present in, ${cwd}`,
+    };
+  }
+
+  const parts: string[] = [];
+  if (trackedPaths.length > 0) {
+    // `diff HEAD`, not bare `diff`: staged changes are as much this turn's
+    // work as unstaged ones, and bare `diff` shows neither for a file the
+    // coder created and added. Strictly read-only — no `git add -N`.
+    const hasHead = (await runGit(cwd, ["rev-parse", "--verify", "--quiet", "HEAD"])).ok;
+    // A repo with no commits has no HEAD to diff against: compare index and
+    // worktree separately instead, the same pair devx's git.rs joins.
+    const forms = hasHead ? [["diff", ...GIT_DIFF_FLAGS, "HEAD"]] : [["diff", ...GIT_DIFF_FLAGS, "--cached"], ["diff", ...GIT_DIFF_FLAGS]];
+    for (const form of forms) {
+      const r = await runGit(cwd, [...form, "--", ...trackedPaths]);
+      if (!r.ok) {
+        console.error(`agents: git diff failed in ${cwd}: ${r.error}`);
+        return { ok: false, error: r.error };
+      }
+      if (r.out) parts.push(r.out);
+    }
+  }
+  for (const p of untracked) {
+    // The read-only stand-in for `git add -N` + diff: /dev/null against the
+    // file produces a real new-file diff without touching the index.
+    const r = await runGit(cwd, ["diff", ...GIT_DIFF_FLAGS, "--no-index", "--", "/dev/null", p], [0, 1]);
+    if (!r.ok) {
+      console.error(`agents: git diff --no-index failed for ${p} in ${cwd}: ${r.error}`);
+      return { ok: false, error: r.error };
+    }
+    if (r.out) parts.push(r.out);
+  }
+  return { ok: true, diff: parts.join("") };
 }
 
 // Rebuilds prior turns into the ai@6 ModelMessage[] shape streamText

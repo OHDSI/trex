@@ -42,6 +42,25 @@ Deno.test("output over the cap with an explicit spillPath is replaced by a one-l
   }
 });
 
+// A reader that resolves paths against a root (devx's Read, whose safeJoin
+// throws on anything absolute) can only open a pointer expressed relative to
+// that root — the file still lands at the absolute spillPath.
+Deno.test("spillRoot makes the pointer relative to it while the file stays where spillPath says", async () => {
+  const root = await Deno.makeTempDir();
+  try {
+    const spillPath = `${root}/.devx/hook-spill`;
+    const big = "x ".repeat(20_000);
+    const { text, spilled } = await capHookOutput(big, { maxTokens: 2500, spillPath, spillRoot: root });
+    assert(spilled !== undefined && spilled.startsWith(`${root}/`), "the file must still be written under spillPath");
+    assert(!text.includes(root), `the pointer must not carry the absolute root: ${text}`);
+    const pointer = text.match(/full output saved to (\S+)\]/)?.[1];
+    assertEquals(pointer, ".devx/hook-spill/" + spilled.split("/").pop());
+    assertEquals(await Deno.readTextFile(`${root}/${pointer}`), big);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
 // Uncapped injection can undo the compaction that just ran. Regression guard:
 // a naive implementation might compare raw text.length against maxTokens
 // (treating one character as one token) instead of the real chars/4 estimate

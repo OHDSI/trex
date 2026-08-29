@@ -663,7 +663,13 @@ live-tail by event shape.
     passes a workspace-scoped `spillPath`
     (`<workspace>/.devx/hook-spill`, dot-prefixed so it doesn't litter the
     project root a coding model browses) when a workspace exists, because the
-    coding model's own `Read` tool can reach it; `onCompact`'s `pre` hook
+    coding model's own `Read` tool can reach it — together with `spillRoot`
+    (the workspace), which is what makes the POINTER workspace-relative
+    (`.devx/hook-spill/<file>`) while the file still lands at the absolute
+    path. That is not cosmetic: the reader is the coding model, and its
+    `Read` goes through `path_safety.ts`'s `safeJoin`, which THROWS on any
+    absolute path — an absolute pointer names a file its only reader cannot
+    open. `onCompact`'s `pre` hook
     passes none, because the summarizer has no file access at all and a
     pointer would be inert to it — so an over-cap compaction-preserved note
     is always truncated, never spilled.
@@ -896,7 +902,7 @@ trex-only (eve has no equivalent — this is about what a *host tool's own
 subprocess* sees, not the agent protocol). `plugins/devx-ext/src/subprocess.rs`'s
 `run_git` and `run_command` — the two functions behind the `Bash` tool and
 devx's git operations — used to spawn with `Command::new(...)` inheriting the
-worker's full environment. Both now `env_clear()` first and rebuild the child's
+worker's full environment. **These two, and only these two**, now `env_clear()` first and rebuild the child's
 environment from an **allowlist**, not a denylist: `filtered_env(parent, extra)`
 keeps only names in `ALLOWED_EXACT` (`PATH`, `HOME`, `SHELL`, `USER`,
 `LOGNAME`, `TERM`, `TZ`, `TMPDIR`, `LANG`, `PWD`, `DENO_DIR`, `CARGO_HOME`,
@@ -942,6 +948,22 @@ Three exclusions are choices, not oversights:
   directly in the URL) and `CARGO_REGISTRY_TOKEN` (a token outright). Same
   `DEVX_CHILD_ENV_EXTRA` escape hatch for a deployment that needs a private
   registry.
+
+One other child spawned from core is covered, by different means:
+`handler.ts`'s turn-diff `git` child (see [Turn-scoped diff](#turn-scoped-diff))
+runs with `clearEnv: true` and an explicit `PATH`/`HOME` +
+`GIT_TERMINAL_PROMPT`/`GIT_CONFIG_*` set mirroring `run_git`'s.
+
+**Known remaining gap — the process manager.** `plugins/devx-ext/src/
+process_manager.rs`'s spawn (the long-running dev server behind
+`dev_server.ts`) still inherits the worker environment: it sets `PORT` and
+nothing else, with no `env_clear()`/`filtered_env`. It IS model-reachable — a
+model-authored `package.json` script started this way runs with the worker's
+full environment, and `ReadLogs` returns that process's stdout. Left as-is
+deliberately, not by oversight: a dev server may legitimately need a broader
+environment than a one-shot `Bash` command, so narrowing it is its own
+decision (which variables a *server* gets) rather than a mechanical
+application of this allowlist.
 
 ## Channels
 
@@ -1273,10 +1295,31 @@ it work:
   `store.turnBelongsToSession(turnId, sessionId)` — a turn from another
   session 404s exactly like an unknown one, never distinguishing the two
   cases to a caller. It then reads `touched_paths` back and, if non-empty,
-  shells out to `git diff -- <path>...` (the worker's own `Deno.Command`, args
+  shells out to git (the worker's own `Deno.Command`, args
   array — no shell, so a model-authored path can't inject a flag; the `--` is
   still load-bearing, stopping a path like `--output=x` from being read as a
-  git option) in a working directory the AGENT resolves.
+  git option) in a working directory the AGENT resolves. `git ls-files`
+  splits the recorded paths into tracked and untracked; the tracked ones are
+  diffed with **`git diff HEAD`** (bare `git diff` misses everything staged —
+  including a file the coder created and `git add`ed, the commonest case of
+  all) and each untracked one with `git diff --no-index -- /dev/null <path>`,
+  concatenated. Both are strictly read-only: the route never runs `git add
+  -N` or otherwise writes the index. A repo with no commits (no `HEAD`) falls
+  back to `diff --cached` + `diff` rather than erroring.
+
+- **Serving, security** (`handler.ts`): `git diff` is *scriptable by the repo
+  it runs in* — `diff.external`, and a `diff.<driver>.textconv` reachable
+  through `.gitattributes`, both execute arbitrary commands — and the coder
+  whose turn this route diffs can write `.git/config` in that very workspace.
+  So the git child is (1) spawned with `clearEnv: true` and an explicit
+  `PATH`/`HOME` + `GIT_TERMINAL_PROMPT=0` + safe-directory `GIT_CONFIG_*` set
+  mirroring `subprocess.rs`'s `run_git`, so nothing that does run sees
+  `ANTHROPIC_API_KEY`/`DATABASE_URL`/the DEK/Discord/Logto secrets;
+  (2) invoked with `--no-ext-diff --no-textconv` and `-c diff.external=
+  -c core.attributesFile=/dev/null` (the `-c` pairs must precede the
+  subcommand), disabling both the invocation and the configured drivers; and
+  (3) time-bounded (`GIT_DIFF_TIMEOUT_MS`), so a slow driver cannot wedge the
+  request — a timeout is reported as the "unavailable" shape below.
 
 ### Three response shapes
 
@@ -1286,10 +1329,14 @@ it work:
 2. **A diff** — `{ paths, diff: "<git diff output>" }`, once a workspace
    resolved and `git diff` exited 0.
 3. **Unavailable** — `{ paths, error: "<reason>" }`, with **no `diff` key at
-   all**. Covers both "no workspace resolver configured/it declined" (`error:
-   "no workspace available to diff against"`) and "resolved workspace but
-   `git diff` itself failed" (`error` carries `git`'s own stderr, e.g. "not a
-   git repository"). The missing `diff` key is deliberate — fix round 1 on
+   all**. Covers "no workspace resolver configured/it declined" (`error:
+   "no workspace available to diff against"`), "resolved workspace but
+   git itself failed or timed out" (`error` carries `git`'s own stderr, e.g.
+   "not a git repository"), and "none of the recorded paths are tracked by,
+   or present in, the resolved workspace" — almost always a workspace/root
+   mismatch, and reported here rather than as an empty diff for the same
+   reason as the rest. (A path that is merely *missing* while others are
+   diffable just contributes nothing.) The missing `diff` key is deliberate — fix round 1 on
    this task found that collapsing "couldn't look" into the same `diff: ""`
    as "nothing to show" tells a caller a turn was clean when the truth is the
    route couldn't tell. `paths` is always present, even on the error shapes,
@@ -1316,15 +1363,17 @@ it work:
   instead hands the resolver what the STORE can tell it — the session's own
   `created_by` as `userId`, and the DIFF'D TURN's own `metadata` (not
   necessarily the latest turn's, and not this request's, which carries none).
-  Absent, or resolving to `undefined` (e.g. devx's own `resolveWorkspace`
-  returns `undefined` when a turn has no `userId`/`appId` to key a workspace
-  on), the route reports response shape 3 rather than falling back to the
+  Absent, or resolving to `undefined` (devx's own `resolveWorkspace` returns
+  `undefined` only when a turn has no `userId` at all — a turn with a `userId`
+  but no `appId` gets the user-scoped `ensureWorkspace(userId)`, mirroring
+  `lib/context.ts`'s `toDevxCtx`, which is the workspace that turn's file
+  tools actually wrote into), the route reports response shape 3 rather than falling back to the
   worker's own process `cwd` — an early version of this route did exactly
   that (shelled to `git diff` in the worker's own cwd) and was corrected once
   it was clear that a wrong-but-successful diff is worse than an honest
   "unavailable". devx wires this today (`plugins/devx/agent/agent.ts`'s
-  `resolveWorkspace`, reusing the same `ensureAppWorkspace` path
-  `buildInstructions`/attachment materialization already use) — `claw` and
+  `resolveWorkspace`, reusing the same `ensureAppWorkspace`/`ensureWorkspace`
+  paths `buildInstructions`/attachment materialization already use) — `claw` and
   `d2esupport` do not configure it, so the route always reports unavailable
   for them regardless of what a turn touched.
 

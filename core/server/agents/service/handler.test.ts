@@ -4791,3 +4791,139 @@ Deno.test("a turn belonging to another session is refused", async () => {
   const res = await handler(new Request(`${BASE}/eve/v1/session/s-other/turn/t-1/diff`));
   assertEquals(res.status, 404);
 });
+
+// --- turn-diff route (final review: external drivers, creations, staging) ---
+
+async function exists(p: string): Promise<boolean> {
+  try {
+    await Deno.lstat(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// The reported vulnerability: `git diff` runs `diff.external` for every
+// changed file, and .git/config is writable by the very coder whose turn this
+// route diffs — so honouring it would execute an attacker-authored command
+// (with the worker's full environment, before the env fix).
+Deno.test("a repo-local diff.external is NOT executed by the turn-diff route", async () => {
+  const dir = await gitFixture();
+  const marker = `${dir}/pwned`;
+  try {
+    const script = `${dir}/ext.sh`;
+    await Deno.writeTextFile(script, `#!/bin/sh\ntouch ${marker}\nexit 0\n`);
+    await Deno.chmod(script, 0o755);
+    await new Deno.Command("git", { args: ["config", "diff.external", script], cwd: dir }).output();
+
+    const { handler, db } = await makeHandler({
+      mutate: (a) => { a.config.resolveWorkspace = () => Promise.resolve(dir); },
+    });
+    db.turns.push({
+      id: "t-ext", session_id: "s-1", seq: 1, status: "completed", error: null,
+      message: null, startedAt: new Date(), touched_paths: ["a.txt"],
+    });
+    const res = await handler(new Request(`${BASE}/eve/v1/session/s-1/turn/t-ext/diff`));
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assertEquals(await exists(marker), false, "diff.external must never have run");
+    // And the real diff is still produced — an external driver would have
+    // replaced it with the driver's own (here, empty) output.
+    assert(body.diff.includes("-one") && body.diff.includes("+two"));
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("a turn that created a new file reports a diff naming it, not an empty diff", async () => {
+  const dir = await gitFixture();
+  try {
+    await Deno.writeTextFile(`${dir}/created.txt`, "brand new\n");
+    const { handler, db } = await makeHandler({
+      mutate: (a) => { a.config.resolveWorkspace = () => Promise.resolve(dir); },
+    });
+    db.turns.push({
+      id: "t-new", session_id: "s-1", seq: 1, status: "completed", error: null,
+      message: null, startedAt: new Date(), touched_paths: ["created.txt"],
+    });
+    const res = await handler(new Request(`${BASE}/eve/v1/session/s-1/turn/t-new/diff`));
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assert(body.diff.includes("created.txt"), `expected the new file's name in ${body.diff}`);
+    assert(body.diff.includes("+brand new"));
+    assertEquals(body.error, undefined);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// The route must stay read-only, so it has to READ an index that is already
+// staged — bare `git diff` shows nothing for a staged change.
+Deno.test("a staged change is included in the turn diff, and the index is left alone", async () => {
+  const dir = await gitFixture();
+  try {
+    await new Deno.Command("git", { args: ["add", "a.txt"], cwd: dir }).output();
+    const { handler, db } = await makeHandler({
+      mutate: (a) => { a.config.resolveWorkspace = () => Promise.resolve(dir); },
+    });
+    db.turns.push({
+      id: "t-staged", session_id: "s-1", seq: 1, status: "completed", error: null,
+      message: null, startedAt: new Date(), touched_paths: ["a.txt"],
+    });
+    const res = await handler(new Request(`${BASE}/eve/v1/session/s-1/turn/t-staged/diff`));
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assert(body.diff.includes("+two"), `expected the staged change in ${body.diff}`);
+    const staged = await new Deno.Command("git", { args: ["diff", "--cached", "--name-only"], cwd: dir }).output();
+    assertEquals(new TextDecoder().decode(staged.stdout).trim(), "a.txt", "the route must not have touched the index");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// A repo with no commits has no HEAD to diff against; that must degrade, not
+// fail the whole diff.
+Deno.test("a repo with no commits still diffs a staged creation", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const git = (...args: string[]) => new Deno.Command("git", { args, cwd: dir }).output();
+    await git("init", "-q");
+    await Deno.writeTextFile(`${dir}/first.txt`, "hello\n");
+    await git("add", "first.txt");
+    const { handler, db } = await makeHandler({
+      mutate: (a) => { a.config.resolveWorkspace = () => Promise.resolve(dir); },
+    });
+    db.turns.push({
+      id: "t-nohead", session_id: "s-1", seq: 1, status: "completed", error: null,
+      message: null, startedAt: new Date(), touched_paths: ["first.txt"],
+    });
+    const res = await handler(new Request(`${BASE}/eve/v1/session/s-1/turn/t-nohead/diff`));
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assert(body.diff?.includes("+hello"), `expected the staged creation in ${JSON.stringify(body)}`);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// "We looked and found nothing" vs "we could not look": a path the workspace
+// has never heard of is the second, and must not read as a clean turn.
+Deno.test("paths in neither the index nor the workspace report unavailable, not an empty diff", async () => {
+  const dir = await gitFixture();
+  try {
+    const { handler, db } = await makeHandler({
+      mutate: (a) => { a.config.resolveWorkspace = () => Promise.resolve(dir); },
+    });
+    db.turns.push({
+      id: "t-gone", session_id: "s-1", seq: 1, status: "completed", error: null,
+      message: null, startedAt: new Date(), touched_paths: ["never/here.ts"],
+    });
+    const res = await handler(new Request(`${BASE}/eve/v1/session/s-1/turn/t-gone/diff`));
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assertEquals(body.diff, undefined);
+    assert(typeof body.error === "string" && body.error.length > 0);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});

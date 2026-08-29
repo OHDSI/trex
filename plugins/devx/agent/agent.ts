@@ -13,7 +13,7 @@ import type { HookCtx, ModelSpec } from "eve";
 import type { ToolDef } from "../../../core/server/agents/eve-shim/types.ts";
 import { readMetadata } from "./lib/context.ts";
 import { loadSkillsForPrompt } from "../functions/skills/resolver.ts";
-import { ensureAppWorkspace, readProjectRules } from "../functions/tools/workspace.ts";
+import { ensureAppWorkspace, ensureWorkspace, readProjectRules } from "../functions/tools/workspace.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey } from "../functions/provider_key.ts";
 import { assertProviderSupported } from "../functions/provider_support.ts";
 import { classifyCoderError } from "../functions/error_codes.ts";
@@ -438,15 +438,17 @@ export async function buildInstructions(base: string, ctx: HookCtx): Promise<str
 // Task 11 (fix round 2): core's turn-diff route has no live request, so it
 // hands over what it read from the store instead of a HookCtx — the
 // session's created_by as userId, and the DIFF'D TURN's own metadata (not
-// necessarily the latest turn's). Same ensureAppWorkspace path buildInstructions
-// uses above; no appId or no userId is a legitimate "can't resolve", not an
-// error — the diff route reports it as unavailable rather than guessing.
+// necessarily the latest turn's). Mirrors lib/context.ts's toDevxCtx exactly
+// — appId ? ensureAppWorkspace : ensureWorkspace — because that is where the
+// turn's file tools actually wrote; returning undefined for a user-scoped
+// turn reported "no workspace" for one that plainly has one. Only a turn with
+// no userId at all is genuinely unresolvable.
 export async function resolveWorkspace(
   info: { sessionId: string; turnId: string; userId?: string; metadata?: unknown },
 ): Promise<string | undefined> {
   const { appId } = readMetadata(info.metadata);
-  if (!info.userId || !appId) return undefined;
-  return await ensureAppWorkspace(info.userId, appId);
+  if (!info.userId) return undefined;
+  return appId ? await ensureAppWorkspace(info.userId, appId) : await ensureWorkspace(info.userId);
 }
 
 // devx.hooks (PreToolUse/PostToolUse/Stop) rows are loaded ONCE PER TURN, not
@@ -546,18 +548,23 @@ export async function onTurnEnd(turn: { text: string; finishReason: string }, ct
 async function runUserPromptSubmitHooks(
   hooks: Hook[],
   prompt: string,
-  spillPath?: string,
+  workspacePath?: string,
   emit?: (name: string, data: unknown) => void,
 ): Promise<string[]> {
   const outputs: string[] = [];
+  // Dot-prefixed so an over-cap spill doesn't litter the project root the
+  // model browses. No workspace means no reachable place to point to --
+  // capHookOutput truncates instead in that case.
+  const spillPath = workspacePath ? `${workspacePath}/.devx/hook-spill` : undefined;
   for (const hook of hooks) {
     try {
       const text = await runContextHook(hook, { event: "UserPromptSubmit", prompt }, (info) => emit?.("hook.failed", info));
       // Cap and spill BEFORE this hook's output reaches the prompt — an
       // unbounded hook can undo the compaction that just ran to make room.
-      // spillPath (when given) is workspace-scoped, so the pointer this
-      // produces is one the coding model's Read tool can actually open.
-      if (text) outputs.push((await capHookOutput(text, { spillPath })).text);
+      // spillRoot is the workspace, so the pointer comes out workspace-
+      // RELATIVE: the reader is the coding model, whose Read goes through
+      // safeJoin, which rejects every absolute path.
+      if (text) outputs.push((await capHookOutput(text, { spillPath, spillRoot: workspacePath })).text);
     } catch (err) {
       console.error("[devx] UserPromptSubmit hook failed:", err instanceof Error ? err.message : err);
       emit?.("hook.failed", { event: "UserPromptSubmit", error: err instanceof Error ? err.message : String(err) });
@@ -592,11 +599,8 @@ export async function buildUserMessage(base: string, ctx: HookCtx): Promise<stri
   // header comment for why that ordering is load-bearing.
   const hooks = await turnHooks(ctx, "UserPromptSubmit");
   if (hooks.length > 0) {
-    // Dot-prefixed so an over-cap spill doesn't litter the project root the
-    // model browses. No appId (no workspace) means no reachable place to
-    // point to -- capHookOutput truncates instead in that case.
-    const spillPath = ctx.userId && appId ? `${await ensureAppWorkspace(ctx.userId, appId)}/.devx/hook-spill` : undefined;
-    const injected = await runUserPromptSubmitHooks(hooks, base, spillPath, ctx.emit);
+    const workspacePath = ctx.userId && appId ? await ensureAppWorkspace(ctx.userId, appId) : undefined;
+    const injected = await runUserPromptSubmitHooks(hooks, base, workspacePath, ctx.emit);
     for (const text of injected) message += `\n${text}`;
   }
   return message;
