@@ -208,7 +208,11 @@ async function runHookCommand(
 
   // Run command via DuckDB devx-ext, piping input JSON via echo
   const inputJson = JSON.stringify(input).replace(/'/g, "'\\''");
-  const envVars = `DEVX_HOOK_EVENT='${escapeSql(String(input.event || ""))}' DEVX_TOOL_NAME='${escapeSql(String(input.toolName || ""))}'`;
+  let envVars = `DEVX_HOOK_EVENT='${escapeSql(String(input.event || ""))}' DEVX_TOOL_NAME='${escapeSql(String(input.toolName || ""))}'`;
+  // PreCompact/PostCompact's onCompact info -- present only on those events'
+  // input, so a script can act on context pressure without parsing stdin.
+  if (typeof input.messageCount === "number") envVars += ` DEVX_MESSAGE_COUNT='${input.messageCount}'`;
+  if (typeof input.tokenEstimate === "number") envVars += ` DEVX_TOKEN_ESTIMATE='${input.tokenEstimate}'`;
   const shellCmd = `echo '${escapeSql(inputJson)}' | ${envVars} ${hook.command} 2>&1`;
   const timeoutSec = Math.ceil((hook.timeout_ms || 10000) / 1000);
   const fullCmd = `timeout ${timeoutSec} bash -c '${escapeSql(shellCmd)}'`;

@@ -616,30 +616,36 @@ live-tail by event shape.
     authoring-facing hook-event union (`functions/skills/types.ts`,
     `src/lib/types.ts`; core itself has no `HookEvent` type, only named
     fields on `AgentConfig`) — gained `UserPromptSubmit`, `PreCompact` and
-    `PostCompact`. Only `UserPromptSubmit` is wired to anything: it fires
-    from `buildUserMessage` (H4, divergence 17's per-turn counterpart to
-    `buildInstructions`), routed through `hooks.ts`'s `runContextHook` — the
-    SAME allowlisted devx-ext bridge (`trex_devx_run_command`) PreToolUse/
-    PostToolUse/Stop use, so its command gets the child-process environment
-    allowlist above and the same `ALLOWED_EXECUTABLES` gate; a direct
-    `Deno.Command` from the worker would bypass both. `PreCompact`/
-    `PostCompact` exist ONLY as devx `HookEvent` values today — no devx
-    dispatcher fires them, and grepping the plugin for either name turns up
-    only their two type declarations. The actual pre/post-compaction hook is
-    a **separate, core-level mechanism**: `AgentConfig.onCompact` (a plain
-    field, not routed through devx's hook-row system at all), called from
+    `PostCompact`. `UserPromptSubmit` fires from `buildUserMessage` (H4,
+    divergence 17's per-turn counterpart to `buildInstructions`), routed
+    through `hooks.ts`'s `runContextHook` — the SAME allowlisted devx-ext
+    bridge (`trex_devx_run_command`) PreToolUse/PostToolUse/Stop use, so its
+    command gets the child-process environment allowlist above and the same
+    `ALLOWED_EXECUTABLES` gate; a direct `Deno.Command` from the worker would
+    bypass both. The actual pre/post-compaction hook is a **separate,
+    core-level mechanism**: `AgentConfig.onCompact` (a plain field, not
+    routed through devx's hook-row system by itself), called from
     `context/compact.ts`'s `maybeCompact` — `pre` before the summary input is
-    assembled, `post` after it (or after the drop fallback) lands. `pre`'s
-    return value, if a string, is spliced verbatim onto the end of the
-    summarizer's transcript (appended, not prepended, so the transcript's own
-    chronology stays intact) — the hook's whole point is preserving something
-    the summarizer would otherwise drop. Same posture as this divergence's
-    other hooks (`runOnCompact`): a missing `hookCtx` warns and skips rather
-    than throwing (compaction must not be blocked by a wiring bug), and a
-    throwing `onCompact` is caught and treated as "nothing preserved" — never
+    assembled, `post` after it (or after the drop fallback) lands. devx's
+    `agent.ts` now implements `onCompact` (H5) and bridges the two worlds: it
+    loads that turn's `devx.hooks` rows for the `PreCompact`/`PostCompact`
+    events (via the same `turnHooks` per-turn cache H2-H4 use) and runs each
+    through `runContextHook`, so a user-authored `PreCompact`/`PostCompact`
+    row now gets the identical allowlisted-bridge/env-filter treatment as
+    every other devx hook event — no direct spawn. `pre`'s combined,
+    `capHookOutput`-capped output, if any, is returned as the string
+    `onCompact` hands back to `maybeCompact`, which splices it verbatim onto
+    the end of the summarizer's transcript (appended, not prepended, so the
+    transcript's own chronology stays intact) — the hook's whole point is
+    preserving something the summarizer would otherwise drop. `post` runs its
+    rows for side effects only and always returns nothing — compaction has
+    already happened by the time it fires, so there is nothing left for it to
+    influence. Same posture as this divergence's other hooks: a missing
+    `hookCtx` warns and skips rather than throwing (compaction must not be
+    blocked by a wiring bug), and a throwing or failing hook is caught,
+    reported via `hook.failed`, and treated as "nothing preserved" — never
     aborts compaction, which exists to relieve context pressure and cannot
-    itself become blockable. **No agent currently sets `onCompact`** — same
-    "capability with no production user" as the escalate override above.
+    itself become blockable.
 
     **The injected-context cap** (`context/hook-output.ts`'s `capHookOutput`,
     `DEFAULT_MAX_HOOK_OUTPUT_TOKENS = 2500`) exists because an unbounded hook

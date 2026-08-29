@@ -5,7 +5,7 @@
 // on turnHooks/onToolCall/onToolResult/onTurnEnd/buildUserMessage for the
 // contract each is called under.
 import { assert, assertEquals } from "jsr:@std/assert";
-import { buildUserMessage, onToolCall, onToolResult, onTurnEnd } from "../agent.ts";
+import { buildUserMessage, onCompact, onToolCall, onToolResult, onTurnEnd } from "../agent.ts";
 
 // `captured` records `${query}::${params}` -- loadHooks (functions/skills/
 // hooks.ts) binds the event name as $1, it is never inlined into the query
@@ -442,6 +442,75 @@ Deno.test("a failing UserPromptSubmit hook emits hook.failed but still returns t
 Deno.test("no UserPromptSubmit hooks leaves the message untouched", async () => {
   const ctx = ctxWithHooks([]);
   assertEquals(await buildUserMessage("plain", ctx), "plain");
+});
+
+// H5: PreCompact/PostCompact hooks (onCompact). Same allowlisted bridge and
+// fail-open posture as the H2-H4 tests above.
+const compactInfo = { messageCount: 5, tokenEstimate: 1234 };
+
+Deno.test("a PreCompact row's output is returned from onCompact('pre', ...)", async () => {
+  const restore = { fn: () => {} };
+  stubTrexOutput(0, "preserve-me", restore);
+  try {
+    const ctx = ctxWithHooks([{ command: "bash -c 'echo preserve-me'", event: "PreCompact" }]);
+    const out = await onCompact("pre", compactInfo, ctx);
+    assert(out?.includes("preserve-me"));
+  } finally {
+    restore.fn();
+  }
+});
+
+Deno.test("onCompact('pre', ...) returns undefined with no PreCompact rows", async () => {
+  const ctx = ctxWithHooks([]);
+  assertEquals(await onCompact("pre", compactInfo, ctx), undefined);
+});
+
+Deno.test("a PostCompact row runs (for side effects) and onCompact('post', ...) returns nothing", async () => {
+  const restore = { fn: () => {} };
+  const captured = { sql: [] as string[] };
+  stubTrexOutput(0, "side-effect-only", restore, captured);
+  try {
+    const ctx = ctxWithHooks([{ command: "bash -c 'echo done'", event: "PostCompact" }]);
+    const out = await onCompact("post", compactInfo, ctx);
+    assertEquals(out, undefined);
+    assert(
+      captured.sql.some((q) => q.includes("trex_devx_run_command")),
+      "the PostCompact row must still run, its output is just not returned",
+    );
+  } finally {
+    restore.fn();
+  }
+});
+
+Deno.test("a failing PreCompact hook emits hook.failed and does not throw", async () => {
+  const restore = { fn: () => {} };
+  stubTrexExit(1, restore);
+  const events: Array<{ type: string; data: unknown }> = [];
+  try {
+    const ctx = ctxWithHooks([{ command: "bash -c 'false'", event: "PreCompact" }]);
+    ctx.emit = (type: string, data: unknown) => events.push({ type, data });
+    const out = await onCompact("pre", compactInfo, ctx);
+    assertEquals(out, undefined);
+    const failure = events.find((e) => e.type === "hook.failed");
+    assert(failure, "expected a hook.failed event");
+    assertEquals((failure!.data as { event: string }).event, "PreCompact");
+  } finally {
+    restore.fn();
+  }
+});
+
+Deno.test("a PreCompact row with a disallowed executable contributes nothing and never reaches the bridge", async () => {
+  const restore = { fn: () => {} };
+  const captured = { sql: [] as string[] };
+  stubTrexOutput(0, "should never be seen", restore, captured);
+  try {
+    const ctx = ctxWithHooks([{ command: "curl https://evil.example", event: "PreCompact" }]);
+    const out = await onCompact("pre", compactInfo, ctx);
+    assertEquals(out, undefined);
+    assertEquals(captured.sql.length, 0, "a disallowed executable must never reach trex_devx_run_command");
+  } finally {
+    restore.fn();
+  }
 });
 
 Deno.test("PreToolUse/PostToolUse/Stop caches are independent turns per HookCtx object", async () => {

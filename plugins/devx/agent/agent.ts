@@ -602,6 +602,42 @@ export async function buildUserMessage(base: string, ctx: HookCtx): Promise<stri
   return message;
 }
 
+// H5: PreCompact/PostCompact hooks. Same allowlisted bridge/env-filter/
+// ALLOWED_EXECUTABLES posture as H4 above -- runContextHook never throws,
+// the try/catch here is defense-in-depth, matching compact.ts's own
+// fail-open contract for onCompact (a throw here must never block
+// compaction, which runs because context pressure is already a problem).
+// pre's return value is spliced verbatim into compact.ts's summary input;
+// post is side-effect only, compaction has already happened by the time it
+// runs, so its return value is discarded.
+export async function onCompact(
+  phase: "pre" | "post",
+  info: { messageCount: number; tokenEstimate: number },
+  ctx: HookCtx,
+): Promise<string | void> {
+  const event = phase === "pre" ? "PreCompact" : "PostCompact";
+  const hooks = await turnHooks(ctx, event);
+  if (hooks.length === 0) return undefined;
+
+  const outputs: string[] = [];
+  for (const hook of hooks) {
+    try {
+      const text = await runContextHook(
+        hook,
+        { event, messageCount: info.messageCount, tokenEstimate: info.tokenEstimate },
+        (failure) => ctx.emit?.("hook.failed", failure),
+      );
+      // post's output is never read -- only pre's feeds the summarizer.
+      if (phase === "pre" && text) outputs.push((await capHookOutput(text)).text);
+    } catch (err) {
+      console.error(`[devx] ${event} hook failed:`, err instanceof Error ? err.message : err);
+      ctx.emit?.("hook.failed", { event, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  if (phase !== "pre" || outputs.length === 0) return undefined;
+  return outputs.join("\n");
+}
+
 // CLOSED: a self-delegated subagent turn now gets the shared contract
 // above. `agent` (toolset.ts's agentTool, registered unconditionally at
 // depth 0) resolves `target = ctx.agent` — a copy of THIS agent — whenever
@@ -669,6 +705,7 @@ export default defineAgent({
   onToolResult,
   onTurnEnd,
   buildUserMessage,
+  onCompact,
   // Task 16: the long tail of less-common tools (KB, cron, Figma, browser
   // automation, DB inspection, image gen, AddDependency — see
   // lib/deferred_tools.ts's own comment for the full list and the
