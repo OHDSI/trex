@@ -20,7 +20,7 @@ import type { HookCtx, QueryFn } from "../eve-shim/types.ts";
 import { createChannelHandler, type ChannelSessionStarted } from "../channels/layer.ts";
 import type { ChannelStore } from "../channels/store.ts";
 import { resolveApprovalDecision } from "./approvals.ts";
-import { parseEscalateList, type EscalateList } from "./approval-policy.ts";
+import { parseEscalateList, resolveEscalateFor, type EscalateList } from "./approval-policy.ts";
 import { handleOAuthCallback, handleOAuthStart } from "../connections/oauth/routes.ts";
 import type { OAuthProviderDeps } from "../connections/provider.ts";
 import { looksLikeGateResponse, matchGateText } from "../channels/gate-text.ts";
@@ -54,21 +54,14 @@ export interface OAuthBrokerDeps extends OAuthProviderDeps {
 const ENV_ESCALATE_LIST = parseEscalateList(Deno.env.get("AGENTS_ESCALATE_TOOLS"));
 
 // Agent override beats the deployment env, which beats the built-in default.
-// A malformed agent value falls back rather than escalating nothing — an
-// agent typo must never silently remove the floor.
+// Thin wrapper: the actual precedence logic (resolveEscalateFor) is pure and
+// unit-tested directly against a caller-supplied deployment list, since
+// ENV_ESCALATE_LIST is a module const a test cannot vary.
 function resolveEscalate(deps: Deps): EscalateList {
-  const authored = deps.agent.config.escalate;
-  let list = ENV_ESCALATE_LIST;
-  if (typeof authored === "string" && authored.trim() !== "") {
-    const parsed = parseEscalateList(authored);
-    if (parsed.length > 0) list = parsed;
-    else {
-      console.warn(
-        `agents: agent '${deps.agentName}' has an unparseable escalate list — using the deployment list`,
-      );
-    }
-  }
-  deps.captureEscalate?.(list);
+  const list = resolveEscalateFor(deps.agent.config.escalate, ENV_ESCALATE_LIST, deps.agentName);
+  // Copy so a capturing test hook can only observe, never mutate, the list a
+  // real caller goes on to use.
+  deps.captureEscalate?.([...list]);
   return list;
 }
 

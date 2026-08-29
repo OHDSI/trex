@@ -72,6 +72,29 @@ export function parseEscalateList(raw: string | undefined): EscalateList {
   return parsed;
 }
 
+// Returns null when `raw` yields no usable entries, so a caller can tell
+// "unparseable" from "deliberately the default". parseEscalateList cannot:
+// it substitutes the default internally.
+export function parseEscalateStrict(raw: string): EscalateList | null {
+  const parsed = parseEntries(raw);
+  return parsed.length > 0 ? parsed : null;
+}
+
+// Pure so a test can supply a deployment list that differs from the built-in
+// default; a module-level env-derived const is not something a test can vary.
+export function resolveEscalateFor(
+  authored: string | undefined,
+  deployment: EscalateList,
+  agentName?: string,
+): EscalateList {
+  if (typeof authored === "string" && authored.trim() !== "") {
+    const parsed = parseEscalateStrict(authored);
+    if (parsed) return parsed;
+    console.warn(`agents: agent '${agentName ?? "?"}' has an unparseable escalate list — using the deployment list`);
+  }
+  return deployment;
+}
+
 // Returns the matched tier, or null. A boolean cannot express the hard/soft
 // distinction, so callers that only need "matched at all" test `!== null`.
 export function matchEscalate(

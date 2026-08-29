@@ -1,9 +1,11 @@
 import { assertEquals } from "jsr:@std/assert";
 import {
+  DEFAULT_ESCALATE_LIST,
   type EscalateList,
   matchEscalate,
   parseEscalateList,
   resolveApproval,
+  resolveEscalateFor,
 } from "./approval-policy.ts";
 
 const NONE: EscalateList = [];
@@ -178,4 +180,32 @@ Deno.test("the default list keeps sudo hard and rm soft", () => {
   assertEquals(matchEscalate(list, "GitPush", ""), "hard");
   assertEquals(matchEscalate(list, "DeleteFile", ""), "soft");
   assertEquals(matchEscalate(list, "Bash", "npm"), null);
+});
+
+// A list unequal to DEFAULT_ESCALATE_LIST, so a test can tell "fell back to
+// the deployment list" apart from "fell back to the built-in default" —
+// parseEscalateList's internal substitution makes those indistinguishable
+// with any list that happens to equal the default.
+const DISTINCTIVE_LIST: EscalateList = [{ tool: "OnlyThis", scopes: [], tier: "hard" }];
+
+Deno.test("resolveEscalateFor: a valid agent override wins over the deployment list", () => {
+  assertEquals(resolveEscalateFor("!GitPush", DISTINCTIVE_LIST), [
+    { tool: "GitPush", scopes: [], tier: "hard" },
+  ]);
+});
+
+Deno.test("resolveEscalateFor: an unparseable agent override falls back to the DEPLOYMENT list, not the built-in default", () => {
+  assertEquals(resolveEscalateFor(",,:,", DISTINCTIVE_LIST), DISTINCTIVE_LIST);
+});
+
+Deno.test("resolveEscalateFor: undefined, empty, and whitespace-only all defer to the deployment list", () => {
+  assertEquals(resolveEscalateFor(undefined, DISTINCTIVE_LIST), DISTINCTIVE_LIST);
+  assertEquals(resolveEscalateFor("", DISTINCTIVE_LIST), DISTINCTIVE_LIST);
+  assertEquals(resolveEscalateFor("   ", DISTINCTIVE_LIST), DISTINCTIVE_LIST);
+});
+
+// Sanity check that DISTINCTIVE_LIST earns its name: if it ever collided with
+// the built-in default, the tests above would pass for the wrong reason.
+Deno.test("DISTINCTIVE_LIST is not the built-in default", () => {
+  assertEquals(DEFAULT_ESCALATE_LIST.some((e) => e.tool === "OnlyThis"), false);
 });

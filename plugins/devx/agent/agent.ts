@@ -589,10 +589,6 @@ export default defineAgent({
   onToolResult,
   onTurnEnd,
   buildUserMessage,
-  // The coder runs rm/curl/chmod as ordinary build steps; blocking those blocks
-  // every unattended coding task. sudo/ssh/scp/dd and the deploy-scoped tools
-  // still require a human.
-  escalate: "!GitPush,!ExecuteSQL,!CronCreate,!CronDelete,!RestartApp,!Bash:sudo|dd|ssh|scp",
   // Task 16: the long tail of less-common tools (KB, cron, Figma, browser
   // automation, DB inspection, image gen, AddDependency — see
   // lib/deferred_tools.ts's own comment for the full list and the
