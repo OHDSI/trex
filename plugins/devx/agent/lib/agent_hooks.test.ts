@@ -17,6 +17,9 @@ function ctxWithHooks(rows: any[], captured?: { queries: string[] }) {
     userId: "u1",
     metadata: { chatId: "c1", appId: "a1" },
     env: () => undefined,
+    // Real HookCtx.emit is fire-and-forget/optional (eve-shim/types.ts) --
+    // default no-op, tests reassign this to capture `hook.failed` events.
+    emit: () => {},
     sql: (q: string, params?: unknown[]) => {
       captured?.queries.push(`${q}::${JSON.stringify(params ?? [])}`);
       if (q.includes("devx.hooks")) return Promise.resolve({ rows });
@@ -123,6 +126,24 @@ Deno.test("a non-zero-but-not-2 exit code command hook still approves (not a blo
   }
 });
 
+// A row whose hook_type is neither "command" nor "prompt" (the schema-only
+// two values, functions/skills/types.ts's HookType) is malformed, not a
+// legitimate no-op -- hooks.ts's executeHook now denies rather than
+// silently approving it. PreToolUse is the trust-boundary event: this MUST
+// still deny, additively reported via hook.failed, not softened into
+// approval by adding the event.
+Deno.test("a failing PreToolUse hook still denies the call and emits hook.failed", async () => {
+  const events: Array<{ type: string; data: unknown }> = [];
+  const ctx = ctxWithHooks([{ command: "exit 1", event: "PreToolUse" }]);
+  ctx.emit = (type: string, data: unknown) => events.push({ type, data });
+  const decision = await onToolCall({ name: "Write", input: {} }, ctx);
+  assertEquals(decision.allow, false);
+  const failure = events.find((e) => e.type === "hook.failed");
+  assert(failure, "expected a hook.failed event");
+  assertEquals((failure!.data as { event: string }).event, "PreToolUse");
+  assert(typeof (failure!.data as { error: string }).error === "string");
+});
+
 Deno.test("a non-matching PreToolUse row leaves the call alone", async () => {
   const ctx = ctxWithHooks([
     { id: "h1", event: "PreToolUse", matcher: "Write", hook_type: "command", command: "exit 2", enabled: true, sort_order: 0 },
@@ -148,6 +169,37 @@ Deno.test("PostToolUse hooks pass a non-string tool result through untouched", a
   const structured = { ok: true, files: ["a.ts"] };
   const out = await onToolResult({ name: "Read", input: {}, result: structured }, ctx);
   assert(out === structured, "a non-string result must pass through unmodified, not be JSON-stringified");
+});
+
+// PostToolUse is advisory, not a trust boundary -- the same malformed-row
+// failure that denies a PreToolUse call must instead just be reported here,
+// leaving the tool result (and the turn) untouched.
+Deno.test("a failing PostToolUse hook emits hook.failed and does not abort", async () => {
+  const events: Array<{ type: string; data: unknown }> = [];
+  const ctx = ctxWithHooks([{ command: "exit 1", event: "PostToolUse" }]);
+  ctx.emit = (type: string, data: unknown) => events.push({ type, data });
+  const out = await onToolResult({ name: "Write", input: {}, result: "ok" }, ctx);
+  assertEquals(out, "ok");
+  assert(events.some((e) => e.type === "hook.failed"));
+});
+
+// Pins the negative: an exit-2 blocking hook is a deliberate, working
+// verdict, not a failure -- it must not ALSO fire hook.failed.
+Deno.test("an exit-2 command hook does not emit hook.failed (it's a deliberate deny, not a failure)", async () => {
+  const restore = { fn: () => {} };
+  stubTrexExit(2, restore);
+  const events: Array<{ type: string; data: unknown }> = [];
+  try {
+    const ctx = ctxWithHooks([
+      { id: "h1", event: "PreToolUse", matcher: "Bash", hook_type: "command", command: "bash -c block", enabled: true, sort_order: 0 },
+    ]);
+    ctx.emit = (type: string, data: unknown) => events.push({ type, data });
+    const decision = await onToolCall({ name: "Bash", input: { command: "rm -rf /" } }, ctx);
+    assertEquals(decision.allow, false);
+    assert(!events.some((e) => e.type === "hook.failed"));
+  } finally {
+    restore.fn();
+  }
 });
 
 Deno.test("onToolResult is a no-op when no PostToolUse hooks are configured", async () => {
@@ -248,6 +300,25 @@ Deno.test("onTurnEnd is a no-op when the turn carries no chatId", async () => {
   await onTurnEnd({ text: "done", finishReason: "stop" }, ctx);
 });
 
+Deno.test("a failing Stop hook emits hook.failed", async () => {
+  const events: Array<{ type: string; data: unknown }> = [];
+  const ctx = {
+    sessionId: "s1",
+    userId: "u1",
+    metadata: { chatId: "c1" },
+    env: () => undefined,
+    emit: (type: string, data: unknown) => events.push({ type, data }),
+    sql: (q: string) => {
+      if (q.includes("devx.hooks")) return Promise.resolve({ rows: [{ command: "exit 1", event: "Stop" }] });
+      return Promise.resolve({ rows: [] });
+    },
+  } as any;
+  await onTurnEnd({ text: "done", finishReason: "stop" }, ctx);
+  const failure = events.find((e) => e.type === "hook.failed");
+  assert(failure, "expected a hook.failed event");
+  assertEquals((failure!.data as { event: string }).event, "Stop");
+});
+
 // Stubs the same globalThis.Trex seam as stubTrexExit, simulating the
 // devx-ext bridge's response to trex_devx_run_command, and (optionally)
 // records every SQL string sent through it -- letting a test prove a hook
@@ -343,6 +414,23 @@ Deno.test("attachment materialization still runs when a UserPromptSubmit hook ex
     if (prevWorkspaceDir === undefined) Deno.env.delete("DEVX_WORKSPACE_DIR");
     else Deno.env.set("DEVX_WORKSPACE_DIR", prevWorkspaceDir);
     await Deno.remove(workspacePath, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("a failing UserPromptSubmit hook emits hook.failed but still returns the base message", async () => {
+  const restore = { fn: () => {} };
+  stubTrexExit(1, restore);
+  const events: Array<{ type: string; data: unknown }> = [];
+  try {
+    const ctx = ctxWithHooks([{ command: "bash -c 'false'", event: "UserPromptSubmit" }]);
+    ctx.emit = (type: string, data: unknown) => events.push({ type, data });
+    const out = await buildUserMessage("do the thing", ctx);
+    assertEquals(out, "do the thing");
+    const failure = events.find((e) => e.type === "hook.failed");
+    assert(failure, "expected a hook.failed event");
+    assertEquals((failure!.data as { event: string }).event, "UserPromptSubmit");
+  } finally {
+    restore.fn();
   }
 });
 

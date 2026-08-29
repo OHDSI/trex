@@ -38,6 +38,12 @@ export interface HookCtx {
   principal?: { principalType: string; principalId: string };
   env: (k: string) => string | undefined;
   sql: QueryFn;
+  // Same shape/posture as ToolContext.emit below (fire-and-forget, safe to
+  // omit): lets a lifecycle hook (onToolCall/onToolResult/onTurnEnd/
+  // buildUserMessage) surface something onto the session stream, e.g.
+  // devx's onFailure->"hook.failed". handler.ts's buildHookCtx wires this to
+  // the same publish()->tool.event channel toolEmit uses.
+  emit?: (name: string, data: unknown) => void;
 }
 
 // A resolved model + credentials, returned by `resolveModel` in place of an

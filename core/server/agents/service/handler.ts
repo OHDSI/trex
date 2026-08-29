@@ -176,6 +176,9 @@ function buildHookCtx(deps: Deps, sessionId: string, metadata: unknown, bearerTo
     principal: userId ? { principalType: "user", principalId: userId } : undefined,
     env: deps.env ?? defaultEnv,
     sql: deps.sql ?? unconfiguredSql,
+    // Same `tool.event` wire shape as toolEmit (see runner.ts) so a hook
+    // failure rides the same channel a subscriber already listens on.
+    emit: (name, data) => publish(sessionId, { type: "tool.event", data: { name, payload: data } }),
   };
 }
 

@@ -476,7 +476,14 @@ export async function onToolCall(
 ): Promise<{ allow: boolean; input?: unknown; reason?: string }> {
   const hooks = await turnHooks(ctx, "PreToolUse");
   if (hooks.length === 0) return { allow: true };
-  const result = await runPreToolHooks(call.name, (call.input ?? {}) as Record<string, unknown>, hooks);
+  // onFailure is additive only -- runPreToolHooks' own deny/fail-closed
+  // decision below is unchanged by whether ctx.emit exists.
+  const result = await runPreToolHooks(
+    call.name,
+    (call.input ?? {}) as Record<string, unknown>,
+    hooks,
+    (info) => ctx.emit?.("hook.failed", info),
+  );
   if (!result.allow) return { allow: false, reason: "blocked by a PreToolUse hook" };
   return result.modifiedArgs ? { allow: true, input: result.modifiedArgs } : { allow: true };
 }
@@ -493,7 +500,13 @@ export async function onToolResult(
   // than being JSON-stringified into a shape the model has never seen from
   // that tool before.
   if (typeof call.result !== "string") return call.result;
-  return await runPostToolHooks(call.name, (call.input ?? {}) as Record<string, unknown>, call.result, hooks);
+  return await runPostToolHooks(
+    call.name,
+    (call.input ?? {}) as Record<string, unknown>,
+    call.result,
+    hooks,
+    (info) => ctx.emit?.("hook.failed", info),
+  );
 }
 
 // H3: Stop hooks. Only reached after a successful turn (core never calls
@@ -503,7 +516,7 @@ export async function onTurnEnd(turn: { text: string; finishReason: string }, ct
   const hooks = await turnHooks(ctx, "Stop");
   const { chatId } = readMetadata(ctx.metadata);
   if (!chatId) return;
-  await runStopHooks(hooks, { chatId, content: turn.text });
+  await runStopHooks(hooks, { chatId, content: turn.text }, (info) => ctx.emit?.("hook.failed", info));
 }
 
 // H4: UserPromptSubmit hooks inject extra context ahead of the model seeing
@@ -516,11 +529,16 @@ export async function onTurnEnd(turn: { text: string; finishReason: string }, ct
 // onToolCall's fail-closed contract: a disallowed/failing/timed-out hook
 // just contributes no text, it never fails the turn (runContextHook itself
 // never throws, the try/catch here is defense-in-depth).
-async function runUserPromptSubmitHooks(hooks: Hook[], prompt: string, spillPath?: string): Promise<string[]> {
+async function runUserPromptSubmitHooks(
+  hooks: Hook[],
+  prompt: string,
+  spillPath?: string,
+  emit?: (name: string, data: unknown) => void,
+): Promise<string[]> {
   const outputs: string[] = [];
   for (const hook of hooks) {
     try {
-      const text = await runContextHook(hook, { event: "UserPromptSubmit", prompt });
+      const text = await runContextHook(hook, { event: "UserPromptSubmit", prompt }, (info) => emit?.("hook.failed", info));
       // Cap and spill BEFORE this hook's output reaches the prompt — an
       // unbounded hook can undo the compaction that just ran to make room.
       // spillPath (when given) is workspace-scoped, so the pointer this
@@ -528,6 +546,7 @@ async function runUserPromptSubmitHooks(hooks: Hook[], prompt: string, spillPath
       if (text) outputs.push((await capHookOutput(text, { spillPath })).text);
     } catch (err) {
       console.error("[devx] UserPromptSubmit hook failed:", err instanceof Error ? err.message : err);
+      emit?.("hook.failed", { event: "UserPromptSubmit", error: err instanceof Error ? err.message : String(err) });
     }
   }
   return outputs;
@@ -563,7 +582,7 @@ export async function buildUserMessage(base: string, ctx: HookCtx): Promise<stri
     // model browses. No appId (no workspace) means no reachable place to
     // point to -- capHookOutput truncates instead in that case.
     const spillPath = ctx.userId && appId ? `${await ensureAppWorkspace(ctx.userId, appId)}/.devx/hook-spill` : undefined;
-    const injected = await runUserPromptSubmitHooks(hooks, base, spillPath);
+    const injected = await runUserPromptSubmitHooks(hooks, base, spillPath, ctx.emit);
     for (const text of injected) message += `\n${text}`;
   }
   return message;
