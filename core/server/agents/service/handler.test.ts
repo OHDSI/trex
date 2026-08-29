@@ -15,6 +15,7 @@ import { formatDiscordMessageContextBlock, formatMessagesBlock, type HistoryMess
 import { DEFAULT_CONTEXT_CONFIG } from "./context/budget.ts";
 import { ABANDONED_CHILD_ERROR } from "./sweep.ts";
 import { abortChildTurn, liveChildTurnAborts } from "./aborts.ts";
+import type { EscalateList } from "./approval-policy.ts";
 
 // Builds the message the way adapters/discord.ts:807's sendToThread actually
 // composes it for a thread-turn (`[contextBlock, attachmentsBlock, text]`
@@ -465,6 +466,8 @@ async function makeHandler(
     // Lets a test observe or override individual store calls without
     // reimplementing createStore — used to assert a round trip is NOT made.
     wrapStore?: (s: ReturnType<typeof createStore>) => ReturnType<typeof createStore>;
+    // Test seam for the per-turn resolved escalate list — see Deps.captureEscalate.
+    captureEscalate?: (list: EscalateList) => void;
   } = {},
 ) {
   const agent = await loadAgent(TOY);
@@ -475,6 +478,7 @@ async function makeHandler(
     agent, store: opts.wrapStore ? opts.wrapStore(base) : base,
     plugin: "toy-agent", agentName: "toy",
     basePath: "/plugins/trex/toy", model: opts.model ?? model("hello from toy"),
+    captureEscalate: opts.captureEscalate,
   });
   return { handler, db };
 }
@@ -4627,4 +4631,36 @@ Deno.test("a spawned child inherits its parent's unattended flag", async () => {
   const childEntries = [...db.sessions.entries()].filter(([, s]) => s.parent_session_id !== undefined);
   assertEquals(childEntries.length, 1, "expected exactly one child session created by the agent tool");
   assertEquals(childEntries[0][1].unattended, true, "the child must inherit the parent's unattended flag");
+});
+
+// --- per-agent escalate override ---------------------------------------
+
+Deno.test("an agent override replaces the deployment list for that agent", async () => {
+  const seen: EscalateList[] = [];
+  const { handler } = await makeHandler({
+    mutate: (a) => { a.config.escalate = "!GitPush"; },
+    wrapStore: (s) => s,
+    captureEscalate: (e: EscalateList) => seen.push(e),
+  });
+  await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi" }),
+  }));
+  await until(() => seen.length > 0);
+  assertEquals(seen[0], [{ tool: "GitPush", scopes: [], tier: "hard" }]);
+});
+
+// An agent typo must not silently remove the floor.
+Deno.test("an unparseable agent override falls back to the deployment list", async () => {
+  const seen: EscalateList[] = [];
+  const { handler } = await makeHandler({
+    mutate: (a) => { a.config.escalate = ",,:,"; },
+    captureEscalate: (e: EscalateList) => seen.push(e),
+  });
+  await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi" }),
+  }));
+  await until(() => seen.length > 0);
+  assertEquals(seen[0].length > 1, true, "must be the default list, not empty");
 });

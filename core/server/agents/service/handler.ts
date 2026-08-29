@@ -20,7 +20,7 @@ import type { HookCtx, QueryFn } from "../eve-shim/types.ts";
 import { createChannelHandler, type ChannelSessionStarted } from "../channels/layer.ts";
 import type { ChannelStore } from "../channels/store.ts";
 import { resolveApprovalDecision } from "./approvals.ts";
-import { parseEscalateList } from "./approval-policy.ts";
+import { parseEscalateList, type EscalateList } from "./approval-policy.ts";
 import { handleOAuthCallback, handleOAuthStart } from "../connections/oauth/routes.ts";
 import type { OAuthProviderDeps } from "../connections/provider.ts";
 import { looksLikeGateResponse, matchGateText } from "../channels/gate-text.ts";
@@ -46,11 +46,31 @@ export interface OAuthBrokerDeps extends OAuthProviderDeps {
   basePath: string;
 }
 
-// The escalate floor is deployment configuration, so it is read ONCE here, at
-// module load — not per turn and not per tool call. handler.ts is the only
-// reader of AGENTS_ESCALATE_TOOLS; toolset.ts/approvals.ts take the parsed
-// list as a parameter and fall back to the same default when nobody passes one.
-const ESCALATE_LIST = parseEscalateList(Deno.env.get("AGENTS_ESCALATE_TOOLS"));
+// The deployment escalate floor is deployment configuration, so it is read
+// ONCE here, at module load — not per turn and not per tool call. handler.ts
+// is the only reader of AGENTS_ESCALATE_TOOLS; toolset.ts/approvals.ts take
+// the parsed list as a parameter and fall back to the same default when
+// nobody passes one.
+const ENV_ESCALATE_LIST = parseEscalateList(Deno.env.get("AGENTS_ESCALATE_TOOLS"));
+
+// Agent override beats the deployment env, which beats the built-in default.
+// A malformed agent value falls back rather than escalating nothing — an
+// agent typo must never silently remove the floor.
+function resolveEscalate(deps: Deps): EscalateList {
+  const authored = deps.agent.config.escalate;
+  let list = ENV_ESCALATE_LIST;
+  if (typeof authored === "string" && authored.trim() !== "") {
+    const parsed = parseEscalateList(authored);
+    if (parsed.length > 0) list = parsed;
+    else {
+      console.warn(
+        `agents: agent '${deps.agentName}' has an unparseable escalate list — using the deployment list`,
+      );
+    }
+  }
+  deps.captureEscalate?.(list);
+  return list;
+}
 
 // Exported so index.ts can build a real, wake-capable DeliverDeps (via
 // buildDeliverDeps, below) for the periodic sweep — see that function's own
@@ -86,6 +106,9 @@ export interface Deps {
   // runTurn's own retrySleep, the turn loop. Undefined in production, where
   // retry.ts uses a real timer.
   retrySleep?: ModelRetryOpts["sleep"];
+  // Test seam: called with the per-turn resolved escalate list every time
+  // resolveEscalate runs. Undefined in production.
+  captureEscalate?: (list: EscalateList) => void;
 }
 
 const defaultEnv: EnvFn = (k) => Deno.env.get(k);
@@ -367,7 +390,7 @@ function startTurn(
             deps.store,
             sessionId,
             { requestId: pending.requestId, decision: "deny" },
-            { plugin: deps.plugin, agentName: deps.agentName, userId, escalate: ESCALATE_LIST },
+            { plugin: deps.plugin, agentName: deps.agentName, userId, escalate: resolveEscalate(deps) },
           );
           deniedPendingGate = resolved.ok;
         }
@@ -818,7 +841,7 @@ function startTurn(
         depth,
         unattended,
         channelBound,
-        escalate: ESCALATE_LIST,
+        escalate: resolveEscalate(deps),
         retrySleep: deps.retrySleep,
         ...(abort ? { abortSignal: abort.signal } : {}),
       });
@@ -1451,7 +1474,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
             store,
             sessionId,
             { requestId: r.requestId, decision: r.optionId },
-            { plugin: deps.plugin, agentName: deps.agentName, userId: createdBy, escalate: ESCALATE_LIST },
+            { plugin: deps.plugin, agentName: deps.agentName, userId: createdBy, escalate: resolveEscalate(deps) },
           );
           // Only a refused decision 400s (same rule as the /approval route).
           // Any other failure must fall through, or an `{inputResponses,
@@ -1491,7 +1514,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
         store,
         sessionId,
         { requestId: body.requestId, decision: body.decision },
-        { plugin: deps.plugin, agentName: deps.agentName, userId: createdBy, escalate: ESCALATE_LIST },
+        { plugin: deps.plugin, agentName: deps.agentName, userId: createdBy, escalate: resolveEscalate(deps) },
       );
       if (ok) return json({ resolved: true });
       // A refused decision is a bad request, not a missing resource. Every
@@ -1655,7 +1678,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
         // the value just written, and a /chat session is never channel-bound.
         unattended,
         channelBound: false,
-        escalate: ESCALATE_LIST,
+        escalate: resolveEscalate(deps),
       });
       // Switched from the bare `result.toUIMessageStreamResponse()` to
       // createUIMessageStream + writer.merge so ToolContext.emit has somewhere

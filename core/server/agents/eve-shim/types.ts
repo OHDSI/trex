@@ -79,6 +79,10 @@ export interface AgentConfig {
   // guard already covers that case just because the field already exists.
   reasoningEffort?: string;
   skills?: string[];
+  // Replaces the deployment escalate list for THIS agent only, same grammar as
+  // AGENTS_ESCALATE_TOOLS. Deployment-authored code, never request input — a
+  // request-supplied list would let a caller disarm its own floor.
+  escalate?: string;
   // Additive hooks (eve ignores unknown defineAgent fields): called on EVERY
   // turn/chat request, never cached at agent-load time. A thrown/rejected
   // hook must fail the request rather than silently falling back to
