@@ -152,6 +152,42 @@ const ALLOWED_EXECUTABLES = new Set([
 
 import { duckdb, escapeSql } from "../duckdb.ts";
 
+// Shared shell composition + devx-ext bridge dispatch for executeCommandHook
+// AND runContextHook below -- both must run through trex_devx_run_command so
+// the child gets Task 4's filtered_env (ANTHROPIC_API_KEY/DATABASE_URL/the
+// DEK/Discord/Logto secrets never reach a hook's command), and both refuse
+// anything outside ALLOWED_EXECUTABLES before ever reaching the bridge.
+// Returns undefined for a missing command or a disallowed executable
+// (already logged in both cases); otherwise the parsed exit code + trimmed
+// stdout, for the caller to interpret.
+async function runHookCommand(
+  hook: Hook,
+  input: Record<string, unknown>,
+): Promise<{ exitCode: number; output: string } | undefined> {
+  if (!hook.command) return undefined;
+
+  // Parse command to validate executable against allow-list
+  const parts = hook.command.split(/\s+/);
+  const executable = parts[0];
+  if (!ALLOWED_EXECUTABLES.has(executable)) {
+    console.error(`[hooks] Blocked disallowed executable: ${executable}`);
+    return undefined;
+  }
+
+  // Run command via DuckDB devx-ext, piping input JSON via echo
+  const inputJson = JSON.stringify(input).replace(/'/g, "'\\''");
+  const envVars = `DEVX_HOOK_EVENT='${escapeSql(String(input.event || ""))}' DEVX_TOOL_NAME='${escapeSql(String(input.toolName || ""))}'`;
+  const shellCmd = `echo '${escapeSql(inputJson)}' | ${envVars} ${hook.command} 2>&1`;
+  const timeoutSec = Math.ceil((hook.timeout_ms || 10000) / 1000);
+  const fullCmd = `timeout ${timeoutSec} bash -c '${escapeSql(shellCmd)}'`;
+
+  const raw = await duckdb(
+    `SELECT * FROM trex_devx_run_command('/tmp', '${escapeSql(fullCmd)}')`
+  );
+  const result = JSON.parse(raw);
+  return { exitCode: result.exit_code ?? 0, output: (result.output || "").trim() };
+}
+
 async function executeCommandHook(
   hook: Hook,
   input: Record<string, unknown>,
@@ -159,26 +195,9 @@ async function executeCommandHook(
   if (!hook.command) return { action: "approve" };
 
   try {
-    // Parse command to validate executable against allow-list
-    const parts = hook.command.split(/\s+/);
-    const executable = parts[0];
-
-    if (!ALLOWED_EXECUTABLES.has(executable)) {
-      console.error(`[hooks] Blocked disallowed executable: ${executable}`);
-      return { action: "approve" };
-    }
-
-    // Run command via DuckDB devx-ext, piping input JSON via echo
-    const inputJson = JSON.stringify(input).replace(/'/g, "'\\''");
-    const envVars = `DEVX_HOOK_EVENT='${escapeSql(String(input.event || ""))}' DEVX_TOOL_NAME='${escapeSql(String(input.toolName || ""))}'`;
-    const shellCmd = `echo '${escapeSql(inputJson)}' | ${envVars} ${hook.command} 2>&1`;
-    const timeoutSec = Math.ceil((hook.timeout_ms || 10000) / 1000);
-    const fullCmd = `timeout ${timeoutSec} bash -c '${escapeSql(shellCmd)}'`;
-
-    const raw = await duckdb(
-      `SELECT * FROM trex_devx_run_command('/tmp', '${escapeSql(fullCmd)}')`
-    );
-    const result = JSON.parse(raw);
+    const ran = await runHookCommand(hook, input);
+    if (!ran) return { action: "approve" };
+    const { exitCode, output } = ran;
 
     // Claude Code hook convention: exit code 2 means "block" -- a
     // conventional blocking hook script relies on this, so it must produce
@@ -186,21 +205,20 @@ async function executeCommandHook(
     // downstream handling, one deny shape). Any OTHER non-zero exit code is
     // treated as a non-blocking hook failure (bad script, transient error,
     // etc.) and still approves -- only exit 2 is a deliberate block signal.
-    if (result.exit_code === 2) {
-      console.error(`[hooks] Command hook blocked the call (exit 2):`, result.output);
+    if (exitCode === 2) {
+      console.error(`[hooks] Command hook blocked the call (exit 2):`, output);
       return { action: "deny" };
     }
-    if (result.exit_code && result.exit_code !== 0) {
-      console.error(`[hooks] Command hook failed:`, result.output);
+    if (exitCode && exitCode !== 0) {
+      console.error(`[hooks] Command hook failed:`, output);
       return { action: "approve" }; // non-blocking failure -- log and continue
     }
 
-    const stdout = (result.output || "").trim();
-    if (!stdout) return { action: "approve" };
+    if (!output) return { action: "approve" };
 
     // Parse JSON response from hook
     try {
-      const parsed = JSON.parse(stdout);
+      const parsed = JSON.parse(output);
       return {
         action: parsed.action || "approve",
         modifications: parsed.modifications,
@@ -208,12 +226,40 @@ async function executeCommandHook(
       };
     } catch {
       // If output is just "deny" or "approve" as plain text
-      if (stdout === "deny") return { action: "deny" };
+      if (output === "deny") return { action: "deny" };
       return { action: "approve" };
     }
   } catch (err) {
     console.error(`[hooks] Command hook execution error:`, err);
     return { action: "approve" };
+  }
+}
+
+/**
+ * Run a context-injection hook (UserPromptSubmit) through the same
+ * allowlisted devx-ext bridge as executeCommandHook, so it inherits Task 4's
+ * filtered_env and the ALLOWED_EXECUTABLES gate -- a direct Deno.Command from
+ * the worker would bypass both. Unlike executeCommandHook there is no
+ * allow/deny verdict, only stdout to contribute, so a disallowed executable,
+ * a non-zero exit, or empty output all resolve to "" (no injection). Fails
+ * open: this is not a trust-boundary control, a broken hook here must never
+ * fail the turn.
+ */
+export async function runContextHook(
+  hook: Hook,
+  input: Record<string, unknown>,
+): Promise<string> {
+  try {
+    const ran = await runHookCommand(hook, input);
+    if (!ran) return "";
+    if (ran.exitCode !== 0) {
+      console.error(`[hooks] Context hook failed:`, ran.output);
+      return "";
+    }
+    return ran.output;
+  } catch (err) {
+    console.error(`[hooks] Context hook execution error:`, err);
+    return "";
   }
 }
 

@@ -18,7 +18,7 @@ import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readP
 import { assertProviderSupported } from "../functions/provider_support.ts";
 import { classifyCoderError } from "../functions/error_codes.ts";
 import { buildCoderContext, DEFAULT_MAX_STEPS } from "../functions/coder_context.ts";
-import { loadHooks, runPostToolHooks, runPreToolHooks, runStopHooks } from "../functions/skills/hooks.ts";
+import { loadHooks, runContextHook, runPostToolHooks, runPreToolHooks, runStopHooks } from "../functions/skills/hooks.ts";
 import type { Hook } from "../functions/skills/types.ts";
 import { materializeAttachments, renderAttachmentBlock } from "../functions/attachments.ts";
 import { DEFERRED_TOOLS } from "./lib/deferred_tools.ts";
@@ -504,42 +504,21 @@ export async function onTurnEnd(turn: { text: string; finishReason: string }, ct
 }
 
 // H4: UserPromptSubmit hooks inject extra context ahead of the model seeing
-// the prompt. Unlike PreToolUse/PostToolUse/Stop (routed through hooks.ts's
-// duckdb/Trex-runtime bridge, built to work around the classic edge-function
-// sandbox's lack of Deno.Command), this loop's own worker process can spawn
-// a subprocess directly -- there is no allow/deny verdict to parse here,
-// only stdout text to append, so it bypasses that bridge entirely. Not a
-// trust-boundary control: a failing/slow/missing hook degrades to no
-// injection rather than failing the turn (contrast onToolCall's fail-closed
-// contract above).
+// the prompt. Routed through hooks.ts's runContextHook -- the same
+// allowlisted devx-ext bridge (trex_devx_run_command) PreToolUse/PostToolUse/
+// Stop use -- so the hook's command gets Task 4's filtered_env (no
+// ANTHROPIC_API_KEY/DATABASE_URL/DEK/Discord/Logto secrets reaching the
+// child) and the same ALLOWED_EXECUTABLES gate; a direct Deno.Command from
+// this worker would bypass both. Not a trust-boundary control like
+// onToolCall's fail-closed contract: a disallowed/failing/timed-out hook
+// just contributes no text, it never fails the turn (runContextHook itself
+// never throws, the try/catch here is defense-in-depth).
 async function runUserPromptSubmitHooks(hooks: Hook[], prompt: string): Promise<string[]> {
   const outputs: string[] = [];
   for (const hook of hooks) {
-    if (!hook.command) continue;
     try {
-      const child = new Deno.Command("bash", {
-        args: ["-c", hook.command],
-        stdin: "null",
-        stdout: "piped",
-        stderr: "null",
-        env: { DEVX_HOOK_EVENT: "UserPromptSubmit", DEVX_USER_PROMPT: prompt },
-      }).spawn();
-      // hook.timeout_ms guards against a hook that hangs forever -- kill()
-      // on a process that already exited just throws, hence the swallow.
-      const timer = setTimeout(() => {
-        try {
-          child.kill();
-        } catch {
-          /* already exited */
-        }
-      }, hook.timeout_ms || 10000);
-      try {
-        const { stdout } = await child.output();
-        const text = new TextDecoder().decode(stdout).trim();
-        if (text) outputs.push(text);
-      } finally {
-        clearTimeout(timer);
-      }
+      const text = await runContextHook(hook, { event: "UserPromptSubmit", prompt });
+      if (text) outputs.push(text);
     } catch (err) {
       console.error("[devx] UserPromptSubmit hook failed:", err instanceof Error ? err.message : err);
     }

