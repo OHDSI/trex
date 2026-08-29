@@ -20,6 +20,7 @@ import type { HookCtx, QueryFn } from "../eve-shim/types.ts";
 import { createChannelHandler, type ChannelSessionStarted } from "../channels/layer.ts";
 import type { ChannelStore } from "../channels/store.ts";
 import { resolveApprovalDecision } from "./approvals.ts";
+import { parseEscalateList } from "./approval-policy.ts";
 import { handleOAuthCallback, handleOAuthStart } from "../connections/oauth/routes.ts";
 import type { OAuthProviderDeps } from "../connections/provider.ts";
 import { looksLikeGateResponse, matchGateText } from "../channels/gate-text.ts";
@@ -44,6 +45,12 @@ type EnvFn = (k: string) => string | undefined;
 export interface OAuthBrokerDeps extends OAuthProviderDeps {
   basePath: string;
 }
+
+// The escalate floor is deployment configuration, so it is read ONCE here, at
+// module load — not per turn and not per tool call. handler.ts is the only
+// reader of AGENTS_ESCALATE_TOOLS; toolset.ts/approvals.ts take the parsed
+// list as a parameter and fall back to the same default when nobody passes one.
+const ESCALATE_LIST = parseEscalateList(Deno.env.get("AGENTS_ESCALATE_TOOLS"));
 
 // Exported so index.ts can build a real, wake-capable DeliverDeps (via
 // buildDeliverDeps, below) for the periodic sweep — see that function's own
@@ -360,7 +367,7 @@ function startTurn(
             deps.store,
             sessionId,
             { requestId: pending.requestId, decision: "deny" },
-            { plugin: deps.plugin, agentName: deps.agentName, userId },
+            { plugin: deps.plugin, agentName: deps.agentName, userId, escalate: ESCALATE_LIST },
           );
           deniedPendingGate = resolved.ok;
         }
@@ -781,6 +788,12 @@ function startTurn(
     // to (addTurn, above) moments ago, and guessing 0 on a blip could let a
     // child spawn a grandchild for the one turn it guessed wrong.
     const depth = (await deps.store.isChildSession(sessionId)) ? 1 : 0;
+    // Once per turn, not per tool call: buildSdkTools spreads this ctx into
+    // every authored tool, and a per-call query would issue one round trip per
+    // gated call. Channel binding forces unattended — a channel session has no
+    // browser consent UI to answer a gate.
+    const channelBound = await deps.store.isChannelBound(sessionId);
+    const unattended = channelBound || await deps.store.isUnattended(sessionId);
     // Built once, reused by both the success and failure delivery calls
     // below — see buildDeliverDeps' own comment.
     const deliverDeps = buildDeliverDeps(deps);
@@ -803,6 +816,9 @@ function startTurn(
         activatedTools,
         spawn,
         depth,
+        unattended,
+        channelBound,
+        escalate: ESCALATE_LIST,
         retrySleep: deps.retrySleep,
         ...(abort ? { abortSignal: abort.signal } : {}),
       });
@@ -1386,7 +1402,9 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
 
     if (req.method === "POST" && path === "/eve/v1/session") {
       const body = await req.json().catch(() => ({}));
-      const sessionId = await store.createSession(deps.plugin, deps.agentName, createdBy);
+      // Strict === true: a truthy string from a request body must never widen
+      // an approval gate (functions/autonomy.ts states the same rule).
+      const sessionId = await store.createSession(deps.plugin, deps.agentName, createdBy, body.unattended === true);
       if (body.message != null) {
         startTurn(deps, sessionId, body.message, { metadata: body.metadata, bearerToken, userId: createdBy });
       }
@@ -1429,12 +1447,17 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
           if ((r.optionId === "always" || r.optionId === "never") && !createdBy) {
             return json({ error: "always/never decisions require an authenticated user" }, 400);
           }
-          await resolveApprovalDecision(
+          const resolved = await resolveApprovalDecision(
             store,
             sessionId,
             { requestId: r.requestId, decision: r.optionId },
-            { plugin: deps.plugin, agentName: deps.agentName, userId: createdBy },
+            { plugin: deps.plugin, agentName: deps.agentName, userId: createdBy, escalate: ESCALATE_LIST },
           );
+          // Only a refused decision 400s (same rule as the /approval route).
+          // Any other failure must fall through, or an `{inputResponses,
+          // message}` body would lose its message every time the gate's turn
+          // has already finished.
+          if (resolved.refused && resolved.error) return json({ error: resolved.error }, 400);
         }
       }
       if (body.message != null) {
@@ -1464,13 +1487,18 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       if ((body.decision === "always" || body.decision === "never") && !createdBy) {
         return json({ error: "always/never decisions require an authenticated user" }, 400);
       }
-      const { ok } = await resolveApprovalDecision(
+      const { ok, error, refused } = await resolveApprovalDecision(
         store,
         sessionId,
         { requestId: body.requestId, decision: body.decision },
-        { plugin: deps.plugin, agentName: deps.agentName, userId: createdBy },
+        { plugin: deps.plugin, agentName: deps.agentName, userId: createdBy, escalate: ESCALATE_LIST },
       );
-      return ok ? json({ resolved: true }) : json({ error: "unknown or already-decided request" }, 404);
+      if (ok) return json({ resolved: true });
+      // A refused decision is a bad request, not a missing resource. Every
+      // other failure keeps today's 404 — the request really was unknown,
+      // already decided, or belongs to a turn that is no longer running.
+      if (refused && error) return json({ error }, 400);
+      return json({ error: "unknown or already-decided request" }, 404);
     }
 
     const stream = path.match(/^\/eve\/v1\/session\/([^/]+)\/stream$/);
@@ -1541,7 +1569,11 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // session per request for observability, but history comes from the client.
       const body = await req.json().catch(() => ({}));
       if (!Array.isArray(body.messages) || body.messages.length === 0) return json({ error: "messages[] required" }, 400);
-      const sessionId = await store.createSession(deps.plugin, deps.agentName, createdBy);
+      // Same strict === true as the session route: /chat is the SECOND live
+      // session-creation route, and a flag wired on only one of them leaves
+      // the other silently attended.
+      const unattended = body.unattended === true;
+      const sessionId = await store.createSession(deps.plugin, deps.agentName, createdBy, unattended);
       const turn = await store.addTurn(sessionId, body.messages.at(-1), body.metadata);
       // Same hooks as the session path: built fresh per request, never
       // cached — resolveModelForTurn/resolveInstructions apply
@@ -1618,6 +1650,12 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
         plugin: deps.plugin, agentName: deps.agentName,
         connectionOpts: connectionOptsFor(deps),
         spawn,
+        // Taken from the body rather than read back: this session was created
+        // by THIS request moments ago, so store.isUnattended could only echo
+        // the value just written, and a /chat session is never channel-bound.
+        unattended,
+        channelBound: false,
+        escalate: ESCALATE_LIST,
       });
       // Switched from the bare `result.toUIMessageStreamResponse()` to
       // createUIMessageStream + writer.merge so ToolContext.emit has somewhere

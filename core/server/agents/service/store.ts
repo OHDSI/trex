@@ -94,10 +94,10 @@ export const RUNNING_TURN_INDEX = "idx_agents_turns_one_running_per_session";
 
 export function createStore(query: QueryFn) {
   return {
-    async createSession(plugin: string, agent: string, createdBy?: string): Promise<string> {
+    async createSession(plugin: string, agent: string, createdBy?: string, unattended?: boolean): Promise<string> {
       const r = await query(
-        `INSERT INTO agents.sessions (plugin, agent, created_by) VALUES ($1, $2, $3) RETURNING id`,
-        [plugin, agent, createdBy ?? null],
+        `INSERT INTO agents.sessions (plugin, agent, created_by, unattended) VALUES ($1, $2, $3, $4) RETURNING id`,
+        [plugin, agent, createdBy ?? null, unattended === true],
       );
       return r.rows[0].id;
     },
@@ -254,10 +254,10 @@ export function createStore(query: QueryFn) {
         : null;
     },
 
-    async createApproval(sessionId: string, turnId: string, tool: string, input: unknown): Promise<string> {
+    async createApproval(sessionId: string, turnId: string, tool: string, input: unknown, scopeKey: string): Promise<string> {
       const r = await query(
-        `INSERT INTO agents.approvals (session_id, turn_id, tool, input) VALUES ($1, $2, $3, $4) RETURNING request_id`,
-        [sessionId, turnId, tool, input == null ? null : JSON.stringify(input)],
+        `INSERT INTO agents.approvals (session_id, turn_id, tool, input, scope_key) VALUES ($1, $2, $3, $4, $5) RETURNING request_id`,
+        [sessionId, turnId, tool, input == null ? null : JSON.stringify(input), scopeKey],
       );
       return r.rows[0].request_id;
     },
@@ -532,13 +532,14 @@ export function createStore(query: QueryFn) {
       }));
     },
 
-    // Looks up the tool an approval request was raised for, so a sticky
-    // (always/never) decision on that request can be recorded against the
-    // right (user, plugin, agent, tool) key — see handler.ts's approval
-    // routes, which call this only after resolveApproval succeeds.
-    async getApprovalTool(requestId: string): Promise<string | null> {
-      const r = await query(`SELECT tool FROM agents.approvals WHERE request_id = $1`, [requestId]);
-      return r.rows[0]?.tool ?? null;
+    // Looks up the tool + scope an approval request was raised for, so a sticky
+    // (always/never) decision can be recorded against the right
+    // (user, plugin, agent, tool, scope) key, and so the escalate check in
+    // approvals.ts can evaluate it before the decision is written.
+    async getApprovalScope(requestId: string): Promise<{ tool: string; scopeKey: string } | null> {
+      const r = await query(`SELECT tool, scope_key FROM agents.approvals WHERE request_id = $1`, [requestId]);
+      const row = r.rows[0];
+      return row ? { tool: row.tool, scopeKey: row.scope_key ?? "" } : null;
     },
 
     // Read-only: the current status of the turn an approval belongs to, or null
@@ -559,22 +560,25 @@ export function createStore(query: QueryFn) {
     // BEFORE creating a one-shot approval request — "always" executes
     // immediately, "never" denies immediately, and a miss (null) falls through
     // to the existing per-call approval flow.
-    async getToolConsent(userId: string, plugin: string, agent: string, tool: string): Promise<"always" | "never" | null> {
+    async getToolConsent(userId: string, plugin: string, agent: string, tool: string, scopeKey: string): Promise<"always" | "never" | null> {
       const r = await query(
-        `SELECT consent FROM agents.tool_consents WHERE user_id = $1 AND plugin = $2 AND agent = $3 AND tool = $4`,
-        [userId, plugin, agent, tool],
+        `SELECT consent FROM agents.tool_consents
+          WHERE user_id = $1 AND plugin = $2 AND agent = $3 AND tool = $4 AND scope_key = $5`,
+        [userId, plugin, agent, tool, scopeKey],
       );
       return (r.rows[0]?.consent as "always" | "never" | undefined) ?? null;
     },
 
-    // Upserts on the table's (user_id, plugin, agent, tool) primary key —
-    // a user changing their mind (always -> never or vice versa) replaces
-    // the prior verb rather than erroring or accumulating rows.
-    async setToolConsent(userId: string, plugin: string, agent: string, tool: string, consent: "always" | "never"): Promise<void> {
+    // Upserts on the table's (user_id, plugin, agent, tool, scope_key) primary
+    // key — a user changing their mind (always -> never or vice versa) on the
+    // SAME scope replaces the prior verb rather than erroring or accumulating
+    // rows.
+    async setToolConsent(userId: string, plugin: string, agent: string, tool: string, scopeKey: string, consent: "always" | "never"): Promise<void> {
       await query(
-        `INSERT INTO agents.tool_consents (user_id, plugin, agent, tool, consent) VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (user_id, plugin, agent, tool) DO UPDATE SET consent = EXCLUDED.consent`,
-        [userId, plugin, agent, tool, consent],
+        `INSERT INTO agents.tool_consents (user_id, plugin, agent, tool, scope_key, consent)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (user_id, plugin, agent, tool, scope_key) DO UPDATE SET consent = EXCLUDED.consent`,
+        [userId, plugin, agent, tool, scopeKey, consent],
       );
     },
 
@@ -627,6 +631,17 @@ export function createStore(query: QueryFn) {
       return r.rows[0]?.parent_session_id != null;
     },
 
+    // A missing session reads as attended — the flag must fail closed.
+    async isUnattended(sessionId: string): Promise<boolean> {
+      const r = await query(`SELECT unattended FROM agents.sessions WHERE id = $1`, [sessionId]);
+      return r.rows[0]?.unattended === true;
+    },
+
+    async isChannelBound(sessionId: string): Promise<boolean> {
+      const r = await query(`SELECT 1 FROM agents.channel_sessions WHERE session_id = $1 LIMIT 1`, [sessionId]);
+      return r.rows.length > 0;
+    },
+
     async createChildSession(opts: {
       plugin: string;
       agent: string;
@@ -636,11 +651,12 @@ export function createStore(query: QueryFn) {
       subagent: string | null;
       nickname: string;
       detached: boolean;
+      unattended?: boolean;
     }): Promise<string> {
       const r = await query(
         `INSERT INTO agents.sessions
-           (plugin, agent, created_by, parent_session_id, parent_turn_id, subagent, nickname, detached)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+           (plugin, agent, created_by, parent_session_id, parent_turn_id, subagent, nickname, detached, unattended)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
         [
           opts.plugin,
           opts.agent,
@@ -650,6 +666,7 @@ export function createStore(query: QueryFn) {
           opts.subagent,
           opts.nickname,
           opts.detached,
+          opts.unattended === true,
         ],
       );
       return r.rows[0].id as string;

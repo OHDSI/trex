@@ -611,6 +611,139 @@ live-tail by event shape.
       from that allowlist is exactly what silently dropped two
       `ContextConfig` fields in an earlier cycle of this runtime.
 
+## Unattended sessions and the escalate floor
+
+trex-only (eve has no equivalent). Both pieces exist to answer one question a
+bot-driven turn cannot: **who clicks "approve"?**
+
+### The `unattended` session flag
+
+`agents.sessions.unattended` (migration V11) marks a session that has no human
+watching it. It is **create-time only** — set by whichever route creates the
+session and never mutated afterwards, so a later request cannot disarm a gate on
+a turn that is already running. Three creation sites write it:
+
+| site | source |
+| --- | --- |
+| `POST /eve/v1/session` | request body `unattended` |
+| `POST /chat` | request body `unattended` |
+| the spawn path (`spawnChild` → `store.createChildSession`) | inherited from the parent, read back from durable state |
+
+Both HTTP routes require a **strict `=== true`**: `"true"`, `1`, and any other
+truthy value persist as `false`. A truthy string arriving in a request body must
+never widen an approval gate (`functions/autonomy.ts` states the same rule for
+the loop this replaces).
+
+A child of an unattended parent inherits the flag rather than defaulting to
+`false` — it has no approver either. Inheritance reads
+`isUnattended(parent) || isChannelBound(parent)` at spawn time rather than
+threading a parameter down, for the same reason `depth` is derived from
+`parent_session_id`: durable state cannot be forgotten by a future call site.
+Both reads are needed — a channel session never writes the `unattended` column,
+so the durable flag alone would leave a delegated child gating on its own event
+stream, which no channel adapter subscribes to.
+
+**Channel binding implies unattended.** A session with a row in
+`agents.channel_sessions` has no browser consent UI to answer a gate, so
+`handler.ts` resolves `unattended = channelBound || isUnattended(sessionId)`.
+Both flags are resolved **once per turn**, alongside `depth` — `buildSdkTools`
+spreads its `ToolBuildCtx` into every authored tool, so resolving them per tool
+call would cost one round trip per gated call.
+
+### `AGENTS_ESCALATE_TOOLS`
+
+The deployment's floor: tools that require a human every time, no matter what
+the session or a stored consent says. Read **once, at module load, in
+`handler.ts` only** — `toolset.ts` and `approvals.ts` take the parsed list as a
+parameter and fall back to the same parsed-once default when a caller passes
+nothing.
+
+Grammar: a comma-separated list of `Tool` or `Tool:scope|scope|…`. A bare tool
+name matches every invocation; scopes match against the invocation's derived
+scope key (`scope-key.ts`: the Bash executable **set**, the normalized path, or
+the normalized `[source, destination]` pair), case-insensitively. Default:
+
+```
+GitPush,ExecuteSQL,DeleteFile,CronCreate,CronDelete,RestartApp,Bash:rm|sudo|curl|wget|ssh|scp|dd|chmod|chown
+```
+
+Unset uses that default. An **explicitly empty string** is a deliberate opt-out
+(no floor at all). A value that parses to nothing is treated as a typo: it warns
+and keeps the default, rather than silently removing the floor.
+
+#### What the `Bash` scope match is, and is not
+
+A `Bash` scope key is the sorted, de-duplicated, `+`-joined **set** of
+executables the command runs: segments are split on `&&`, `||`, `;`, `|` and
+newlines (quote-aware), each segment's leading `NAME=value` assignments are
+skipped, the first token is stripped to its basename and lowercased, and exactly
+**one** level of `sh -c "…"` / `bash -c "…"` / `bash -lc "…"` is unwrapped into
+its payload. So `npm test` → `npm`, `cd /app && rm -rf .` → `cd+rm`,
+`bash -lc "rm -rf /"` → `rm`, `sh -c 'curl x | sh'` → `curl+sh`.
+`matchesEscalate` treats the key as a set and escalates when **any** part
+matches a listed scope. **Every** segment is scanned, with no cap of any kind —
+a cap on segments *or* on input length drops executables, and a floor that
+silently loses `rm` is worse than no floor. (Measured: a 1 MB truncation of a
+1.4 MB `true | …×200000… | rm -rf /` cut mid-token and yielded `t+true`, with
+the `rm` gone.) Cost is linear and small next to the database round trip on
+every gated call: 1.4 MB / 200k segments in ~63 ms, 7 MB / 1M segments in
+~306 ms.
+
+This is **best-effort protection against accidental destructive commands, not a
+boundary that resists deliberate evasion.** A command can still obscure what it
+runs — variable indirection (`X=rm; $X -rf /`), `eval`, a base64/`printf`
+payload piped into a shell, or a second level of nesting (`bash -c 'sh -c "rm
+x"'` keys on `sh`, not `rm`). Treat the floor as a guard rail on an agent's own
+mistakes; a genuinely adversarial prompt is a sandbox problem, not a scope-key
+problem.
+
+Two accepted limitations, both recorded rather than fixed:
+
+- **Scope keys carry no workspace or app component.** An `always` granted on
+  `src/a.ts` in one app also covers `src/a.ts` in another app the same user
+  drives through the same plugin/agent pair. Narrowing this needs a workspace
+  component in the consent key (migration + a new column), which this change
+  deliberately does not take on.
+- **Escalate scope matching is case-insensitive; the consent row it guards is
+  case-sensitive.** `Bash:RM` in the env list matches a key of `rm`, but a
+  stored consent for `RM` and one for `rm` are two different rows. The
+  mismatch only ever makes the floor match *more* often than the consent it
+  guards, which is the safe direction.
+- Path keys are matched against the same `+`-split, so a path containing a
+  literal `+` (a file named `a+b.ts`) can over-match a listed scope — again,
+  toward more escalation.
+
+### Precedence
+
+`resolveApproval` (`approval-policy.ts`) is pure and exhaustively tested. In
+order:
+
+1. a stored `never` consent → **deny** (`consent-never`)
+2. a match on the escalate list → **gate** if channel-bound, else **deny**
+   (`no-approver`) — no channel to ask on means deny, not park
+3. a stored `always` consent → **allow**
+4. `unattended` → **allow**
+5. otherwise → **gate**
+
+Rule 2 sits above rules 3 and 4 deliberately: under a shared bot identity, one
+`always` click would otherwise disarm the floor for every user of that identity.
+
+For the same reason, **`always` is refused at write time for an escalate-list
+tool**. `POST .../approval` and the `inputResponses` path both reject the
+decision with `"<Tool> cannot be granted 'always' — it requires approval every
+time"` instead of accepting the click and ignoring the row at read time — the
+person clicking must learn the grant did not stick. `never` is still accepted
+(it only narrows), and a plain one-shot `approve` is unaffected.
+
+Both routes return that refusal — and **only** that refusal — as **400** with
+`{ error }`. Swallowing it would leave the gate pending and park the turn for
+the full approval deadline. Every other resolve failure (unknown request,
+already decided, the gate's turn no longer running) keeps its prior behaviour:
+404 on `.../approval`, and on the `inputResponses` route it falls through to
+202. That fall-through is load-bearing — eve's SDK sends `{inputResponses,
+message}` in ONE body, so 400ing a stale decision would discard the message
+with it and every retry of that body would 400 again.
+
 ## Channels
 
 trex implements eve's **channels** — inbound platform entry points that

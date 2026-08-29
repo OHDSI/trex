@@ -524,7 +524,6 @@ function makeResumeLayer(
       const options = opts.singlePendingOptions?.[sessionId];
       return Promise.resolve(requestId ? { requestId, tool: "tool", ...(options ? { options } : {}) } : null);
     },
-    getApprovalTool: () => Promise.resolve(null),
     // Every fixture in this suite resolves an approval whose turn is (by
     // construction) genuinely running — the turn-status guard added in
     // resolveApprovalDecision (Task 2 of the never-stuck plan) should be a

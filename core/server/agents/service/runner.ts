@@ -13,6 +13,7 @@ import { buildSdkTools, resolveInstructions, resolveUserMessage } from "./toolse
 import { classifyModelError, type ModelRetryOpts, retryEmitter, streamWithModelRetry } from "./retry.ts";
 import type { ConnectionProviderOpts } from "../connections/provider.ts";
 import type { SpawnCapabilities } from "./spawn.ts";
+import type { EscalateList } from "./approval-policy.ts";
 
 interface RunTurnOpts {
   agent: LoadedAgent;
@@ -64,6 +65,13 @@ interface RunTurnOpts {
   // structurally unable to spawn its own children. Undefined defaults to 0
   // (top level) in buildSdkTools, same as before this field existed.
   depth?: number;
+  // Resolved ONCE per turn by handler.ts's startTurn and threaded straight
+  // through to buildSdkTools via the `{ ...opts }` spread below — see
+  // toolset.ts's ToolBuildCtx. All three default to the closed value when
+  // absent, so a caller that never wires them gates as it always did.
+  unattended?: boolean;
+  channelBound?: boolean;
+  escalate?: EscalateList;
   // Cancels this turn's model call and every step after it. Handed straight
   // to streamText, which is the only thing here that can be mid-flight for
   // minutes. Set by handler.ts's startTurn for a CHILD turn (depth 1), from

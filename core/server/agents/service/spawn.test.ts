@@ -18,6 +18,8 @@ function fakeDeps(over: Record<string, unknown> = {}) {
       store: {
         countChildren: () => Promise.resolve({ live: 0, total: 0 }),
         listChildren: () => Promise.resolve([]),
+        isUnattended: () => Promise.resolve(false),
+        isChannelBound: () => Promise.resolve(false),
         createChildSession: () => Promise.resolve("c-1"),
         getHistory: () => Promise.resolve([]),
         ...(over.store as object ?? {}),
@@ -75,6 +77,8 @@ Deno.test("spawnChild does not read the parent's history when fork_turns is \"no
     store: {
       countChildren: () => Promise.resolve({ live: 0, total: 0 }),
       listChildren: () => Promise.resolve([]),
+      isUnattended: () => Promise.resolve(false),
+      isChannelBound: () => Promise.resolve(false),
       createChildSession: () => Promise.resolve("c-1"),
       getHistory: () => {
         historyReads++;
@@ -99,6 +103,8 @@ Deno.test("spawnChild does not read the parent's history for a fork_turns value 
     store: {
       countChildren: () => Promise.resolve({ live: 0, total: 0 }),
       listChildren: () => Promise.resolve([]),
+      isUnattended: () => Promise.resolve(false),
+      isChannelBound: () => Promise.resolve(false),
       createChildSession: () => Promise.resolve("c-1"),
       getHistory: () => {
         historyReads++;
@@ -118,6 +124,8 @@ Deno.test("spawnChild DOES read the parent's history when fork_turns asks for tu
     store: {
       countChildren: () => Promise.resolve({ live: 0, total: 0 }),
       listChildren: () => Promise.resolve([]),
+      isUnattended: () => Promise.resolve(false),
+      isChannelBound: () => Promise.resolve(false),
       createChildSession: () => Promise.resolve("c-1"),
       getHistory: () => {
         historyReads++;
@@ -145,6 +153,8 @@ Deno.test("a nickname is not reused among live siblings", async () => {
     store: {
       countChildren: () => Promise.resolve({ live: 1, total: 1 }),
       listChildren: () => Promise.resolve([{ nickname: "Euclid" }]),
+      isUnattended: () => Promise.resolve(false),
+      isChannelBound: () => Promise.resolve(false),
       createChildSession: () => Promise.resolve("c-2"),
       getHistory: () => Promise.resolve([]),
     },
@@ -592,4 +602,28 @@ Deno.test("agent_stop returns the previous status without mutating an already-fi
   // from a silent no-op.
   assertEquals(await caps.stopChild("c-1"), "completed");
   assertEquals(updates.length, 0, "an already-finished child must not be mutated");
+});
+
+// A channel session never writes the unattended column — its unattended-ness
+// comes from the binding. Reading only the column left the child gating on a
+// stream no channel adapter subscribes to, parking until the deadline.
+Deno.test("a child of a channel-bound parent inherits unattended", async () => {
+  let unattended: unknown = undefined;
+  const { deps } = fakeDeps({
+    store: {
+      countChildren: () => Promise.resolve({ live: 0, total: 0 }),
+      listChildren: () => Promise.resolve([]),
+      getHistory: () => Promise.resolve([]),
+      isUnattended: () => Promise.resolve(false),
+      isChannelBound: () => Promise.resolve(true),
+      createChildSession: (o: { unattended?: boolean }) => {
+        unattended = o.unattended;
+        return Promise.resolve("c-1");
+      },
+    },
+  });
+  // deno-lint-ignore no-explicit-any
+  const caps = createSpawnCapabilities(deps as any);
+  await caps.spawnChild({ subagent: null, prompt: "x", forkTurns: "none", detached: true });
+  assertEquals(unattended, true);
 });
