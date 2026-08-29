@@ -383,3 +383,111 @@ Deno.test("an exhausted retry budget still falls back to dropping turns rather t
   assertEquals(out.compacted, true);
   assertEquals((out as { via: string }).via, "drop");
 });
+
+// --- onCompact hook ----------------------------------------------------
+// Task 6: an agent may observe compaction and preserve, via the pre phase's
+// return value, something the summarizer would otherwise drop.
+
+const fakeHookCtx = { sessionId: "s-1", env: () => undefined, sql: (_q: string) => Promise.resolve({ rows: [] }) };
+
+Deno.test("onCompact fires pre then post, in that order", async () => {
+  const phases: string[] = [];
+  const out = await maybeCompact({
+    turns: [turn(1, "a")],
+    msgs: [{ role: "user", content: "hi" }],
+    config: DEFAULT_CONTEXT_CONFIG, modelId: MODEL_ID,
+    observedInputTokens: 190_000,
+    callModel: () => Promise.resolve("summary text"),
+    onCompact: (phase) => {
+      phases.push(phase);
+      return Promise.resolve();
+    },
+    hookCtx: fakeHookCtx,
+  });
+  assertEquals(out.compacted, true);
+  assertEquals(phases, ["pre", "post"]);
+});
+
+Deno.test("a pre-hook return value is preserved verbatim into the summary input", async () => {
+  let seen = "";
+  await maybeCompact({
+    turns: [turn(1, "a")],
+    msgs: [{ role: "user", content: "hi" }],
+    config: DEFAULT_CONTEXT_CONFIG, modelId: MODEL_ID,
+    observedInputTokens: 190_000,
+    callModel: (req) => {
+      seen = JSON.stringify(req.messages);
+      return Promise.resolve("summary text");
+    },
+    onCompact: (phase) => Promise.resolve(phase === "pre" ? "KEEP: the deploy key is rotated" : undefined),
+    hookCtx: fakeHookCtx,
+  });
+  assert(seen.includes("KEEP: the deploy key is rotated"));
+});
+
+Deno.test("a throwing onCompact does not abort compaction", async () => {
+  const out = await maybeCompact({
+    turns: [turn(1, "a")],
+    msgs: [{ role: "user", content: "hi" }],
+    config: DEFAULT_CONTEXT_CONFIG, modelId: MODEL_ID,
+    observedInputTokens: 190_000,
+    callModel: () => Promise.resolve("summary text"),
+    onCompact: () => {
+      throw new Error("boom");
+    },
+    hookCtx: fakeHookCtx,
+  });
+  assertEquals(out.compacted, true);
+});
+
+// Mirrors runner.ts's onTurnEnd posture (runner.test.ts): a configured hook
+// with no request context to hand it warns and is skipped rather than either
+// throwing (blocking compaction) or silently no-op'ing (masking a caller bug).
+Deno.test("onCompact configured but no hookCtx warns and is skipped, without failing compaction", async () => {
+  let called = false;
+  const warnings: unknown[][] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args);
+  };
+  let out: Awaited<ReturnType<typeof maybeCompact>>;
+  try {
+    out = await maybeCompact({
+      turns: [turn(1, "a")],
+      msgs: [{ role: "user", content: "hi" }],
+      config: DEFAULT_CONTEXT_CONFIG, modelId: MODEL_ID,
+      observedInputTokens: 190_000,
+      callModel: () => Promise.resolve("summary text"),
+      onCompact: () => {
+        called = true;
+        return Promise.resolve();
+      },
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+  assertEquals(out.compacted, true);
+  assert(!called, "onCompact must not run without a hookCtx");
+  assert(
+    warnings.some((args) => String(args[0]).includes("onCompact") && String(args[0]).includes("hookCtx")),
+    `expected a console.warn mentioning onCompact/hookCtx, got: ${JSON.stringify(warnings)}`,
+  );
+});
+
+Deno.test("onCompact fires pre then post on the drop fallback too", async () => {
+  const phases: string[] = [];
+  const out = await maybeCompact({
+    turns: [turn(1, "a")],
+    msgs: [{ role: "user", content: "hi" }],
+    config: DEFAULT_CONTEXT_CONFIG, modelId: MODEL_ID,
+    observedInputTokens: 190_000,
+    callModel: () => Promise.reject(new Error("502")),
+    onCompact: (phase) => {
+      phases.push(phase);
+      return Promise.resolve();
+    },
+    hookCtx: fakeHookCtx,
+  });
+  assertEquals((out as { via: string }).via, "drop");
+  assertEquals(phases, ["pre", "post"]);
+});

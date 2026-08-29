@@ -52,7 +52,7 @@ export interface Command {
 
 // --- Hooks ---
 
-export type HookEvent = "PreToolUse" | "PostToolUse" | "Stop" | "UserPromptSubmit";
+export type HookEvent = "PreToolUse" | "PostToolUse" | "Stop" | "UserPromptSubmit" | "PreCompact" | "PostCompact";
 export type HookType = "command" | "prompt";
 
 export interface Hook {

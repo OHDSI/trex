@@ -155,6 +155,15 @@ export interface AgentConfig {
   // Fails the turn on throw, same posture as buildInstructions: a turn built
   // on a half-resolved prompt is worse than no turn.
   buildUserMessage?: (base: string, ctx: HookCtx) => Promise<string>;
+  // pre fires before the summary is built and may return text preserved
+  // verbatim into the summary input; post fires after it lands. Both are
+  // swallowed on throw — compaction runs to relieve context pressure and
+  // must not be blocked by a hook.
+  onCompact?: (
+    phase: "pre" | "post",
+    info: { messageCount: number; tokenEstimate: number },
+    ctx: HookCtx,
+  ) => Promise<string | void>;
 }
 
 // Resolved agent config: guaranteed to have all fields fully populated.

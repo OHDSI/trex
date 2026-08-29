@@ -672,6 +672,8 @@ function startTurn(
           // stream even though no turn exists yet (compaction is pre-turn) —
           // context.compacted is turn-agnostic for exactly this reason.
           emit: (e) => publish(sessionId, e),
+          onCompact: deps.agent.config.onCompact,
+          hookCtx,
         });
         if (outcome.compacted) {
           compacted = true;
