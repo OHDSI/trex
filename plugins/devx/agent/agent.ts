@@ -503,24 +503,80 @@ export async function onTurnEnd(turn: { text: string; finishReason: string }, ct
   await runStopHooks(hooks, { chatId, content: turn.text });
 }
 
+// H4: UserPromptSubmit hooks inject extra context ahead of the model seeing
+// the prompt. Unlike PreToolUse/PostToolUse/Stop (routed through hooks.ts's
+// duckdb/Trex-runtime bridge, built to work around the classic edge-function
+// sandbox's lack of Deno.Command), this loop's own worker process can spawn
+// a subprocess directly -- there is no allow/deny verdict to parse here,
+// only stdout text to append, so it bypasses that bridge entirely. Not a
+// trust-boundary control: a failing/slow/missing hook degrades to no
+// injection rather than failing the turn (contrast onToolCall's fail-closed
+// contract above).
+async function runUserPromptSubmitHooks(hooks: Hook[], prompt: string): Promise<string[]> {
+  const outputs: string[] = [];
+  for (const hook of hooks) {
+    if (!hook.command) continue;
+    try {
+      const child = new Deno.Command("bash", {
+        args: ["-c", hook.command],
+        stdin: "null",
+        stdout: "piped",
+        stderr: "null",
+        env: { DEVX_HOOK_EVENT: "UserPromptSubmit", DEVX_USER_PROMPT: prompt },
+      }).spawn();
+      // hook.timeout_ms guards against a hook that hangs forever -- kill()
+      // on a process that already exited just throws, hence the swallow.
+      const timer = setTimeout(() => {
+        try {
+          child.kill();
+        } catch {
+          /* already exited */
+        }
+      }, hook.timeout_ms || 10000);
+      try {
+        const { stdout } = await child.output();
+        const text = new TextDecoder().decode(stdout).trim();
+        if (text) outputs.push(text);
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (err) {
+      console.error("[devx] UserPromptSubmit hook failed:", err instanceof Error ? err.message : err);
+    }
+  }
+  return outputs;
+}
+
 // H3: attachment materialization, folded into buildUserMessage (per-turn
 // content, not the cache-pointed system prompt — see AgentConfig.
 // buildUserMessage's doc comment). Attachments are UI-reachable, not just
 // channel-only (ChatInput.tsx), so ordinary browser turns need this too.
 export async function buildUserMessage(base: string, ctx: HookCtx): Promise<string> {
   const { appId, attachments } = readMetadata(ctx.metadata);
-  if (!ctx.userId || !appId || !attachments?.length) return base;
-  // Same defensive shape filter and cap-of-10 the legacy path applies at
-  // functions/index.ts:405-408 -- these urls are remote/untrusted input.
-  const safe = attachments
-    .filter((a) => a && typeof a.url === "string" && typeof a.name === "string")
-    .slice(0, 10);
-  if (safe.length === 0) return base;
-  const workspacePath = await ensureAppWorkspace(ctx.userId, appId);
-  const saved = await materializeAttachments(workspacePath, safe);
-  // Only paths ever enter the prompt, never file content -- the coder Reads
-  // them itself (images render multimodally through Read).
-  return base + renderAttachmentBlock(saved);
+  let message = base;
+  if (ctx.userId && appId && attachments?.length) {
+    // Same defensive shape filter and cap-of-10 the legacy path applies at
+    // functions/index.ts:405-408 -- these urls are remote/untrusted input.
+    const safe = attachments
+      .filter((a) => a && typeof a.url === "string" && typeof a.name === "string")
+      .slice(0, 10);
+    if (safe.length > 0) {
+      const workspacePath = await ensureAppWorkspace(ctx.userId, appId);
+      const saved = await materializeAttachments(workspacePath, safe);
+      // Only paths ever enter the prompt, never file content -- the coder
+      // Reads them itself (images render multimodally through Read).
+      message += renderAttachmentBlock(saved);
+    }
+  }
+
+  // Appended AFTER attachments, never replacing them -- see this function's
+  // header comment for why that ordering is load-bearing.
+  const hooks = await turnHooks(ctx, "UserPromptSubmit");
+  if (hooks.length > 0) {
+    const injected = await runUserPromptSubmitHooks(hooks, base);
+    for (const text of injected) message += `\n${text}`;
+  }
+  return message;
 }
 
 // CLOSED: a self-delegated subagent turn now gets the shared contract

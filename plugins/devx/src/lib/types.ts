@@ -520,7 +520,7 @@ export interface DevxCommand {
   updated_at: string;
 }
 
-export type HookEvent = "PreToolUse" | "PostToolUse" | "Stop";
+export type HookEvent = "PreToolUse" | "PostToolUse" | "Stop" | "UserPromptSubmit";
 
 export interface DevxHook {
   id: string;

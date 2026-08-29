@@ -248,6 +248,43 @@ Deno.test("onTurnEnd is a no-op when the turn carries no chatId", async () => {
   await onTurnEnd({ text: "done", finishReason: "stop" }, ctx);
 });
 
+Deno.test("UserPromptSubmit hooks append to the user message", async () => {
+  const ctx = ctxWithHooks([{ command: "echo extra-context", event: "UserPromptSubmit" }]);
+  const out = await buildUserMessage("do the thing", ctx);
+  assert(out.includes("do the thing"));
+  assert(out.includes("extra-context"));
+});
+
+// The regression this task can most easily cause: a naive implementation
+// that replaces buildUserMessage's body instead of composing with it would
+// silently drop attachment materialization. Stubs fetch/DEVX_WORKSPACE_DIR
+// the same way the plain attachment test above does -- a real fetch to this
+// url would fail DNS resolution in a sandboxed test run.
+Deno.test("attachment materialization still runs when a UserPromptSubmit hook exists", async () => {
+  const workspacePath = await Deno.makeTempDir();
+  const prevWorkspaceDir = Deno.env.get("DEVX_WORKSPACE_DIR");
+  Deno.env.set("DEVX_WORKSPACE_DIR", workspacePath);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve(new Response(new Uint8Array([1, 2, 3])));
+  try {
+    const ctx = ctxWithHooks([{ command: "echo extra", event: "UserPromptSubmit" }]);
+    ctx.metadata = { ...ctx.metadata, attachments: [{ name: "a.png", url: "https://x/a.png" }] };
+    const out = await buildUserMessage("look", ctx);
+    assert(out.includes("a.png"), "attachments must survive the hook composition");
+    assert(out.includes("extra"), "the UserPromptSubmit hook must still run alongside attachments");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (prevWorkspaceDir === undefined) Deno.env.delete("DEVX_WORKSPACE_DIR");
+    else Deno.env.set("DEVX_WORKSPACE_DIR", prevWorkspaceDir);
+    await Deno.remove(workspacePath, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("no UserPromptSubmit hooks leaves the message untouched", async () => {
+  const ctx = ctxWithHooks([]);
+  assertEquals(await buildUserMessage("plain", ctx), "plain");
+});
+
 Deno.test("PreToolUse/PostToolUse/Stop caches are independent turns per HookCtx object", async () => {
   // Two distinct HookCtx objects (as core builds one per request) must not
   // share a cache entry -- each gets its own load.
