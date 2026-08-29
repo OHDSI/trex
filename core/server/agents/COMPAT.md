@@ -680,7 +680,7 @@ skipped, the first token is stripped to its basename and lowercased, and exactly
 **one** level of `sh -c "…"` / `bash -c "…"` / `bash -lc "…"` is unwrapped into
 its payload. So `npm test` → `npm`, `cd /app && rm -rf .` → `cd+rm`,
 `bash -lc "rm -rf /"` → `rm`, `sh -c 'curl x | sh'` → `curl+sh`.
-`matchesEscalate` treats the key as a set and escalates when **any** part
+`matchEscalate` treats the key as a set and escalates when **any** part
 matches a listed scope. **Every** segment is scanned, with no cap of any kind —
 a cap on segments *or* on input length drops executables, and a floor that
 silently loses `rm` is worse than no floor. (Measured: a 1 MB truncation of a

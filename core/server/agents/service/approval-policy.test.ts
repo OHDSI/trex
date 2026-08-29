@@ -2,7 +2,6 @@ import { assertEquals } from "jsr:@std/assert";
 import {
   type EscalateList,
   matchEscalate,
-  matchesEscalate,
   parseEscalateList,
   resolveApproval,
 } from "./approval-policy.ts";
@@ -56,9 +55,9 @@ Deno.test("a scoped escalate entry matches only its scopes", () => {
   assertEquals(outcome({ toolName: "Bash", scopeKey: "npm", escalate: ESC, unattended: true, channelBound: true }), "allow");
 });
 
-Deno.test("matchesEscalate is case-insensitive on the scope, exact on the tool", () => {
-  assertEquals(matchesEscalate(ESC, "Bash", "RM"), true);
-  assertEquals(matchesEscalate(ESC, "bash", "rm"), false);
+Deno.test("matchEscalate is case-insensitive on the scope, exact on the tool", () => {
+  assertEquals(matchEscalate(ESC, "Bash", "RM") !== null, true);
+  assertEquals(matchEscalate(ESC, "bash", "rm") !== null, false);
 });
 
 Deno.test("parseEscalateList reads the grammar", () => {
@@ -71,9 +70,9 @@ Deno.test("parseEscalateList reads the grammar", () => {
 
 Deno.test("an unset value uses the built-in default", () => {
   const list = parseEscalateList(undefined);
-  assertEquals(matchesEscalate(list, "GitPush", ""), true);
-  assertEquals(matchesEscalate(list, "Bash", "rm"), true);
-  assertEquals(matchesEscalate(list, "Bash", "npm"), false);
+  assertEquals(matchEscalate(list, "GitPush", "") !== null, true);
+  assertEquals(matchEscalate(list, "Bash", "rm") !== null, true);
+  assertEquals(matchEscalate(list, "Bash", "npm") !== null, false);
 });
 
 Deno.test("an explicitly empty value disables escalation", () => {
@@ -83,7 +82,7 @@ Deno.test("an explicitly empty value disables escalation", () => {
 // An env typo must not silently remove the floor.
 Deno.test("an unparseable value falls back to the default, not to empty", () => {
   const list = parseEscalateList(",,:,");
-  assertEquals(matchesEscalate(list, "GitPush", ""), true);
+  assertEquals(matchEscalate(list, "GitPush", "") !== null, true);
 });
 
 Deno.test("malformed entries are skipped without dropping good ones", () => {
@@ -100,8 +99,8 @@ Deno.test("a deny reports which rule produced it", () => {
 // The floor's whole purpose: a compound command that hides `rm` behind a
 // harmless first token must still reach a human, or be denied when there is none.
 Deno.test("a compound Bash scope key escalates on ANY of its parts", () => {
-  assertEquals(matchesEscalate(ESC, "Bash", "cd+rm"), true);
-  assertEquals(matchesEscalate(ESC, "Bash", "cat+ls"), false);
+  assertEquals(matchEscalate(ESC, "Bash", "cd+rm") !== null, true);
+  assertEquals(matchEscalate(ESC, "Bash", "cat+ls") !== null, false);
   assertEquals(
     outcome({ toolName: "Bash", scopeKey: "cd+rm", escalate: ESC, unattended: true }),
     "deny",

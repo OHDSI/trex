@@ -145,7 +145,7 @@ function collectExecutables(command: string, depth: number, out: Set<string>): v
 }
 
 // The SET of executables a command runs, sorted and `+`-joined — one key that
-// serves both consent scoping and the escalate floor (matchesEscalate splits on
+// serves both consent scoping and the escalate floor (matchEscalate splits on
 // `+`). `cd /app && rm -rf .` keys as `cd+rm`, so the floor still sees `rm`.
 export function bashScopeKey(command: string): string {
   const out = new Set<string>();

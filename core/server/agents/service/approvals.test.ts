@@ -203,6 +203,20 @@ Deno.test("a scoped escalate entry refuses always only for that scope", async ()
   assertEquals(benign.consents.length, 1);
 });
 
+// Task 2 (2026-08-29-claw-safe-approvals): a soft tier never becomes a sticky
+// grant either — only unattended execution yields, not the "always" refusal.
+Deno.test("always is refused for a SOFT tool too, not just hard", async () => {
+  const { store, approvals, consents } = fakeStore();
+  approvals.set("r1", { decision: null, sessionId: "s1", tool: "Bash", scopeKey: "rm" });
+  const res = await resolveApprovalDecision(store, "s1", { requestId: "r1", decision: "always" }, {
+    plugin: "p", agentName: "a", userId: "u1",
+    escalate: [{ tool: "Bash", scopes: ["rm"], tier: "soft" }],
+  });
+  assertEquals(res.ok, false);
+  assertEquals(approvals.get("r1")!.decision, null);
+  assertEquals(consents.length, 0);
+});
+
 // A refused batch must leave EVERY request pending, not resolve the ones it
 // already walked past.
 Deno.test("one escalated tool in a batch refuses the whole batch", async () => {

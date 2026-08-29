@@ -94,11 +94,6 @@ export function matchEscalate(
   return soft;
 }
 
-// Removed by Task 2 once toolset.ts and approvals.ts call matchEscalate.
-export function matchesEscalate(list: EscalateList, t: string, s: string): boolean {
-  return matchEscalate(list, t, s) !== null;
-}
-
 export function resolveApproval(input: ApprovalPolicyInput): ApprovalVerdict {
   if (input.consent === "never") return { outcome: "deny", reason: "consent-never" };
   const tier = matchEscalate(input.escalate, input.toolName, input.scopeKey);
