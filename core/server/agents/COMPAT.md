@@ -610,6 +610,91 @@ live-tail by event shape.
       pattern divergence 18's `ContextConfig` fields use — a key missing
       from that allowlist is exactly what silently dropped two
       `ContextConfig` fields in an earlier cycle of this runtime.
+20. **`UserPromptSubmit`, `onCompact`, and `hook.failed` (2026-08-29 hooks)
+    are also additive, and also NOT a trust boundary — the opposite failure
+    posture from every gated tool call.** `HookEvent` — devx's OWN
+    authoring-facing hook-event union (`functions/skills/types.ts`,
+    `src/lib/types.ts`; core itself has no `HookEvent` type, only named
+    fields on `AgentConfig`) — gained `UserPromptSubmit`, `PreCompact` and
+    `PostCompact`. Only `UserPromptSubmit` is wired to anything: it fires
+    from `buildUserMessage` (H4, divergence 17's per-turn counterpart to
+    `buildInstructions`), routed through `hooks.ts`'s `runContextHook` — the
+    SAME allowlisted devx-ext bridge (`trex_devx_run_command`) PreToolUse/
+    PostToolUse/Stop use, so its command gets the child-process environment
+    allowlist above and the same `ALLOWED_EXECUTABLES` gate; a direct
+    `Deno.Command` from the worker would bypass both. `PreCompact`/
+    `PostCompact` exist ONLY as devx `HookEvent` values today — no devx
+    dispatcher fires them, and grepping the plugin for either name turns up
+    only their two type declarations. The actual pre/post-compaction hook is
+    a **separate, core-level mechanism**: `AgentConfig.onCompact` (a plain
+    field, not routed through devx's hook-row system at all), called from
+    `context/compact.ts`'s `maybeCompact` — `pre` before the summary input is
+    assembled, `post` after it (or after the drop fallback) lands. `pre`'s
+    return value, if a string, is spliced verbatim onto the end of the
+    summarizer's transcript (appended, not prepended, so the transcript's own
+    chronology stays intact) — the hook's whole point is preserving something
+    the summarizer would otherwise drop. Same posture as this divergence's
+    other hooks (`runOnCompact`): a missing `hookCtx` warns and skips rather
+    than throwing (compaction must not be blocked by a wiring bug), and a
+    throwing `onCompact` is caught and treated as "nothing preserved" — never
+    aborts compaction, which exists to relieve context pressure and cannot
+    itself become blockable. **No agent currently sets `onCompact`** — same
+    "capability with no production user" as the escalate override above.
+
+    **The injected-context cap** (`context/hook-output.ts`'s `capHookOutput`,
+    `DEFAULT_MAX_HOOK_OUTPUT_TOKENS = 2500`) exists because an unbounded hook
+    injection can undo the very compaction that just ran to make room, or
+    blow a normal turn's budget outright. Measured with the SAME
+    `estimateTokens` the compaction trigger itself measures against (one
+    estimator, so the cap and the budget it protects can't disagree). Text
+    under the cap passes through unchanged. Over it: if the caller supplies a
+    `spillPath` (a directory), the full text is written to a file there and
+    the injection is replaced by a one-line pointer naming it; with no
+    `spillPath`, it truncates inline instead — a pointer is only honest when
+    its reader can open the file, and a spill failure (bad permissions, path
+    is a file not a directory) falls back to the same truncation rather than
+    throwing. The two current callers pick deliberately: `UserPromptSubmit`
+    passes a workspace-scoped `spillPath`
+    (`<workspace>/.devx/hook-spill`, dot-prefixed so it doesn't litter the
+    project root a coding model browses) when a workspace exists, because the
+    coding model's own `Read` tool can reach it; `onCompact`'s `pre` hook
+    passes none, because the summarizer has no file access at all and a
+    pointer would be inert to it — so an over-cap compaction-preserved note
+    is always truncated, never spilled.
+
+    **`hook.failed`** is not a core-emitted wire event — it's devx's own use
+    of a new, generic capability: `HookCtx.emit?: (name, data) => void`
+    (`eve-shim/types.ts`), wired by `handler.ts`'s `buildHookCtx` onto the
+    same `tool.event`/`publish()` channel `toolEmit` already uses (divergence
+    10). devx's `agent.ts` calls `ctx.emit?.("hook.failed", info)` from every
+    lifecycle hook implementation (`onToolCall`, `onToolResult`, `onTurnEnd`,
+    `runUserPromptSubmitHooks`) whenever `functions/skills/hooks.ts` reports a
+    hook that crashed, named a disallowed executable, or carried an unknown
+    `hook_type` — additive visibility, not a new verdict.
+
+    **State plainly: a crashed or misconfigured hook is non-blocking.** It
+    reports via `hook.failed` (and a `console.error`) and the turn continues
+    — a DuckDB hiccup, timeout, connection reset, or a hook row with a typo'd
+    `hook_type` must not itself deny (PreToolUse) or corrupt (PostToolUse,
+    Stop, UserPromptSubmit) the work it happened to guard. Only an explicit
+    verdict denies a tool call: **exit code 2**, or `{"action":"deny"}` in the
+    hook's stdout — the two paths `executeCommandHook` already treated as a
+    deliberate block, unchanged by this pass. Every other non-zero exit,
+    disallowed executable, unknown `hook_type`, or thrown error still resolves
+    to `{ action: "approve" }` (or, for the advisory Post/Stop/UserPromptSubmit
+    hooks, to "leave the content/message alone"). This is deliberate, not an
+    oversight rediscovered mid-implementation (an earlier commit on this same
+    branch briefly made the disallowed-executable/crash/unknown-`hook_type`
+    paths deny, then reverted): **the escalate/approval system documented
+    below is the trust boundary for tool calls; a user-configured advisory
+    hook is not**, and a transient hook failure must not deny work that the
+    escalate floor and sticky consents were never asked to gate. This does
+    not change divergence 15's own CORE-level guarantee — a throwing
+    `AgentConfig.onToolCall`/`onToolResult` (the hook function itself, not a
+    hook ROW inside devx's own implementation of it) still denies that call —
+    it describes devx's internal handling of its OWN hook rows, exactly as
+    divergence 15 already documented, now additionally reported via
+    `hook.failed`.
 
 ## Unattended sessions and the escalate floor
 
@@ -653,23 +738,69 @@ call would cost one round trip per gated call.
 ### `AGENTS_ESCALATE_TOOLS`
 
 The deployment's floor: tools that require a human every time, no matter what
-the session or a stored consent says. Read **once, at module load, in
-`handler.ts` only** — `toolset.ts` and `approvals.ts` take the parsed list as a
-parameter and fall back to the same parsed-once default when a caller passes
-nothing.
+the session or a stored consent says. The env var is read **once, at module
+load, in `handler.ts` only** — but the *effective* per-turn list can still
+differ per agent (see "Per-agent override" below). `toolset.ts` and
+`approvals.ts` never read the env var themselves; they take whichever parsed
+list the caller passes and fall back to the same built-in default
+(`DEFAULT_ESCALATE_LIST`) when nobody passes one.
 
-Grammar: a comma-separated list of `Tool` or `Tool:scope|scope|…`. A bare tool
-name matches every invocation; scopes match against the invocation's derived
-scope key (`scope-key.ts`: the Bash executable **set**, the normalized path, or
-the normalized `[source, destination]` pair), case-insensitively. Default:
+Grammar: a comma-separated list of `Tool`, `!Tool`, `Tool:scope|scope|…`, or
+`!Tool:scope|scope|…`. A bare tool name matches every invocation; scopes match
+against the invocation's derived scope key (`scope-key.ts`: the Bash
+executable **set**, the normalized path, or the normalized `[source,
+destination]` pair), case-insensitively.
+
+#### Two tiers: hard and soft
+
+A leading `!` marks an entry **hard**; its absence marks it **soft**
+(`approval-policy.ts`'s `parseEntries`). Both tiers refuse a sticky `always`
+grant (see "Precedence" below) — under a shared bot identity, neither can be
+bought off with one click. They differ only in what an **unattended**
+session (no human watching, see above) gets on a match: hard still denies
+outright (or gates, if channel-bound — no exception either way); soft
+**allows** it. Concretely, this is what lets an unattended coding agent run
+`rm -rf node_modules` or `curl` with nobody watching, while `sudo`, `ssh`,
+`GitPush` and `ExecuteSQL` still require a human every time, attended or not.
+An attended session sees no difference between the tiers — both still gate.
+
+Default (`DEFAULT_ESCALATE`):
 
 ```
-GitPush,ExecuteSQL,DeleteFile,CronCreate,CronDelete,RestartApp,Bash:rm|sudo|curl|wget|ssh|scp|dd|chmod|chown
+!GitPush,!ExecuteSQL,!CronCreate,!CronDelete,!RestartApp,!Bash:sudo|dd|ssh|scp,DeleteFile,Bash:rm|curl|wget|chmod|chown
 ```
+
+i.e. hard: `GitPush`, `ExecuteSQL`, `CronCreate`, `CronDelete`, `RestartApp`,
+`Bash:sudo|dd|ssh|scp`; soft: `DeleteFile`, `Bash:rm|curl|wget|chmod|chown`.
 
 Unset uses that default. An **explicitly empty string** is a deliberate opt-out
-(no floor at all). A value that parses to nothing is treated as a typo: it warns
-and keeps the default, rather than silently removing the floor.
+(no floor at all). A value that parses to nothing (every entry malformed, or a
+lone `!` with no tool name) is treated as a typo: it warns and keeps the
+default, rather than silently removing the floor.
+
+### Per-agent override (`AgentConfig.escalate`)
+
+`AgentConfig.escalate` (`eve-shim/types.ts`) replaces the deployment escalate
+list for **that one agent only** — same string grammar as
+`AGENTS_ESCALATE_TOOLS`, including the `!` tier prefix. It is
+**deployment-authored code**, a field on the `defineAgent(...)` object an
+operator ships, never something a request or a tool can set — a
+request-supplied override would let a caller disarm its own floor, so the
+whole mechanism depends on it never accepting live input. `handler.ts`'s
+`resolveEscalate` calls the pure `resolveEscalateFor` (`approval-policy.ts`)
+fresh on every turn/chat request (no agent-load-time caching, same posture as
+`resolveModel`/`buildInstructions`), and an **unparseable value falls back to
+the deployment list** and logs `agents: agent '<name>' has an unparseable
+escalate list — using the deployment list` — an agent-authored typo must
+never silently widen what a bot can do unattended, any more than an env-var
+typo does.
+
+**No agent currently uses it.** `devx`, `claw` and `d2esupport` all run on
+the built-in two-tier default unmodified — it already unblocks the coder
+(soft `rm`/`curl` for an unattended session, hard `sudo`/`ssh`/`GitPush`/
+`ExecuteSQL` still gated) without any agent needing its own list. The
+override exists as a capability an agent *can* reach for should the shared
+default ever not fit it, not because one needs it today.
 
 #### What the `Bash` scope match is, and is not
 
@@ -719,21 +850,30 @@ Two accepted limitations, both recorded rather than fixed:
 order:
 
 1. a stored `never` consent → **deny** (`consent-never`)
-2. a match on the escalate list → **gate** if channel-bound, else **deny**
+2. a **hard** escalate match → **gate** if channel-bound, else **deny**
    (`no-approver`) — no channel to ask on means deny, not park
-3. a stored `always` consent → **allow**
-4. `unattended` → **allow**
-5. otherwise → **gate**
+3. a **soft** escalate match → **allow** if `unattended`, else **gate** — a
+   soft match never denies outright, and never checks channel-binding: an
+   unattended session with no channel still gets `allow`, not `no-approver`
+4. a stored `always` consent → **allow**
+5. `unattended` → **allow**
+6. otherwise → **gate**
 
-Rule 2 sits above rules 3 and 4 deliberately: under a shared bot identity, one
-`always` click would otherwise disarm the floor for every user of that identity.
+(`matchEscalate` returns the matched tier or `null`; a tool/scope pair can
+only ever match one tier for a given list, since `!Tool` and `Tool` are
+distinct entries — but see `resolveApproval`'s own comment for why hard
+"wins outright" if a list is ever authored with both.)
 
-For the same reason, **`always` is refused at write time for an escalate-list
-tool**. `POST .../approval` and the `inputResponses` path both reject the
-decision with `"<Tool> cannot be granted 'always' — it requires approval every
-time"` instead of accepting the click and ignoring the row at read time — the
-person clicking must learn the grant did not stick. `never` is still accepted
-(it only narrows), and a plain one-shot `approve` is unaffected.
+Rules 2 and 3 sit above rules 4 and 5 deliberately: under a shared bot
+identity, one `always` click would otherwise disarm the floor for every user
+of that identity — this is true of *either* tier, not just hard.
+
+For the same reason, **`always` is refused at write time for a tool matching
+either tier**. `POST .../approval` and the `inputResponses` path both reject
+the decision with `"<Tool> cannot be granted 'always' — it requires approval
+every time"` instead of accepting the click and ignoring the row at read time
+— the person clicking must learn the grant did not stick. `never` is still
+accepted (it only narrows), and a plain one-shot `approve` is unaffected.
 
 Both routes return that refusal — and **only** that refusal — as **400** with
 `{ error }`. Swallowing it would leave the gate pending and park the turn for
@@ -743,6 +883,59 @@ already decided, the gate's turn no longer running) keeps its prior behaviour:
 202. That fall-through is load-bearing — eve's SDK sends `{inputResponses,
 message}` in ONE body, so 400ing a stale decision would discard the message
 with it and every retry of that body would 400 again.
+
+## Child-process environment allowlist
+
+trex-only (eve has no equivalent — this is about what a *host tool's own
+subprocess* sees, not the agent protocol). `plugins/devx-ext/src/subprocess.rs`'s
+`run_git` and `run_command` — the two functions behind the `Bash` tool and
+devx's git operations — used to spawn with `Command::new(...)` inheriting the
+worker's full environment. Both now `env_clear()` first and rebuild the child's
+environment from an **allowlist**, not a denylist: `filtered_env(parent, extra)`
+keeps only names in `ALLOWED_EXACT` (`PATH`, `HOME`, `SHELL`, `USER`,
+`LOGNAME`, `TERM`, `TZ`, `TMPDIR`, `LANG`, `PWD`, `DENO_DIR`, `CARGO_HOME`,
+`RUSTUP_HOME`, the `HTTP(S)_PROXY`/`NO_PROXY` pairs in both cases, `JAVA_HOME`,
+`GOPATH`, `GOCACHE`, `GOMODCACHE`, `GRADLE_USER_HOME`, `MAVEN_OPTS`) or a
+prefix in `ALLOWED_PREFIX` (`LC_`, `NODE_`, `npm_config_`, `NPM_CONFIG_`,
+`YARN_`, `PNPM_`) — the rationale being that a newly added secret must not
+become reachable by default just because nobody remembered to deny it.
+
+A prefix match gets one extra check: `looks_secret(name)` refuses any name
+whose uppercased form contains `AUTH`, `TOKEN`, `SECRET`, `PASSWORD`,
+`PASSWD` or `CREDENTIAL`, even under an otherwise-allowed prefix — a prefix
+admits names nobody vetted one by one (`NODE_AUTH_TOKEN`,
+`npm_config__authToken`, `YARN_NPM_AUTH_TOKEN`), so exact-name allowlisting
+alone isn't enough there. Over-refusing this way is recoverable; under-refusing
+leaks a secret.
+
+**`DEVX_CHILD_ENV_EXTRA`** is the deliberate escape hatch: a comma-separated
+list of exact names admitted regardless of the allowlist or the secret-marker
+check — the way back for a deployment that genuinely needs, say,
+`NODE_AUTH_TOKEN` reaching a child.
+
+Three exclusions are choices, not oversights:
+
+- **`GIT_*` is not allowlisted at all**, at either call site — but `run_git`
+  re-adds a specific, narrow set of its own afterward
+  (`GIT_TERMINAL_PROMPT=0`, and `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/
+  `GIT_CONFIG_VALUE_0` to mark `*` as a safe directory). The exclusion is
+  because an inherited `GIT_CONFIG_*` set outranks `.git/config` and would
+  override the per-user identity and SSH signing that `git_identity.ts`
+  installs there; letting the allowlist admit `GIT_*` generally would silently
+  reopen that override. A caller that needs git identity before that file can
+  exist (`git_init`) passes a scoped `-c` fallback identity instead, not env.
+- **`SSH_AUTH_SOCK` is dropped**, even though an earlier version of this same
+  change allowlisted it. It forwards *live signing authority* — auth as the
+  host to every trusting SSH endpoint — not a static secret like an API key,
+  so it doesn't fit the "value on this allowlist is safe to leak" model. This
+  repo's GitHub auth is HTTPS-token based and commit signing uses a
+  materialized key file, so no in-repo consumer needs it; a deployment with a
+  real SSH-remote workflow gets it back via `DEVX_CHILD_ENV_EXTRA`.
+- **Registry/index URL variables are excluded**: `PIP_INDEX_URL`,
+  `PIP_EXTRA_INDEX_URL`, `GOPROXY` (these three routinely embed credentials
+  directly in the URL) and `CARGO_REGISTRY_TOKEN` (a token outright). Same
+  `DEVX_CHILD_ENV_EXTRA` escape hatch for a deployment that needs a private
+  registry.
 
 ## Channels
 
@@ -1052,6 +1245,82 @@ g. **Consent routes are not rate-limited.** `/eve/v1/oauth/<connector>/{start,
    callback}` reject any request without a valid signed `state` before any token
    write, so the exposed surface is only cheap HMAC-verify CPU (no credential or
    token exposure) — but per-IP throttling (spec §5 Security) is a v1.1 follow-up.
+
+## Turn-scoped diff
+
+trex-only (no eve equivalent). `GET /eve/v1/session/:id/turn/:turnId/diff`
+returns a read-only `git diff` scoped to exactly the paths ONE turn's file
+tools touched, without the caller re-reading the whole tree. Two pieces make
+it work:
+
+- **Recording** (`toolset.ts`'s `authoredTool`): after a call to `Write`,
+  `Edit`, `DeleteFile`, `SearchReplace`, `CopyFile` or `RenameFile`
+  (`scope-key.ts`'s `PATH_TOOLS`/`PAIR_TOOLS`, reused by its new
+  `touchedPaths` helper so this can never drift from the escalate floor's own
+  path/pair scope-key derivation) returns successfully — never for a call the
+  approval gate denied, and never for a tool result shaped `{error}` (a tool
+  that itself failed did not touch what it claims to) — the normalized
+  path(s) are appended to `agents.turns.touched_paths` (migration `V12`, a
+  `TEXT[]` column, default `{}`) via `store.recordTouchedPaths`. A copy/rename
+  records BOTH endpoints separately, not one JSON-joined pair.
+- **Serving** (`handler.ts`): the route first checks
+  `store.turnBelongsToSession(turnId, sessionId)` — a turn from another
+  session 404s exactly like an unknown one, never distinguishing the two
+  cases to a caller. It then reads `touched_paths` back and, if non-empty,
+  shells out to `git diff -- <path>...` (the worker's own `Deno.Command`, args
+  array — no shell, so a model-authored path can't inject a flag; the `--` is
+  still load-bearing, stopping a path like `--output=x` from being read as a
+  git option) in a working directory the AGENT resolves.
+
+### Three response shapes
+
+1. **No touched paths** — `{ paths: [], diff: "" }`. This is the ONLY
+   shape without an explicit workspace/git step; it fires before either is
+   attempted.
+2. **A diff** — `{ paths, diff: "<git diff output>" }`, once a workspace
+   resolved and `git diff` exited 0.
+3. **Unavailable** — `{ paths, error: "<reason>" }`, with **no `diff` key at
+   all**. Covers both "no workspace resolver configured/it declined" (`error:
+   "no workspace available to diff against"`) and "resolved workspace but
+   `git diff` itself failed" (`error` carries `git`'s own stderr, e.g. "not a
+   git repository"). The missing `diff` key is deliberate — fix round 1 on
+   this task found that collapsing "couldn't look" into the same `diff: ""`
+   as "nothing to show" tells a caller a turn was clean when the truth is the
+   route couldn't tell. `paths` is always present, even on the error shapes,
+   so a caller can see what WOULD have been diffed.
+
+### Two real limitations
+
+- **`Bash` writes are not tracked.** `Bash` is not in `PATH_TOOLS`/
+  `PAIR_TOOLS`, so a turn whose changes came entirely from a shell command
+  (`rm`, a build script, `sed -i`, …) records an empty `touched_paths` and
+  reports response shape 1 — `{ paths: [], diff: "" }` — indistinguishable
+  from a turn that touched nothing at all. This is a stated, accepted gap
+  (the route's own header comment says it plainly), not a bug: statically
+  deriving what a shell command wrote would need either parsing the command
+  (unreliable, see the escalate floor's own `Bash` scope-key limitations
+  above) or diffing the whole tree before/after every `Bash` call, which
+  defeats the point of a narrow, cheap, per-turn diff.
+- **Depends on `AgentConfig.resolveWorkspace`; never guesses.** Core has no
+  workspace/cwd concept of its own — `resolveWorkspace` is a new,
+  deployment-authored `AgentConfig` field (same posture as `resolveModel`/
+  `buildInstructions`) that resolves the git worktree a session's file tools
+  actually write into. It is deliberately NOT `HookCtx`-shaped: the diff
+  route is a bare `GET` with no live request to build a `HookCtx` from, so it
+  instead hands the resolver what the STORE can tell it — the session's own
+  `created_by` as `userId`, and the DIFF'D TURN's own `metadata` (not
+  necessarily the latest turn's, and not this request's, which carries none).
+  Absent, or resolving to `undefined` (e.g. devx's own `resolveWorkspace`
+  returns `undefined` when a turn has no `userId`/`appId` to key a workspace
+  on), the route reports response shape 3 rather than falling back to the
+  worker's own process `cwd` — an early version of this route did exactly
+  that (shelled to `git diff` in the worker's own cwd) and was corrected once
+  it was clear that a wrong-but-successful diff is worse than an honest
+  "unavailable". devx wires this today (`plugins/devx/agent/agent.ts`'s
+  `resolveWorkspace`, reusing the same `ensureAppWorkspace` path
+  `buildInstructions`/attachment materialization already use) — `claw` and
+  `d2esupport` do not configure it, so the route always reports unavailable
+  for them regardless of what a turn touched.
 
 ## What we ignore entirely
 
