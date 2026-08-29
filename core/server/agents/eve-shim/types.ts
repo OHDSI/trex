@@ -170,6 +170,21 @@ export interface AgentConfig {
     info: { messageCount: number; tokenEstimate: number },
     ctx: HookCtx,
   ) => Promise<string | void>;
+  // Task 11's turn-diff route. Resolves the git worktree a session's file
+  // tools write into, for `git diff`ing exactly the paths a turn touched.
+  // Core has no workspace concept of its own — this is deployment-authored,
+  // like resolveModel/buildInstructions. Not per-request HookCtx-shaped: the
+  // diff route is a bare GET with no live request context, so it hands over
+  // what IT can read from the store instead (the session's created_by as
+  // userId, and the TURN's own metadata, not the current request's). Absent,
+  // or resolving to undefined, means the route reports unavailable rather
+  // than guessing at a cwd — never call this as a substitute for HookCtx.
+  resolveWorkspace?: (info: {
+    sessionId: string;
+    turnId: string;
+    userId?: string;
+    metadata?: unknown;
+  }) => Promise<string | undefined>;
 }
 
 // Resolved agent config: guaranteed to have all fields fully populated.

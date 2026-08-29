@@ -76,7 +76,7 @@ function inMemoryDb() {
   const turns: Array<
     {
       id: string; session_id: string; seq: number; status: string; error: string | null; message: unknown;
-      startedAt: Date; touched_paths?: string[];
+      startedAt: Date; touched_paths?: string[]; metadata?: unknown;
     }
   > = [];
   const steps: Array<{ turn_id: string; seq: number; kind: string; name: string | null; payload: unknown; usage: unknown }> = [];
@@ -244,6 +244,10 @@ function inMemoryDb() {
     if (sql.includes("SELECT touched_paths FROM agents.turns WHERE id = $1")) {
       const t = turns.find((t) => t.id === params[0]);
       return Promise.resolve({ rows: t ? [{ touched_paths: t.touched_paths ?? [] }] : [] });
+    }
+    if (sql.includes("SELECT metadata FROM agents.turns WHERE id = $1")) {
+      const t = turns.find((t) => t.id === params[0]);
+      return Promise.resolve({ rows: t ? [{ metadata: t.metadata ?? null }] : [] });
     }
     if (sql.includes("SELECT 1 FROM agents.turns WHERE id = $1 AND session_id = $2")) {
       const t = turns.find((t) => t.id === params[0] && t.session_id === params[1]);
@@ -479,10 +483,6 @@ async function makeHandler(
     wrapStore?: (s: ReturnType<typeof createStore>) => ReturnType<typeof createStore>;
     // Test seam for the per-turn resolved escalate list — see Deps.captureEscalate.
     captureEscalate?: (list: EscalateList) => void;
-    // Test seam for the turn-diff route's workspace resolution — see
-    // Deps.resolveWorkspace. Undefined (the default) matches production with
-    // no plugin wiring: the diff route reports unavailable, never a cwd guess.
-    resolveWorkspace?: (sessionId: string) => Promise<string | undefined>;
   } = {},
 ) {
   const agent = await loadAgent(TOY);
@@ -494,7 +494,6 @@ async function makeHandler(
     plugin: "toy-agent", agentName: "toy",
     basePath: "/plugins/trex/toy", model: opts.model ?? model("hello from toy"),
     captureEscalate: opts.captureEscalate,
-    resolveWorkspace: opts.resolveWorkspace,
   });
   return { handler, db };
 }
@@ -4713,7 +4712,9 @@ Deno.test("a turn with no touched paths returns an empty diff and empty paths, n
 Deno.test("GET turn diff returns a real diff scoped to that turn's paths when a workspace resolves", async () => {
   const dir = await gitFixture();
   try {
-    const { handler, db } = await makeHandler({ resolveWorkspace: () => Promise.resolve(dir) });
+    const { handler, db } = await makeHandler({
+      mutate: (a) => { a.config.resolveWorkspace = () => Promise.resolve(dir); },
+    });
     db.turns.push({
       id: "t-1", session_id: "s-1", seq: 1, status: "completed", error: null,
       message: null, startedAt: new Date(), touched_paths: ["a.txt"],
@@ -4730,7 +4731,7 @@ Deno.test("GET turn diff returns a real diff scoped to that turn's paths when a 
   }
 });
 
-Deno.test("a turn with touched paths but no workspace resolver reports unavailable, not an empty diff", async () => {
+Deno.test("a turn with touched paths but no workspace resolver configured reports unavailable, not an empty diff", async () => {
   const { handler, db } = await makeHandler();
   db.turns.push({
     id: "t-3", session_id: "s-1", seq: 1, status: "completed", error: null,
@@ -4744,10 +4745,28 @@ Deno.test("a turn with touched paths but no workspace resolver reports unavailab
   assert(typeof body.error === "string" && body.error.length > 0);
 });
 
+Deno.test("a turn with touched paths whose resolver declines (no appId) reports unavailable, not an empty diff", async () => {
+  const { handler, db } = await makeHandler({
+    mutate: (a) => { a.config.resolveWorkspace = () => Promise.resolve(undefined); },
+  });
+  db.turns.push({
+    id: "t-5", session_id: "s-1", seq: 1, status: "completed", error: null,
+    message: null, startedAt: new Date(), touched_paths: ["some/file.ts"],
+  });
+  const res = await handler(new Request(`${BASE}/eve/v1/session/s-1/turn/t-5/diff`));
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  assertEquals(body.paths, ["some/file.ts"]);
+  assertEquals(body.diff, undefined);
+  assert(typeof body.error === "string" && body.error.length > 0);
+});
+
 Deno.test("a turn whose resolved workspace is not a git repo reports the git failure, not an empty diff", async () => {
   const dir = await Deno.makeTempDir();
   try {
-    const { handler, db } = await makeHandler({ resolveWorkspace: () => Promise.resolve(dir) });
+    const { handler, db } = await makeHandler({
+      mutate: (a) => { a.config.resolveWorkspace = () => Promise.resolve(dir); },
+    });
     db.turns.push({
       id: "t-4", session_id: "s-1", seq: 1, status: "completed", error: null,
       message: null, startedAt: new Date(), touched_paths: ["x.txt"],

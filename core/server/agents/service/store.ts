@@ -821,6 +821,14 @@ export function createStore(query: QueryFn) {
       const r = await query(`SELECT 1 FROM agents.turns WHERE id = $1 AND session_id = $2`, [turnId, sessionId]);
       return r.rows.length > 0;
     },
+
+    // Turn-diff route (task 11, fix round 2): the metadata THIS turn was
+    // started with (e.g. devx's appId), handed to agent.config.resolveWorkspace
+    // — a narrow single-column reader rather than widening getTouchedPaths.
+    async getTurnMetadata(turnId: string): Promise<unknown> {
+      const r = await query(`SELECT metadata FROM agents.turns WHERE id = $1`, [turnId]);
+      return r.rows[0]?.metadata ?? undefined;
+    },
   };
 }
 

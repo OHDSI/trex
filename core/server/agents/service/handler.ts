@@ -102,11 +102,6 @@ export interface Deps {
   // Test seam: called with the per-turn resolved escalate list every time
   // resolveEscalate runs. Undefined in production.
   captureEscalate?: (list: EscalateList) => void;
-  // Resolves the git worktree a session's file tools write into. Core has no
-  // workspace concept of its own; the plugin that owns one supplies this.
-  // Absent (or resolving to undefined) => the turn-diff route reports
-  // unavailable rather than guessing at a cwd — see gitDiffForPaths.
-  resolveWorkspace?: (sessionId: string) => Promise<string | undefined>;
 }
 
 const defaultEnv: EnvFn = (k) => Deno.env.get(k);
@@ -121,9 +116,9 @@ const json = (body: unknown, status = 200, headers: Record<string, string> = {})
 // computed from tool inputs, never the disk); devx's GitDiff tool goes
 // through a DuckDB table function (trex_devx_git_diff) only the plugin
 // runtime has loaded, which core has no business reaching into. Shelling out
-// to `git diff` scoped to exactly the recorded paths, in a cwd the CALLER
-// resolves (Deps.resolveWorkspace — never guessed), is the narrowest thing
-// reachable from this layer. `--` is load-bearing: it stops a model-authored
+// to `git diff` scoped to exactly the recorded paths, in a cwd the AGENT
+// resolves (agent.config.resolveWorkspace — never guessed), is the narrowest
+// thing reachable from this layer. `--` is load-bearing: it stops a model-authored
 // path like "--output=x" from being read as a git flag (args-array form
 // already rules out shell injection). Distinguishes "nothing to show" from
 // "couldn't look" — fix round 1: a swallowed failure is indistinguishable
@@ -1633,7 +1628,21 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       if (!(await store.turnBelongsToSession(turnId, sessionId))) return json({ error: "turn not found" }, 404);
       const paths = await store.getTouchedPaths(turnId);
       if (paths.length === 0) return json({ paths, diff: "" });
-      const cwd = await deps.resolveWorkspace?.(sessionId);
+      // Fix round 2: agent.config.resolveWorkspace (deployment-authored, like
+      // resolveModel/buildInstructions), not Deps — there is exactly one
+      // generic Deps-construction site (service/index.ts) shared by every
+      // agent, so nothing plugin-specific can hook it there. This route has
+      // no live request/HookCtx (a bare GET), so it hands over what the
+      // store can tell it instead: the session's own created_by as userId,
+      // and the TURN's OWN metadata (not this request's, which has none).
+      const cwd = agent.config.resolveWorkspace
+        ? await agent.config.resolveWorkspace({
+          sessionId,
+          turnId,
+          userId: (await store.getSession(sessionId))?.created_by ?? undefined,
+          metadata: await store.getTurnMetadata(turnId),
+        })
+        : undefined;
       if (!cwd) return json({ paths, error: "no workspace available to diff against" });
       const result = await gitDiffForPaths(cwd, paths);
       return result.ok ? json({ paths, diff: result.diff }) : json({ paths, error: result.error });

@@ -435,6 +435,20 @@ export async function buildInstructions(base: string, ctx: HookCtx): Promise<str
   return `${systemPrompt}\n\n${DEFERRED_TOOLS_NOTE}`;
 }
 
+// Task 11 (fix round 2): core's turn-diff route has no live request, so it
+// hands over what it read from the store instead of a HookCtx — the
+// session's created_by as userId, and the DIFF'D TURN's own metadata (not
+// necessarily the latest turn's). Same ensureAppWorkspace path buildInstructions
+// uses above; no appId or no userId is a legitimate "can't resolve", not an
+// error — the diff route reports it as unavailable rather than guessing.
+export async function resolveWorkspace(
+  info: { sessionId: string; turnId: string; userId?: string; metadata?: unknown },
+): Promise<string | undefined> {
+  const { appId } = readMetadata(info.metadata);
+  if (!info.userId || !appId) return undefined;
+  return await ensureAppWorkspace(info.userId, appId);
+}
+
 // devx.hooks (PreToolUse/PostToolUse/Stop) rows are loaded ONCE PER TURN, not
 // once per tool call — legacy loads them once at functions/agent.ts:235, and
 // a per-call load would issue one query per tool. Cached on a WeakMap keyed
@@ -650,6 +664,7 @@ export default defineAgent({
   resolveModel,
   filterTools,
   buildInstructions,
+  resolveWorkspace,
   onToolCall,
   onToolResult,
   onTurnEnd,
