@@ -813,6 +813,14 @@ export function createStore(query: QueryFn) {
       const r = await query(`SELECT touched_paths FROM agents.turns WHERE id = $1`, [turnId]);
       return (r.rows[0]?.touched_paths as string[] | undefined) ?? [];
     },
+
+    // Turn-diff route (task 11) ownership check, session-scoped in the query
+    // itself like resolveApproval above — a turn from another session 404s
+    // the same as an unknown one, never leaking which case it was.
+    async turnBelongsToSession(turnId: string, sessionId: string): Promise<boolean> {
+      const r = await query(`SELECT 1 FROM agents.turns WHERE id = $1 AND session_id = $2`, [turnId, sessionId]);
+      return r.rows.length > 0;
+    },
   };
 }
 

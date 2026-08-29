@@ -74,7 +74,10 @@ function inMemoryDb() {
     createdAt: Date;
   }>();
   const turns: Array<
-    { id: string; session_id: string; seq: number; status: string; error: string | null; message: unknown; startedAt: Date }
+    {
+      id: string; session_id: string; seq: number; status: string; error: string | null; message: unknown;
+      startedAt: Date; touched_paths?: string[];
+    }
   > = [];
   const steps: Array<{ turn_id: string; seq: number; kind: string; name: string | null; payload: unknown; usage: unknown }> = [];
   const approvals = new Map<
@@ -237,6 +240,14 @@ function inMemoryDb() {
       };
       turns.push(t);
       return Promise.resolve({ rows: [{ id: t.id, seq }] });
+    }
+    if (sql.includes("SELECT touched_paths FROM agents.turns WHERE id = $1")) {
+      const t = turns.find((t) => t.id === params[0]);
+      return Promise.resolve({ rows: t ? [{ touched_paths: t.touched_paths ?? [] }] : [] });
+    }
+    if (sql.includes("SELECT 1 FROM agents.turns WHERE id = $1 AND session_id = $2")) {
+      const t = turns.find((t) => t.id === params[0] && t.session_id === params[1]);
+      return Promise.resolve({ rows: t ? [{ "?column?": 1 }] : [] });
     }
     if (sql.includes("UPDATE agents.turns") && sql.includes("WHERE id = $1 AND status = 'running'")) {
       // finishTurn (fix round 1, 2026-08-27-agent-orchestration tasks 12-13
@@ -4663,4 +4674,39 @@ Deno.test("an unparseable agent override falls back to the deployment list", asy
   }));
   await until(() => seen.length > 0);
   assertEquals(seen[0].length > 1, true, "must be the default list, not empty");
+});
+
+// --- turn-diff route (task 11) ------------------------------------------
+
+Deno.test("GET turn diff returns a diff scoped to that turn's paths", async () => {
+  const { handler, db } = await makeHandler();
+  db.turns.push({
+    id: "t-1", session_id: "s-1", seq: 1, status: "completed", error: null,
+    message: null, startedAt: new Date(), touched_paths: ["testdata/task-11-diff-fixture-does-not-exist.txt"],
+  });
+  const res = await handler(new Request(`${BASE}/eve/v1/session/s-1/turn/t-1/diff`));
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  assertEquals(typeof body.diff, "string");
+});
+
+Deno.test("a turn that touched nothing returns an empty diff, not an error", async () => {
+  const { handler, db } = await makeHandler();
+  db.turns.push({
+    id: "t-2", session_id: "s-1", seq: 1, status: "completed", error: null,
+    message: null, startedAt: new Date(), touched_paths: [],
+  });
+  const res = await handler(new Request(`${BASE}/eve/v1/session/s-1/turn/t-2/diff`));
+  assertEquals(res.status, 200);
+  assertEquals((await res.json()).diff, "");
+});
+
+Deno.test("a turn belonging to another session is refused", async () => {
+  const { handler, db } = await makeHandler();
+  db.turns.push({
+    id: "t-1", session_id: "s-1", seq: 1, status: "completed", error: null,
+    message: null, startedAt: new Date(), touched_paths: [],
+  });
+  const res = await handler(new Request(`${BASE}/eve/v1/session/s-other/turn/t-1/diff`));
+  assertEquals(res.status, 404);
 });

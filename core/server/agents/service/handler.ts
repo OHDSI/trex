@@ -111,6 +111,29 @@ const unconfiguredSql: QueryFn = () =>
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
 
+// Task 11's diff mechanism. core/server/agents has no workspace/filesystem
+// concept of its own (Deps carries no cwd/workspacePath, and scope-key.ts's
+// touchedPaths is deliberately pure — computed from tool inputs, never the
+// disk); devx's GitDiff tool goes through a DuckDB table function
+// (trex_devx_git_diff) only the plugin runtime has loaded, which core has no
+// business reaching into. Shelling out to `git diff` in the worker's own
+// process cwd, scoped to exactly the recorded paths, is the narrowest thing
+// reachable from this layer. Never throws — a diff failure degrades to an
+// empty diff rather than a 500 on an otherwise read-only, informational route.
+async function gitDiffForPaths(paths: string[]): Promise<string> {
+  try {
+    const { code, stdout, stderr } = await new Deno.Command("git", { args: ["diff", "--", ...paths] }).output();
+    if (code !== 0) {
+      console.error(`agents: git diff failed (exit ${code}): ${new TextDecoder().decode(stderr)}`);
+      return "";
+    }
+    return new TextDecoder().decode(stdout);
+  } catch (e) {
+    console.error("agents: git diff failed:", e);
+    return "";
+  }
+}
+
 // Rebuilds prior turns into the ai@6 ModelMessage[] shape streamText
 // consumes. Fixes the defect where the model never saw what its own tool
 // calls actually did: tool-call/tool-result steps are now replayed back into
@@ -1583,6 +1606,21 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       return new Response(body, {
         headers: { "content-type": "application/x-ndjson", "cache-control": "no-cache", connection: "keep-alive" },
       });
+    }
+
+    // Task 11: read-only diff of exactly what this turn's file tools touched
+    // (Task 10's touched_paths). Only Write/Edit/DeleteFile/CopyFile/RenameFile
+    // are tracked (scope-key.ts's touchedPaths) — a turn whose changes came
+    // from a Bash command reports an empty diff here, not an error.
+    const diffRoute = path.match(/^\/eve\/v1\/session\/([^/]+)\/turn\/([^/]+)\/diff$/);
+    if (diffRoute && req.method === "GET") {
+      const [, sessionId, turnId] = diffRoute;
+      // Session-scoped in the store query itself (see turnBelongsToSession) —
+      // a turn from another session 404s exactly like an unknown one.
+      if (!(await store.turnBelongsToSession(turnId, sessionId))) return json({ error: "turn not found" }, 404);
+      const paths = await store.getTouchedPaths(turnId);
+      const diff = paths.length === 0 ? "" : await gitDiffForPaths(paths);
+      return json({ diff });
     }
 
     if (req.method === "POST" && path === "/chat") {
