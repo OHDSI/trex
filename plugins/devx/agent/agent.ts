@@ -618,7 +618,7 @@ export async function onCompact(
   phase: "pre" | "post",
   info: { messageCount: number; tokenEstimate: number },
   ctx: HookCtx,
-): Promise<string | void> {
+): Promise<string | undefined> {
   const event = phase === "pre" ? "PreCompact" : "PostCompact";
   const hooks = await turnHooks(ctx, event);
   if (hooks.length === 0) return undefined;

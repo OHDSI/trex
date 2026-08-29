@@ -169,7 +169,7 @@ export interface AgentConfig {
     phase: "pre" | "post",
     info: { messageCount: number; tokenEstimate: number },
     ctx: HookCtx,
-  ) => Promise<string | void>;
+  ) => Promise<string | undefined>;
   // Task 11's turn-diff route. Resolves the git worktree a session's file
   // tools write into, for `git diff`ing exactly the paths a turn touched.
   // Core has no workspace concept of its own — this is deployment-authored,

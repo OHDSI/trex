@@ -400,7 +400,7 @@ Deno.test("onCompact fires pre then post, in that order", async () => {
     callModel: () => Promise.resolve("summary text"),
     onCompact: (phase) => {
       phases.push(phase);
-      return Promise.resolve();
+      return Promise.resolve(undefined);
     },
     hookCtx: fakeHookCtx,
   });
@@ -460,7 +460,7 @@ Deno.test("onCompact configured but no hookCtx warns and is skipped, without fai
       callModel: () => Promise.resolve("summary text"),
       onCompact: () => {
         called = true;
-        return Promise.resolve();
+        return Promise.resolve(undefined);
       },
     });
   } finally {
@@ -484,7 +484,7 @@ Deno.test("onCompact fires pre then post on the drop fallback too", async () => 
     callModel: () => Promise.reject(new Error("502")),
     onCompact: (phase) => {
       phases.push(phase);
-      return Promise.resolve();
+      return Promise.resolve(undefined);
     },
     hookCtx: fakeHookCtx,
   });
