@@ -55,3 +55,53 @@ Deno.test("fetchSupportModelOverride: throws on an unrepresentable provider", as
     "claude-code",
   );
 });
+
+// Regression: an `openai-compatible` config could be assigned to d2esupport in devx
+// Settings and then threw "unsupported provider" on EVERY turn — the provider
+// list devx offers and the one d2esupport accepted had silently diverged.
+Deno.test("fetchSupportModelOverride: accepts openai-compatible and normalises it to openai", async () => {
+  const fakeFetch = async () =>
+    new Response(
+      JSON.stringify({
+        configured: true,
+        provider: "openai-compatible",
+        model: "gpt-5.6-sol",
+        apiKey: "sk-x",
+        baseUrl: "https://example.cognitiveservices.azure.com/openai/v1",
+      }),
+      { status: 200 },
+    );
+  const result = await fetchSupportModelOverride(env({ D2ESUPPORT_USER_ID: "user-1" }), fakeFetch, async () => "token");
+  // Normalised: ModelSpec's provider union has no `openai-compatible` member,
+  // and the runtime builds the same client for both — the base URL is the
+  // only thing that distinguishes them.
+  assertEquals(result, {
+    provider: "openai",
+    modelId: "gpt-5.6-sol",
+    apiKey: "sk-x",
+    baseURL: "https://example.cognitiveservices.azure.com/openai/v1",
+  });
+});
+
+Deno.test("fetchSupportModelOverride: openai-compatible without a base URL is refused, not silently sent to OpenAI", async () => {
+  const fakeFetch = async () =>
+    new Response(
+      JSON.stringify({ configured: true, provider: "openai-compatible", model: "gpt-5.6-sol", apiKey: "sk-x", baseUrl: null }),
+      { status: 200 },
+    );
+  await assertRejects(
+    () => fetchSupportModelOverride(env({ D2ESUPPORT_USER_ID: "user-1" }), fakeFetch, async () => "token"),
+    Error,
+    "no base URL",
+  );
+});
+
+Deno.test("fetchSupportModelOverride: a genuinely unsupported provider still throws", async () => {
+  const fakeFetch = async () =>
+    new Response(JSON.stringify({ configured: true, provider: "claude-code", model: "x", apiKey: null, baseUrl: null }), { status: 200 });
+  await assertRejects(
+    () => fetchSupportModelOverride(env({ D2ESUPPORT_USER_ID: "user-1" }), fakeFetch, async () => "token"),
+    Error,
+    "unsupported provider",
+  );
+});
