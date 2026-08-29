@@ -46,7 +46,7 @@ Deno.test("a probe error counts as not-ready rather than throwing", async () => 
   assertEquals(ok, false);
 });
 
-import { applyAtlasDbInit } from "./atlas-db-init.ts";
+import { applyAtlasDbInit, REQUIRED_TABLES, requiredTablesFor } from "./atlas-db-init.ts";
 
 function deps(over: Record<string, unknown> = {}) {
   const applied: string[] = [];
@@ -119,4 +119,19 @@ Deno.test("applies nothing when the directory is absent", async () => {
   const count = await applyAtlasDbInit(d as never);
   assertEquals(count, 0);
   assertEquals(applied.length, 0);
+});
+
+Deno.test("trex does not wait for logto.users before seeding", () => {
+  // sec_external_role_map is what turns a token's `admin` claim into WebAPI's
+  // admin role. Waiting on a table a trex stack need never populate delays that
+  // seeding, and the first caller then gets 403 from a correctly configured
+  // stack -- observed on a fresh database, with setup running minutes before the
+  // map existed.
+  assertEquals(requiredTablesFor("trex"), [{ schema: "webapi", table: "sec_role" }]);
+});
+
+Deno.test("logto keeps the full wait, unchanged", () => {
+  for (const idp of ["logto", "", undefined, "LOGTO"]) {
+    assertEquals(requiredTablesFor(idp), REQUIRED_TABLES, `idp=${idp}`);
+  }
 });
