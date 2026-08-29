@@ -162,13 +162,17 @@ Deno.test("flattenForSummary emits no structured tool blocks, only plain text", 
   const text = flattenForSummary([
     { role: "user", content: "read config.ts" },
     { role: "assistant", content: [{ type: "tool-call", toolCallId: "c1", toolName: "Read", input: { path: "config.ts" } }] },
-    { role: "tool", content: [{ type: "tool-result", toolCallId: "c1", toolName: "Read", output: "PORT = 8080" }] },
+    {
+      role: "tool",
+      content: [{ type: "tool-result", toolCallId: "c1", toolName: "Read", output: { type: "text", value: "PORT = 8080" } }],
+    },
     { role: "assistant", content: [{ type: "text", text: "It sets PORT." }] },
   ]);
   assertEquals(typeof text, "string");
   assert(text.includes("read config.ts"));
   assert(text.includes("Read"), "the tool name must survive flattening");
   assert(text.includes("PORT = 8080"), "the tool output must survive flattening");
+  assert(!text.includes('"value"'), "the ToolResultOutput envelope leaked into the transcript");
   assert(text.includes("It sets PORT."));
 });
 

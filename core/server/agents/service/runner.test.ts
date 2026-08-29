@@ -1,10 +1,14 @@
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
-import { runTurn } from "./runner.ts";
+import { runTurn, makePrepareStep } from "./runner.ts";
 import { loadAgent } from "../loader.ts";
+import type { LoadedAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
 import type { HookCtx } from "../eve-shim/types.ts";
+import { createSpawnCapabilities, type SpawnCapabilities } from "./spawn.ts";
+import { DEFAULT_CONTEXT_CONFIG } from "./context/budget.ts";
+import { publish } from "./stream.ts";
 
 const TOY = new URL("../testdata/toy-agent/agent", import.meta.url).pathname;
 
@@ -364,6 +368,75 @@ Deno.test("built-in skill tool returns available list for unknown skill", async 
   assert(JSON.stringify(ev.data.result.output).includes("greeting-style"));
 });
 
+// Fix round 1 (task-6-7-report.md), Finding 1: the built-in `agent` tool now
+// ALWAYS routes through a real child session (ctx.spawn is required, no more
+// in-process fallback) — see toolset.ts's agentTool/runAsChild. A bare
+// runTurn() call (this file drives runTurn directly, not through
+// handler.ts's startTurn) must wire RunTurnOpts.spawn itself, same as
+// hooks.test.ts's makeChildSpawn.
+interface FakeChild {
+  status: "running" | "completed" | "failed";
+  steps: Array<{ kind: string; name: string | null; payload: unknown }>;
+}
+
+function makeChildSpawn(agent: LoadedAgent, model: unknown): SpawnCapabilities {
+  const children = new Map<string, FakeChild>();
+  let n = 0;
+  return createSpawnCapabilities({
+    sessionId: "p-1",
+    turnId: "pt-1",
+    plugin: "toy-agent",
+    agent: "toy",
+    config: DEFAULT_CONTEXT_CONFIG,
+    allowDetached: false,
+    store: {
+      countChildren: () => Promise.resolve({ live: 0, total: children.size }),
+      listChildren: () => Promise.resolve([]),
+      createChildSession: () => {
+        const id = `c-${++n}`;
+        children.set(id, { status: "running", steps: [] });
+        return Promise.resolve(id);
+      },
+      getHistory: (sessionId: string) => {
+        const child = children.get(sessionId);
+        return Promise.resolve(child ? [{ seq: 1, message: "", metadata: null, steps: child.steps }] : []);
+      },
+      getChild: (agentId: string) => {
+        const child = children.get(agentId);
+        return Promise.resolve(
+          child
+            ? { agentId, nickname: "Kid", subagent: null, status: child.status, startedAt: new Date(), detached: false }
+            : null,
+        );
+      },
+      failTurnsForSession: () => Promise.resolve(0),
+      queueFollowUp: () => Promise.resolve(),
+      takeFollowUps: () => Promise.resolve([]),
+    },
+    startChildTurn: (o) => {
+      const child = children.get(o.sessionId)!;
+      const target = o.subagent ? agent.subagents[o.subagent] : agent;
+      const fakeStore = {
+        addStep: (_turnId: string, _seq: number, kind: string, name: string | null, payload: unknown) => {
+          child.steps.push({ kind, name, payload });
+          return Promise.resolve();
+        },
+      };
+      (async () => {
+        try {
+          await runTurn({
+            agent: target, sessionId: o.sessionId, turnId: "ct-1", history: o.history ?? [],
+            message: o.message, store: fakeStore as never, emit: (e) => publish(o.sessionId, e), model,
+          });
+          child.status = "completed";
+        } catch {
+          child.status = "failed";
+        }
+      })();
+    },
+  });
+}
+
 Deno.test("built-in agent tool runs a named subagent and returns its text", async () => {
   const agent = await loadAgent(TOY);
   const { store } = memoryStoreCalls();
@@ -378,6 +451,7 @@ Deno.test("built-in agent tool runs a named subagent and returns its text", asyn
   await runTurn({
     agent, sessionId: "s-1", turnId: "t-1", history: [],
     message: "delegate", store, emit: (e) => events.push(e), model,
+    spawn: makeChildSpawn(agent, model),
   });
   const ev = events.find(
     (e) => e.type === "action.result" && (e as { data: { result: { toolName: string } } }).data.result.toolName === "agent",
@@ -386,6 +460,15 @@ Deno.test("built-in agent tool runs a named subagent and returns its text", asyn
   assertEquals(ev.data.result.output?.text, "BANANA");
 });
 
+// This only proves buildSdkTools' own `if (depth === 0)` gate works when
+// `depth` is handed to it directly — it says nothing about where a REAL
+// child turn's depth comes from. It kept passing, for the wrong reason,
+// through the entire window where a real child turn (started via
+// handler.ts's startChildTurn -> runTurn) always ran at depth 0 regardless
+// (ctx.depth defaulted to 0 and nothing ever set it for a child), so a child
+// could spawn a grandchild. See the test below for the fix (depth derived
+// from store.isChildSession, not threaded) exercised through the real
+// runTurn.
 Deno.test("subagent runs do not get a nested agent tool (one level only)", async () => {
   const agent = await loadAgent(TOY);
   const { buildSdkTools } = await import("./toolset.ts");
@@ -394,6 +477,53 @@ Deno.test("subagent runs do not get a nested agent tool (one level only)", async
   const top = await buildSdkTools({ agent, sessionId: "s-1", depth: 0 });
   assert("agent" in top);
   assert("skill" in top);
+});
+
+// Fix round 2 (task-6-7-report.md): depth must come from durable state
+// (agents.sessions.parent_session_id via store.isChildSession), not a value
+// threaded down from spawn time — see handler.ts's startTurn and its own
+// comment for why. This drives the REAL runTurn (not just buildSdkTools in
+// isolation) with a depth value obtained from the REAL store.isChildSession,
+// against a session genuinely shaped like a child (parent_session_id set),
+// and inspects the actual tool schema sent to the model (via
+// capturingModel) rather than reaching into buildSdkTools' return value —
+// proving the tool is truly withheld from the model, not just absent from
+// some intermediate object nothing downstream reads.
+Deno.test("depth is derived from durable state: a child session's own turn never gets the agent tool, a top-level session's still does", async () => {
+  const agent = await loadAgent(TOY);
+  const query = (sql: string, params: unknown[] = []) => {
+    if (sql.includes("SELECT parent_session_id FROM agents.sessions")) {
+      const sid = params[0] as string;
+      return Promise.resolve({ rows: [{ parent_session_id: sid === "child-1" ? "parent-1" : null }] });
+    }
+    return Promise.resolve({ rows: [] });
+  };
+  const store = createStore(query as never);
+
+  const topDepth = (await store.isChildSession("top-1")) ? 1 : 0;
+  const childDepth = (await store.isChildSession("child-1")) ? 1 : 0;
+  assertEquals(topDepth, 0, "a session with no parent_session_id is depth 0");
+  assertEquals(childDepth, 1, "a session WITH a parent_session_id is depth 1");
+
+  const top = capturingModel(textChunks("ok"));
+  await runTurn({
+    agent, sessionId: "top-1", turnId: "t-1", history: [], message: "hi",
+    store, emit: () => {}, model: top.model, depth: topDepth,
+  });
+  assert(
+    top.calls[0].tools?.some((t: { name: string }) => t.name === "agent"),
+    "a top-level turn must still get the built-in agent tool",
+  );
+
+  const child = capturingModel(textChunks("ok"));
+  await runTurn({
+    agent, sessionId: "child-1", turnId: "t-2", history: [], message: "hi",
+    store, emit: () => {}, model: child.model, depth: childDepth,
+  });
+  assert(
+    !child.calls[0].tools?.some((t: { name: string }) => t.name === "agent"),
+    "a child session's own turn must NOT get the agent tool — this is what keeps depth capped at one level",
+  );
 });
 
 // ToolContext.emit: the session path publishes a live tool.event and persists a
@@ -832,4 +962,156 @@ Deno.test("a single-step turn's lastStepInputTokens equals its only step's prefi
   assert(finish, "no finish step was persisted");
   assertEquals(finish.usage.lastStepInputTokens, 4_242);
   assertEquals(finish.usage.inputTokens, 4_242);
+});
+
+// ---------------------------------------------------------------------------
+// Task 12 (2026-08-27-agent-orchestration): agent_send / prepareStep. A child
+// has exactly ONE turn, so a message queued for it (spawn.ts's sendToChild)
+// is only meaningful DURING that turn — prepareStep is the only hook that
+// runs BETWEEN steps of an already-streaming turn. See
+// .superpowers/sdd/2026-08-27-agent-orchestration/task-12-brief.md.
+// ---------------------------------------------------------------------------
+
+Deno.test("makePrepareStep injects a pending follow-up before the next step", async () => {
+  const drained: string[] = [];
+  const prepare = makePrepareStep({
+    sessionId: "c-1",
+    store: {
+      takeFollowUps: (sid: string) => {
+        drained.push(sid);
+        return Promise.resolve([{ message: "stop and summarize", originChildSessionId: null }]);
+      },
+    },
+  });
+  const out = await prepare({ messages: [{ role: "user", content: "go" }] } as never);
+  assertEquals(drained, ["c-1"]);
+  const msgs = (out as { messages: unknown[] }).messages;
+  assertEquals(msgs.length, 2);
+  assert(JSON.stringify(msgs[1]).includes("stop and summarize"));
+});
+
+Deno.test("makePrepareStep leaves messages untouched when nothing is pending", async () => {
+  const prepare = makePrepareStep({
+    sessionId: "c-1",
+    store: { takeFollowUps: () => Promise.resolve([]) },
+  });
+  const out = await prepare({ messages: [{ role: "user", content: "go" }] } as never);
+  assertEquals(out, {});
+});
+
+Deno.test("runTurn wires prepareStep to drain a child session's pending follow-ups between steps", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const drainCalls: number[] = [];
+  const wrapped = {
+    ...store,
+    takeFollowUps: (_sid: string) => {
+      drainCalls.push(drainCalls.length);
+      // Nothing pending before step 1; a message lands before step 2.
+      return Promise.resolve(
+        drainCalls.length === 1 ? [] : [{ message: "please wrap up now", originChildSessionId: null }],
+      );
+    },
+  };
+  const { model, calls } = capturingModel(toolCallChunks("echo", { text: "hi" }), textChunks("done"));
+  await runTurn({
+    agent, sessionId: "c-1", turnId: "t-1", history: [],
+    message: "start", store: wrapped as never, emit: () => {},
+    model, depth: 1,
+  });
+  assert(drainCalls.length >= 2, "prepareStep should run before each step of a child's turn");
+  const secondCallPrompt = JSON.stringify(calls[1]?.prompt ?? calls[1]);
+  assert(secondCallPrompt.includes("please wrap up now"), "the pending follow-up should reach the model's next step");
+});
+
+// --- agent_stop's interrupt half (aborts.ts) --------------------------------
+//
+// The signal must reach the PROVIDER call, not merely be accepted by runTurn:
+// what an interrupt has to cancel is the in-flight model request, which is
+// the only thing here that can be mid-flight for minutes while the child
+// keeps calling tools and keeps billing.
+Deno.test("runTurn hands its abort signal to the model call", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const controller = new AbortController();
+  const { model, calls } = capturingModel(textChunks("done"));
+  await runTurn({
+    agent, sessionId: "c-1", turnId: "t-1", history: [],
+    message: "explore", store, emit: () => {},
+    model, depth: 1, abortSignal: controller.signal,
+  });
+  assertEquals(calls[0].abortSignal, controller.signal, "the model call must receive the turn's abort signal");
+});
+
+// ai emits an `abort` part and then simply ENDS the stream. Left unhandled,
+// runTurn would return normally and a stopped turn would be reported as a
+// completed one — and handler.ts would take its success path, delivery to the
+// parent included, for a turn that produced nothing.
+Deno.test("an aborted turn fails (and persists why) rather than reporting a completed turn", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const steps: Array<{ kind: string; payload: unknown }> = [];
+  const recording = {
+    ...store,
+    addStep: (_t: string, _s: number, kind: string, _n: unknown, payload: unknown) => {
+      steps.push({ kind, payload });
+      return Promise.resolve();
+    },
+  };
+  const controller = new AbortController();
+  const model = new MockLanguageModelV3({
+    // Stalls until the abort lands — the shape a real long child turn has
+    // when its parent stops it.
+    // deno-lint-ignore no-explicit-any
+    doStream: async (options: any) => {
+      await new Promise<void>((resolve) => {
+        if (options.abortSignal?.aborted) return resolve();
+        options.abortSignal?.addEventListener("abort", () => resolve());
+      });
+      // An empty stream rather than simulateReadableStream: the latter
+      // schedules a real timer per chunk, and nothing consumes them once the
+      // turn has been aborted — Deno's leak sanitizer counts those.
+      return {
+        stream: new ReadableStream({
+          start(c) {
+            c.close();
+          },
+        }),
+      };
+    },
+  });
+  const run = runTurn({
+    agent, sessionId: "c-1", turnId: "t-1", history: [],
+    message: "explore", store: recording as never, emit: () => {},
+    model, depth: 1, abortSignal: controller.signal,
+  });
+  controller.abort();
+  const err = await assertRejects(() => run, Error);
+  assert(err.message.includes("aborted"), `expected an abort failure, got: ${err.message}`);
+  const errorStep = steps.find((s) => s.kind === "error");
+  assert(errorStep, "an aborted turn must persist an error step so a replay shows why it stops here");
+  assert(
+    JSON.stringify(errorStep.payload).includes("aborted"),
+    `the persisted reason must say the turn was aborted, got: ${JSON.stringify(errorStep.payload)}`,
+  );
+});
+
+Deno.test("runTurn never calls takeFollowUps for a top-level (non-child) turn — the hot-path cost note", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  let called = false;
+  const wrapped = {
+    ...store,
+    takeFollowUps: (_sid: string) => {
+      called = true;
+      return Promise.resolve([]);
+    },
+  };
+  await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "hi", store: wrapped as never, emit: () => {},
+    model: sequencedModel(textChunks("ok")),
+    // depth omitted entirely — the overwhelmingly common (top-level) case.
+  });
+  assertEquals(called, false, "a top-level turn must not query the follow-up queue at all");
 });

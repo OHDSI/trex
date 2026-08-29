@@ -28,7 +28,14 @@ export interface TurnRow {
 export type AssistantPart =
   | { type: "text"; text: string }
   | { type: "tool-call"; toolCallId: string; toolName: string; input: unknown };
-export type ToolResultPart = { type: "tool-result"; toolCallId: string; toolName: string; output: unknown };
+// ai@6 requires a tool result's `output` to be the tagged ToolResultOutput
+// union, not a bare value: standardizePrompt rejects anything else with
+// AI_InvalidPromptError BEFORE the provider is reached, so every turn that
+// followed a turn containing a tool call died. Only the two shapes a replay
+// can produce are modelled here — `error-text`/`execution-denied` belong to
+// the SDK's own live path, which builds its messages itself.
+export type ToolResultOutput = { type: "text"; value: string } | { type: "json"; value: unknown };
+export type ToolResultPart = { type: "tool-result"; toolCallId: string; toolName: string; output: ToolResultOutput };
 export type ModelMessage =
   | { role: "user"; content: string }
   | { role: "assistant"; content: AssistantPart[] }
@@ -77,18 +84,52 @@ export function assembleHistory(turns: TurnRow[], config: ContextConfig): ModelM
         });
       } else if (s.kind === "tool-result") {
         const cap = turnIndex >= freshFrom ? config.freshToolOutputChars : config.staleToolOutputChars;
-        const raw = typeof p.output === "string" ? p.output : JSON.stringify(p.output ?? "");
         msgs.push({
           role: "tool",
           content: [{
             type: "tool-result", toolCallId: String(p.toolCallId),
-            toolName: s.name ?? "", output: truncateMiddle(raw, cap),
+            toolName: s.name ?? "", output: toResultOutput(p.output, cap),
           }],
         });
       }
     }
   }
   return msgs;
+}
+
+/**
+ * Tags a stored tool output as ai@6's ToolResultOutput, applying the tier cap.
+ *
+ * toolset.ts's wrapToolWithCap returns a result UNCHANGED when it already
+ * fits, so agents.steps genuinely holds objects as well as strings: a
+ * structured result stays structured (`json`) instead of being flattened into
+ * a string the model has to re-parse. Only the string form is truncatable, so
+ * anything over the tier cap is serialized once and lands as `text` carrying
+ * truncateMiddle's header. The stale tier's cap is far smaller than the
+ * storage-time cap, so an object CAN be over it here despite being under it
+ * when stored — measuring rather than assuming is what keeps the stale
+ * squeeze real.
+ *
+ * null/undefined becomes `{type:"json", value:null}`: a tool that returned
+ * nothing is faithfully "no value", and json reaches the wire as the literal
+ * `null` rather than as an empty text block, which some providers reject.
+ */
+function toResultOutput(output: unknown, cap: number): ToolResultOutput {
+  if (typeof output === "string") return { type: "text", value: truncateMiddle(output, cap) };
+  if (output === null || output === undefined) return { type: "json", value: null };
+  let text: string | undefined;
+  try {
+    text = JSON.stringify(output);
+  } catch {
+    // Circular / BigInt-bearing: wrapToolWithCap deliberately passes such a
+    // result through uncapped rather than failing the tool, so it can reach
+    // storage. Failing to MEASURE it must not kill the turn replaying it.
+    return { type: "text", value: truncateMiddle(String(output), cap) };
+  }
+  // undefined comes back for a value JSON cannot represent at all (a bare
+  // function or symbol) — nothing to send, same as no result.
+  if (text === undefined) return { type: "json", value: null };
+  return text.length <= cap ? { type: "json", value: output } : { type: "text", value: truncateMiddle(text, cap) };
 }
 
 export const SYNTHETIC_RESULT_TEXT = "[no result recorded — turn was interrupted]";
@@ -113,7 +154,7 @@ export function ensureToolResultsPresent(msgs: ModelMessage[]): ModelMessage[] {
         role: "tool",
         content: [{
           type: "tool-result", toolCallId: part.toolCallId,
-          toolName: part.toolName, output: SYNTHETIC_RESULT_TEXT,
+          toolName: part.toolName, output: { type: "text", value: SYNTHETIC_RESULT_TEXT },
         }],
       });
       resolved.add(part.toolCallId);

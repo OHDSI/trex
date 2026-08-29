@@ -3,18 +3,21 @@
 // Shared by runner.ts (session API) and handler.ts (/chat) so the two
 // endpoints cannot drift. Spec §3 (skills/subagents) + §4 (extensions).
 // deno-lint-ignore-file no-explicit-any
-import { streamText, tool, jsonSchema, stepCountIs } from "ai";
-import { cacheProviderOptions, resolveModel, withSystemCachePoint, withToolCachePoint } from "./model.ts";
+import { tool, jsonSchema } from "ai";
+import { withToolCachePoint } from "./model.ts";
 import { isZodSchema } from "../eve-shim/types.ts";
 import type { HookCtx, ToolDef } from "../eve-shim/types.ts";
 import type { LoadedAgent } from "../loader.ts";
+import { resolveChildSkills } from "../loader.ts";
 import { buildConnectionProvider, type ConnectionProviderOpts } from "../connections/provider.ts";
 import { type ConnectionToolMeta, searchConnectionTools } from "../connections/search.ts";
 import type { AgentStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
+import { subscribe } from "./stream.ts";
 import { TRUNCATION_HEADER_OVERHEAD, truncateMiddle } from "./context/truncate.ts";
 import type { ContextConfig } from "./context/budget.ts";
 import { partitionTools } from "./context/toolsplit.ts";
+import { type SpawnCapabilities, WAIT_DEFAULT_MS, WAIT_MAX_MS } from "./spawn.ts";
 
 export interface ToolBuildCtx {
   agent: LoadedAgent;
@@ -36,9 +39,13 @@ export interface ToolBuildCtx {
   // authoredTool passes it through as-is, matching ToolContext.emit's "safe
   // no-op when unwired" contract (eve-shim/types.ts) since an absent field
   // makes `ctx?.emit?.(...)` a no-op at the call site, not a throw here.
-  // Inherited by subagent runs (depth 1) via runSubagent's `{ ...ctx }`
-  // spread below — a subagent's tool.event lands on the SAME channel
-  // (session stream / chat writer) as its parent's, not a distinct one.
+  // A depth-1 (child) turn gets its OWN toolEmit, wired the same way as any
+  // top-level turn's (session stream / chat writer) — a child's tool calls
+  // are not inherently visible on its PARENT's channel. Delegation
+  // (toolset.ts's runAsChild) bridges them back explicitly: it subscribes to
+  // the child's own event stream and re-emits its tool-call/tool-result
+  // pairs onto the parent's toolEmit as subagent.tool, alongside the coarse
+  // subagent.start/end it emits directly.
   toolEmit?: (name: string, data: unknown) => void;
   approvalPollMs?: number;
   approvalTimeoutMs?: number;
@@ -73,6 +80,15 @@ export interface ToolBuildCtx {
   // activation state (or an agent with no deferredTools at all) simply never
   // see a deferred tool withheld-then-revealed.
   activatedTools?: string[];
+  // Child-spawn capabilities for the `agent`/`agent_spawn`/`agent_wait`/...
+  // built-ins — see spawn.ts's createSpawnCapabilities, built once per turn
+  // by handler.ts's startTurn (both the session/turn path and /chat wire
+  // it — see fix-round-1 in task-6-7-report.md). Optional only because the
+  // TypeScript type must accommodate a caller that never sets it (mostly
+  // unit tests exercising unrelated tools); the `agent` tool itself treats a
+  // missing one as a wiring bug and rejects loudly rather than falling back
+  // to anything — see agentTool.
+  spawn?: SpawnCapabilities;
 }
 
 export function buildSystemPrompt(agent: LoadedAgent, metadata?: unknown): string {
@@ -252,97 +268,168 @@ function skillTool(ctx: ToolBuildCtx): any {
   });
 }
 
-// Runs a subagent (or a copy of the current agent) as a nested loop with
-// fresh history. Nested activity is streamed step-by-step via toolEmit
-// (subagent.start/tool/end, one runId per invocation) so a delegated turn
-// is not opaque until it finishes; no UI consumes these events yet.
-async function runSubagent(target: LoadedAgent, prompt: string, ctx: ToolBuildCtx): Promise<{ text: string }> {
-  // A subagent's own declared model wins; otherwise inherit the caller's
-  // (already-resolved) model, resolving the parent's string as last resort.
-  const model = target.config.model
-    ? resolveModel(target.config.model)
-    : ctx.model ?? resolveModel(ctx.agent.config.model);
-  // depth: 1 suppresses the target's own dynamic-tools.ts provider (a
-  // top-level-only concern, same rationale as skill/agent built-ins being
-  // top-level-only — see buildSdkTools) but NOT target.config.filterTools,
-  // which still runs against depth-1's (smaller) tool set using the same
-  // hookCtx carried in via the ...ctx spread.
-  const tools = await buildSdkTools({ ...ctx, agent: target, depth: 1 });
-  // Resolved through the same path a top-level turn uses (resolveInstructions),
-  // not the bare static buildSystemPrompt — a subagent is not a
-  // second-class turn, and its target may define its own buildInstructions
-  // hook (e.g. project rules, session state) that a static prompt can never
-  // carry. hookCtx comes along via the `...ctx` spread above.
-  const system = await resolveInstructions(target, ctx.metadata, ctx.hookCtx);
-  // Same cache-point treatment (bedrock + anthropic) as runner.ts's
-  // primary turn loop, for consistency — a subagent's system+tools prefix is
-  // just as stable/repeated (across its own steps) as the top-level turn's.
-  const result = streamText({
-    model,
-    system: withSystemCachePoint(model, system),
-    messages: [{ role: "user" as const, content: prompt }],
-    tools,
-    stopWhen: stepCountIs(target.config.maxSteps ?? 25),
-    // Same openai prompt-cache routing as runner.ts, keyed by the subagent's dir.
-    providerOptions: cacheProviderOptions(model, target.dir),
-  });
-  // Consume fullStream for progress events (subagent.tool) so the nested
-  // turn's steps reach the UI via toolEmit (already threaded in via the
-  // {...ctx} spread above — no new plumbing). Part shapes match runner.ts's
-  // own switch over this same ai@6 stream (toolCallId/toolName/input/output).
-  // runId keeps concurrent subagent runs apart on the shared channel.
-  // LoadedAgent has no `name` field (see loader.ts) — derive it from the
-  // agent's directory, the same way handler.ts's subagents.local listing
-  // does for depth-0 subagents (Object.entries key there; here we only have
-  // `target`, so its dir's basename is the closest equivalent).
-  const runId = crypto.randomUUID();
-  const agentName = target.dir.split("/").filter(Boolean).pop() ?? target.dir;
-  ctx.toolEmit?.("subagent.start", { runId, agent: agentName });
-  let text = "";
-  let error: string | undefined;
-  try {
-    for await (const part of result.fullStream) {
-      const p = part as any;
-      switch (p.type) {
-        case "tool-call":
-          ctx.toolEmit?.("subagent.tool", { runId, callId: p.toolCallId, name: p.toolName, input: p.input });
-          break;
-        case "tool-result":
-          ctx.toolEmit?.("subagent.tool", { runId, callId: p.toolCallId, name: p.toolName, result: p.output });
-          break;
-        case "error":
-          // fullStream surfaces a model/stream error as an "error" part
-          // WITHOUT throwing out of the for-await loop, and result.text
-          // below still resolves (to whatever text preceded the error)
-          // rather than rejecting — verified empirically (task-4-report.md).
-          // So this must be captured explicitly or it is silently dropped.
-          error = p.error instanceof Error ? p.error.message : String(p.error ?? "unknown model error");
-          break;
-      }
+// Shared JSON Schema for the fork_turns parameter — reused by agent_spawn
+// (Task 9) so both spawn paths describe the trade-off identically.
+const FORK_TURNS_SCHEMA = {
+  type: "string",
+  description: 'How much of YOUR history to give the subagent: "none" (default) may leave it ' +
+    'without context it needs; "all" gives it everything, at real token cost; or a number for the ' +
+    "most recent N turns.",
+};
+
+type SubagentResolution =
+  | { ok: true; target: LoadedAgent }
+  | { ok: false; error: { error: string; available: string[] } };
+
+// Shared by every id-taking spawn path (agentTool here; agent_spawn in Task
+// 9) so the guard below cannot drift between them.
+function resolveTarget(ctx: ToolBuildCtx, name?: string): SubagentResolution {
+  const names = Object.keys(ctx.agent.subagents);
+  // Object.hasOwn guards against a model-supplied "__proto__" or
+  // "constructor" resolving through the prototype chain instead of a real
+  // subagent entry — a plain `ctx.agent.subagents[name]` lookup would return
+  // Object.prototype/Function itself for those names and crash the turn
+  // (e.g. `.instructions` access downstream) instead of falling into the
+  // ordinary "unknown subagent" result.
+  const target = name
+    ? (Object.hasOwn(ctx.agent.subagents, name) ? ctx.agent.subagents[name] : undefined)
+    : ctx.agent;
+  if (!target) return { ok: false, error: { error: `unknown subagent "${name}"`, available: names } };
+  return { ok: true, target };
+}
+
+// Task 14: reducing only (codex role.rs) — a delegating session can never
+// advertise a child MORE skills than it itself has. Called by handler.ts's
+// buildSpawnCapabilities at the point it resolves which LoadedAgent will
+// actually run the child's turn (NOT here in resolveTarget: that function's
+// result is only used for validation/description text by agentTool/
+// agent_spawn — the child's real turn re-resolves the subagent independently
+// in handler.ts, so that is the only place a restriction actually takes
+// effect). A self-delegation (`childAgent === parentAgent`, i.e. "delegate to
+// a copy of yourself") is returned unchanged: there is nothing to reduce
+// against, and re-filtering would be a costly no-op on the common path.
+//
+// The child's own skills/ directory stays authoritative for CONTENT (a
+// child never gains a skill neither side loaded); `childAgent.config.skills`,
+// when declared, further narrows which of the PARENT's names the child may
+// use; left undeclared, the child inherits every name the parent currently
+// has (resolveChildSkills' `undefined` case) — capped, either way, by what
+// the child's own directory actually loaded.
+//
+// What this filters TODAY is the child's advertised skill list — the "##
+// Skills" section of its system prompt and the built-in `skill` tool's own
+// description (buildSystemPrompt/skillTool) — NOT a live privilege: this
+// module's own buildSdkTools gates the `skill` tool behind `depth === 0`,
+// and every child runs at depth 1, so a child cannot invoke any skill at
+// all today regardless of this field. Kept anyway: if a later change ever
+// lets a child invoke skills, THIS is the enforcement point that change
+// must route through, not something to assume already covers it.
+export function restrictChildSkills(parentAgent: LoadedAgent, childAgent: LoadedAgent): LoadedAgent {
+  if (childAgent === parentAgent) return childAgent;
+  const parentNames = parentAgent.skills.map((s) => s.name);
+  const allowed = new Set(resolveChildSkills(parentNames, childAgent.config.skills));
+  return { ...childAgent, skills: childAgent.skills.filter((s) => allowed.has(s.name)) };
+}
+
+// The other half of the spec's "tools and skills intersect the parent's,
+// never union". Skills were intersected from the start; TOOLS were not
+// intersected at all, so a subagent directory declaring tools/ entries its
+// parent does not have handed the child strictly MORE capability than the
+// session that delegated to it — the exact direction the reducing-only rule
+// exists to forbid.
+//
+// This is a static intersection over the two LoadedAgents' authored tool
+// maps, applied by handler.ts's buildSpawnCapabilities at the one point that
+// decides which LoadedAgent runs the child's turn (the same place
+// restrictChildSkills is applied, and for the same reason: the child's real
+// turn re-resolves the subagent independently, so nothing decided in
+// resolveTarget takes effect). It intentionally does NOT try to intersect
+// the built-in/dynamic/connection tools buildSdkTools adds later: those are
+// all gated on `depth === 0` and a child always runs at depth 1, so a child's
+// built map is exactly its (now-intersected) authored tools, filtered by the
+// filterTools hook under the PARENT's metadata (threaded in the same commit).
+//
+// Self-delegation (`childAgent === parentAgent`, "delegate to a copy of
+// yourself") is returned unchanged — there is nothing to reduce against, and
+// re-filtering would be a costly no-op on the common path.
+export function restrictChildTools(parentAgent: LoadedAgent, childAgent: LoadedAgent): LoadedAgent {
+  if (childAgent === parentAgent) return childAgent;
+  const tools: Record<string, ToolDef> = {};
+  for (const [name, def] of Object.entries(childAgent.tools)) {
+    // The PARENT's definition never replaces the child's: a subagent is
+    // allowed to narrow a tool it shares (its own needsApproval/description),
+    // just never to introduce one the parent lacks.
+    if (Object.hasOwn(parentAgent.tools, name)) tools[name] = def;
+    else {
+      console.log(
+        `agents: subagent ${childAgent.dir} declares tool "${name}", which ${parentAgent.dir} does not have — ` +
+          "dropped (a child's tools intersect its parent's, never union)",
+      );
     }
-    // Preserve the OLD (pre-Task-4) semantics exactly: `await result.text`
-    // resolves to only the FINAL step's text, not a sum of every step's
-    // text-delta (ai's recordedContent resets at each step boundary) —
-    // verified empirically that draining fullStream first neither hangs nor
-    // starves this promise (task-4-report.md). A preamble-then-tool-call
-    // step's text must NOT leak into the returned answer.
-    text = await result.text;
-    if (error) throw new Error(error);
-  } catch (e) {
-    error = error ?? (e instanceof Error ? e.message : String(e));
-    throw e;
-  } finally {
-    // Always fires, success or failure, so a subagent.start never goes
-    // without a matching subagent.end (observability: no dangling runs).
-    ctx.toolEmit?.("subagent.end", { runId, text, ...(error ? { error } : {}) });
   }
-  return { text };
+  return { ...childAgent, tools };
+}
+
+// Runs a delegated subtask as a real child session (see spawn.ts) and blocks
+// for its result — the `agent` tool's contract (blocking, `{text}`) is
+// unchanged; only the mechanism underneath it is now a durable session
+// instead of an in-process nested loop. subagent.start/tool/end toolEmit
+// events (one runId per invocation, same vocabulary the old in-process loop
+// used) still fire: the child publishes actions.requested/action.result on
+// its OWN session's live stream (runner.ts, via stream.ts's publish), same
+// as any turn does, so this subscribes to that stream for the duration of
+// the wait and translates them onto the PARENT's toolEmit channel.
+async function runAsChild(
+  ctx: ToolBuildCtx,
+  name: string | null,
+  prompt: string,
+  forkTurns: string | undefined,
+): Promise<{ text: string } | { error: string }> {
+  const { agentId, nickname } = await ctx.spawn!.spawnChild({
+    subagent: name,
+    prompt,
+    forkTurns: forkTurns ?? "none",
+    // Blocking delegation must spawn NON-detached: a detached child queues
+    // its completion as a followup on the parent and starts a redundant
+    // parent turn the moment this (still-running) turn ends.
+    detached: false,
+  });
+  const runId = agentId;
+  ctx.toolEmit?.("subagent.start", { runId, agent: name ?? undefined, nickname });
+  // No-op (not just unsubscribed) when nobody wired toolEmit — subscribing
+  // to a stream nobody will ever read is pure overhead.
+  const unsubscribe = ctx.toolEmit ? subscribe(agentId, (e: AgentEvent) => bridgeChildEvent(ctx, runId, e)) : undefined;
+  let result: { text: string } | { error: string };
+  try {
+    result = await ctx.spawn!.awaitChild(agentId);
+  } finally {
+    unsubscribe?.();
+  }
+  ctx.toolEmit?.("subagent.end", { runId, nickname, ...result });
+  return "error" in result ? { error: result.error } : { text: result.text };
+}
+
+// Translates the child's OWN tool-call/tool-result events (runner.ts emits
+// these for every turn, parent or child alike) into the parent's
+// subagent.tool toolEmit vocabulary. Best-effort: the child's turn also
+// publishes turn.started/message.appended/etc, which have no subagent.*
+// counterpart and are silently ignored here — this only ever needs the two
+// action shapes runSubagent (now removed) used to report.
+function bridgeChildEvent(ctx: ToolBuildCtx, runId: string, e: AgentEvent): void {
+  if (e.type === "actions.requested") {
+    for (const a of e.data.actions) {
+      ctx.toolEmit?.("subagent.tool", { runId, callId: a.callId, name: a.toolName, input: a.input });
+    }
+  } else if (e.type === "action.result") {
+    const r = e.data.result;
+    ctx.toolEmit?.("subagent.tool", { runId, callId: r.callId, name: r.toolName, result: r.output });
+  }
 }
 
 function agentTool(ctx: ToolBuildCtx): any {
   const names = Object.keys(ctx.agent.subagents);
   return tool({
-    description: `Delegate a focused subtask to a subagent with fresh context. ` +
+    description: `Delegate a focused subtask to a subagent with fresh context and wait for its result. ` +
       (names.length ? `Named subagents: ${names.join(", ")}. ` : "") +
       `Omit "agent" to delegate to a copy of yourself.`,
     inputSchema: jsonSchema({
@@ -350,6 +437,7 @@ function agentTool(ctx: ToolBuildCtx): any {
       properties: {
         agent: { type: "string", description: "subagent name (optional)" },
         prompt: { type: "string", description: "the subtask" },
+        fork_turns: FORK_TURNS_SCHEMA,
       },
       required: ["prompt"],
     }),
@@ -360,20 +448,20 @@ function agentTool(ctx: ToolBuildCtx): any {
     // arm and reject the JSON Schema inputSchema. Annotating sidesteps that
     // inference without changing runtime behavior.
     execute: (input: unknown): Promise<unknown> => {
-      const { agent: name, prompt } = input as { agent?: string; prompt: string };
-      // Object.hasOwn guards against a model-supplied "__proto__" or
-      // "constructor" resolving through the prototype chain instead of a
-      // real subagent entry — a plain `ctx.agent.subagents[name]` lookup
-      // would return Object.prototype/Function itself for those names and
-      // crash the turn (e.g. `.instructions` access downstream) instead of
-      // falling into the ordinary "unknown subagent" result.
-      const target = name
-        ? (Object.hasOwn(ctx.agent.subagents, name) ? ctx.agent.subagents[name] : undefined)
-        : ctx.agent;
-      if (!target) {
-        return Promise.resolve({ error: `unknown subagent "${name}"`, available: names });
+      const { agent: name, prompt, fork_turns } = input as { agent?: string; prompt: string; fork_turns?: string };
+      const resolved = resolveTarget(ctx, name);
+      if (!resolved.ok) return Promise.resolve(resolved.error);
+      // Both real routes (the session/turn path and /chat) always wire
+      // ctx.spawn — see handler.ts's buildSpawnCapabilities. A caller that
+      // doesn't is a wiring bug: fail loudly rather than silently reviving
+      // the old in-process nested loop, which would let fork_turns/error
+      // shape/progress-event behavior quietly diverge by call site again
+      // (see fix-round-1 in task-6-7-report.md for why that was a bug, not
+      // a feature).
+      if (!ctx.spawn) {
+        return Promise.reject(new Error("agents: the agent tool requires ctx.spawn to be wired"));
       }
-      return runSubagent(target, prompt, ctx);
+      return runAsChild(ctx, name ?? null, prompt, fork_turns);
     },
   });
 }
@@ -414,6 +502,12 @@ function connectionSearchTool(ctx: ToolBuildCtx, toolMeta: ConnectionToolMeta[])
 const BUILTIN_SKILL_DEF: ToolDef = { description: "Load an on-demand skill by name (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_AGENT_DEF: ToolDef = { description: "Delegate to a subagent (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_CONNECTION_SEARCH_DEF: ToolDef = { description: "Search connection-backed tools by keyword (built-in).", inputSchema: { type: "object" } };
+const BUILTIN_AGENT_SPAWN_DEF: ToolDef = { description: "Start a subagent and return immediately (built-in).", inputSchema: { type: "object" } };
+const BUILTIN_AGENT_LIST_DEF: ToolDef = { description: "List the subagents you have started that are still running (built-in).", inputSchema: { type: "object" } };
+const BUILTIN_AGENT_WAIT_DEF: ToolDef = { description: "Wait for a subagent to finish (built-in).", inputSchema: { type: "object" } };
+const BUILTIN_AGENT_RESULT_DEF: ToolDef = { description: "Read a finished subagent's output (built-in).", inputSchema: { type: "object" } };
+const BUILTIN_AGENT_STOP_DEF: ToolDef = { description: "Stop a subagent you started (built-in).", inputSchema: { type: "object" } };
+const BUILTIN_AGENT_SEND_DEF: ToolDef = { description: "Send a message to a running subagent (built-in).", inputSchema: { type: "object" } };
 
 // Caps a tool's output so no single call can push an unbounded blob into
 // agents.steps or the model's context. Applied in buildSdkTools (core
@@ -495,8 +589,9 @@ function serializedToolBytes(tools: Record<string, any>): number {
 //     throwing filter propagates uncaught: filterTools is an authored
 //     AgentConfig hook like resolveModel/buildInstructions, and shares their
 //     posture of never silently keeping/dropping a tool the author didn't
-//     actually decide on. See runSubagent for why step 2 is skipped but
-//     step 4 still runs at subagent depth (1).
+//     actually decide on. Step 2 (dynamic-tools.ts provider) is depth-0
+//     only by design (see below); step 4 (filterTools) still runs at depth
+//     1 too, on a child session's own turn.
 export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, any>> {
   const { agent } = ctx;
   const depth = ctx.depth ?? 0;
@@ -595,6 +690,189 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
     } else if (out.connection_search) {
       console.log("agents: a tool named \"connection_search\" overrides the built-in connection_search tool");
     }
+    // agent_spawn/agent_list (and agent_wait/agent_stop/agent_send, Tasks
+    // 10-12) are gated on ctx.spawn.allowDetached, NOT merely ctx.spawn being
+    // truthy: /chat wires ctx.spawn too (for the BLOCKING `agent` tool above)
+    // but its session is ephemeral — nothing will ever revisit it to observe
+    // a detached child's result, so these tools must not even be offered
+    // there. See spawn.ts's SpawnCapabilities.allowDetached.
+    if (ctx.spawn?.allowDetached) {
+      if (!out.agent_spawn) {
+        out.agent_spawn = tool({
+          description: "Start a subagent on a subtask and return immediately. Use agent_wait to " +
+            "learn when it finishes, or agent (blocking) when you have nothing else to do meanwhile.",
+          inputSchema: jsonSchema({
+            type: "object",
+            properties: {
+              agent: { type: "string", description: "subagent name (optional)" },
+              prompt: { type: "string", description: "the subtask" },
+              fork_turns: FORK_TURNS_SCHEMA,
+            },
+            required: ["prompt"],
+          }),
+          execute: async (input: unknown): Promise<unknown> => {
+            const { agent: name, prompt, fork_turns } = input as
+              { agent?: string; prompt: string; fork_turns?: string };
+            const resolved = resolveTarget(ctx, name);
+            if (!resolved.ok) return resolved.error;
+            const { agentId, nickname } = await ctx.spawn!.spawnChild({
+              subagent: name ?? null,
+              prompt,
+              forkTurns: fork_turns ?? "none",
+              detached: true,
+            });
+            return { agentId, nickname, subagent: name ?? null };
+          },
+        });
+        filterDefs.agent_spawn = BUILTIN_AGENT_SPAWN_DEF;
+      } else {
+        console.log("agents: a tool named \"agent_spawn\" overrides the built-in agent_spawn tool");
+      }
+
+      if (!out.agent_list) {
+        out.agent_list = tool({
+          description: "List the subagents you have started that are still RUNNING, with their " +
+            "nicknames and status. Finished ones are left out unless you pass " +
+            "include_finished: true — use agent_result to read what a finished subagent produced.",
+          inputSchema: jsonSchema({
+            type: "object",
+            properties: {
+              include_finished: {
+                type: "boolean",
+                description: "also list subagents that have already finished, failed or been stopped " +
+                  "(default false)",
+              },
+            },
+          }),
+          // Live-only by DEFAULT (the spec's tool table says "live children").
+          // A session may spawn up to MAX_CHILDREN_PER_SESSION children over
+          // its life, and an unfiltered listing puts every one of them —
+          // overwhelmingly finished ones — into the model's context every
+          // time it asks what is still running. The filter is applied in SQL
+          // (store.listChildren's liveOnly), not by discarding rows here.
+          execute: async (input: unknown): Promise<unknown> => {
+            const { include_finished } = (input ?? {}) as { include_finished?: boolean };
+            return { agents: await ctx.spawn!.listChildren({ liveOnly: include_finished !== true }) };
+          },
+        });
+        filterDefs.agent_list = BUILTIN_AGENT_LIST_DEF;
+      } else {
+        console.log("agents: a tool named \"agent_list\" overrides the built-in agent_list tool");
+      }
+
+      if (!out.agent_wait) {
+        out.agent_wait = tool({
+          description: "Wait until one of your subagents finishes. Returns each finished agent " +
+            "together with its OUTPUT (`result`, or `error` if it failed or was stopped). " +
+            "Returns an empty list on timeout; that is not an error.",
+          inputSchema: jsonSchema({
+            type: "object",
+            properties: {
+              agent_ids: { type: "array", items: { type: "string" }, description: "omit to wait on all" },
+              timeout_ms: { type: "number", description: `default ${WAIT_DEFAULT_MS}, max ${WAIT_MAX_MS}` },
+            },
+          }),
+          execute: async (input: unknown): Promise<unknown> => {
+            const { agent_ids, timeout_ms } = input as { agent_ids?: string[]; timeout_ms?: number };
+            const updated = await ctx.spawn!.waitForChildren(agent_ids ?? null, timeout_ms ?? WAIT_DEFAULT_MS);
+            // The output, not just the notification. deliverChildResult's
+            // queued followup only ever lands on a LATER parent turn, and a
+            // parent sitting inside agent_wait always has a running turn —
+            // so without reading the result here a parent could learn WHICH
+            // child finished but never WHAT it produced within its own turn.
+            return {
+              updated: await Promise.all(updated.map(async (c) => {
+                const outcome = await ctx.spawn!.readChildResult(c.agentId);
+                return {
+                  agentId: c.agentId,
+                  nickname: c.nickname,
+                  status: c.status,
+                  ...(outcome && "text" in outcome ? { result: outcome.text } : {}),
+                  ...(outcome && "error" in outcome ? { error: outcome.error } : {}),
+                };
+              })),
+              timedOut: updated.length === 0,
+            };
+          },
+        });
+        filterDefs.agent_wait = BUILTIN_AGENT_WAIT_DEF;
+      } else {
+        console.log("agents: a tool named \"agent_wait\" overrides the built-in agent_wait tool");
+      }
+
+      if (!out.agent_result) {
+        out.agent_result = tool({
+          description: "Read what one of your subagents produced. Only a FINISHED subagent has a " +
+            "result; one that is still running returns { running: true }. Use agent_list to see " +
+            "which of your subagents have finished.",
+          inputSchema: jsonSchema({
+            type: "object",
+            properties: { agent_id: { type: "string" } },
+            required: ["agent_id"],
+          }),
+          execute: async (input: unknown): Promise<unknown> => {
+            const { agent_id } = input as { agent_id: string };
+            const outcome = await ctx.spawn!.readChildResult(agent_id);
+            // null covers both "still running" and "not yours / unknown" —
+            // the same deliberate indistinguishability every other id-taking
+            // spawn path has (see spawn.ts's ownership comments).
+            if (!outcome) return { running: true };
+            return outcome;
+          },
+        });
+        filterDefs.agent_result = BUILTIN_AGENT_RESULT_DEF;
+      } else {
+        console.log("agents: a tool named \"agent_result\" overrides the built-in agent_result tool");
+      }
+
+      if (!out.agent_stop) {
+        out.agent_stop = tool({
+          description: "Stop a subagent you started: its turn is marked failed and you will never " +
+            "receive its result. It is usually interrupted immediately, but not guaranteed to be — " +
+            "if it is running on another worker it keeps running (and billing) until it finishes " +
+            "on its own, and whatever it produces is then discarded either way. Returns the " +
+            "status it had when stopped.",
+          inputSchema: jsonSchema({
+            type: "object",
+            properties: { agent_id: { type: "string" } },
+            required: ["agent_id"],
+          }),
+          execute: async (input: unknown): Promise<unknown> => {
+            const { agent_id } = input as { agent_id: string };
+            try {
+              return { previousStatus: await ctx.spawn!.stopChild(agent_id) };
+            } catch (e) {
+              return { error: e instanceof Error ? e.message : String(e) };
+            }
+          },
+        });
+        filterDefs.agent_stop = BUILTIN_AGENT_STOP_DEF;
+      } else {
+        console.log("agents: a tool named \"agent_stop\" overrides the built-in agent_stop tool");
+      }
+
+      if (!out.agent_send) {
+        out.agent_send = tool({
+          description: "Send a message to a subagent you started, while it is still running. There is no " +
+            "\"next turn\" to queue it for — a message sent after the subagent finishes is never read.",
+          inputSchema: jsonSchema({
+            type: "object",
+            properties: {
+              agent_id: { type: "string" },
+              message: { type: "string" },
+            },
+            required: ["agent_id", "message"],
+          }),
+          execute: async (input: unknown): Promise<unknown> => {
+            const { agent_id, message } = input as { agent_id: string; message: string };
+            return await ctx.spawn!.sendToChild(agent_id, message);
+          },
+        });
+        filterDefs.agent_send = BUILTIN_AGENT_SEND_DEF;
+      } else {
+        console.log("agents: a tool named \"agent_send\" overrides the built-in agent_send tool");
+      }
+    }
   }
 
   // Step 4: filterTools sees the complete merged set, built-ins included.
@@ -609,8 +887,10 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
   }
 
   // Step 5: cap every surviving tool's output (authored, dynamic, built-in
-  // alike). Subagents go through this too, via the recursive buildSdkTools
-  // call in runSubagent (depth 1) — no extra plumbing needed.
+  // alike). A child session's own turn goes through this too, via its own
+  // top-level runTurn -> buildSdkTools call (depth 1, derived from
+  // parent_session_id — see handler.ts's startTurn) — no extra plumbing
+  // needed.
   for (const name of Object.keys(out)) {
     out[name] = wrapToolWithCap(out[name], agent.config.context);
   }

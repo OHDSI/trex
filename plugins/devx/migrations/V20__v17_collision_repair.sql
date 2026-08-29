@@ -1,5 +1,13 @@
 -- Repair for the duplicate V17 version number.
 --
+-- NOTE (renumbered V18 -> V20): #278 landed its own V18 and, separately,
+-- renumbered V17__agent_model_selection.sql to V19 — which resolves the V17
+-- ambiguity directly. Every statement below is therefore a no-op against a
+-- chain that applies V17 and V19 cleanly. It is retained (rather than deleted)
+-- so a database that applied the ORIGINAL colliding V17 — recording version 17
+-- for whichever file won — still converges on the full schema. Safe to delete
+-- once no such database exists.
+--
 -- Two migrations shipped as version 17:
 --   V17__agent_model_selection.sql  (creates devx.agent_model_selection)
 --   V17__loop_default_agents.sql    (flips devx.settings.loop to 'agents')

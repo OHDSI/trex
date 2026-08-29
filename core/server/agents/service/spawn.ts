@@ -1,0 +1,361 @@
+// Child-spawn capabilities threaded onto ToolBuildCtx (see toolset.ts's
+// ToolBuildCtx.spawn). Built once per turn by handler.ts's startTurn and
+// passed down as a plain callback object — toolset.ts cannot import
+// handler.ts's (module-private) startTurn without creating an import cycle
+// (handler.ts already imports buildSdkTools from toolset.ts), so handler.ts
+// supplies `startChildTurn` as a closure instead. Same pattern as
+// `activateTools` being threaded onto ToolContext rather than the raw store.
+import type { ChildAgent } from "./orchestration.ts";
+import { checkSpawnAllowed, STOPPED_BY_PARENT_ERROR } from "./orchestration.ts";
+import { pickNickname } from "./nicknames.ts";
+import { abortChildTurn } from "./aborts.ts";
+import { forkParentHistory, parseForkTurns } from "./context/fork.ts";
+import type { ContextConfig } from "./context/budget.ts";
+import { FALLBACK_CONTEXT_WINDOW } from "./context/budget.ts";
+import type { FollowUp } from "./store.ts";
+import type { ModelMessage, TurnRow } from "./context/history.ts";
+import { STALE_TURN_MS } from "./turn-lifetime.ts";
+
+// A forked slice must leave the child's OWN system prompt, tool schemas and
+// the task instruction itself room to fit too. Fixed rather than a fraction
+// of the child's real context window: at spawn time the child's model isn't
+// resolved yet (it may not even match the parent's) — there's no window to
+// take a fraction of. A quarter of the conservative fallback window is the
+// same "never guess high" posture context/budget.ts already uses.
+const FORK_TOKEN_BUDGET = Math.floor(FALLBACK_CONTEXT_WINDOW / 4);
+
+// How often awaitChild polls the child's status, and how long it will wait
+// before giving up. The child runs as its own detached turn (started via
+// startChildTurn, fire-and-forget) — there is no promise to await directly,
+// so a blocking `agent` call polls the parent-scoped getChild until the
+// child's turn reaches a terminal state. The ceiling mirrors STALE_TURN_MS:
+// a turn (parent or child) is allowed to run that long elsewhere in this
+// codebase, and a shorter cap here would abandon a legitimately long child.
+const AWAIT_CHILD_POLL_MS = 200;
+const AWAIT_CHILD_TIMEOUT_MS = STALE_TURN_MS;
+
+// agent_wait is a MAILBOX WAIT over the store's plain QueryFn, not a
+// LISTEN/NOTIFY push — the store exposes no notification channel, and adding
+// one is its own change (noted in COMPAT.md). WAIT_POLL_MS trades latency for
+// query load; WAIT_MAX_MS is the hard ceiling so a wedged/slow child can
+// never block a parent's turn indefinitely — a caller wanting longer just
+// calls agent_wait again. WAIT_DEFAULT_MS is what a caller gets when it
+// doesn't specify (the `agent_wait` tool itself defaults to this).
+export const WAIT_DEFAULT_MS = 60_000;
+export const WAIT_MAX_MS = 600_000;
+const WAIT_POLL_MS = 500;
+
+const TERMINAL_STATUSES = new Set<ChildAgent["status"]>(["completed", "failed", "stopped"]);
+
+export interface SpawnChildOpts {
+  subagent: string | null;
+  prompt: string;
+  forkTurns: string;
+  detached: boolean;
+}
+
+export interface SpawnCapabilities {
+  spawnChild(opts: SpawnChildOpts): Promise<{ agentId: string; nickname: string }>;
+  /** Polls until the child's turn reaches a terminal state (see AWAIT_CHILD_*). */
+  awaitChild(agentId: string): Promise<{ text: string } | { error: string }>;
+  /**
+   * The OUTPUT of a child that has already finished — the one thing
+   * listChildren (metadata only) and waitForChildren (which agents finished)
+   * deliberately do not carry. Without this there is no way at all for a
+   * parent to see what a detached child produced from inside its own turn:
+   * deliverChildResult's queued followup only lands on a LATER turn, and a
+   * parent sitting in agent_wait always has a running turn, so that followup
+   * is never the thing it is waiting on. Same read-back as awaitChild (which
+   * now goes through this), so blocking and detached delegation report a
+   * given turn identically. `null` for a child that is still running, or one
+   * that is not this parent's.
+   */
+  readChildResult(agentId: string): Promise<{ text: string } | { error: string } | null>;
+  /**
+   * This parent's children. `liveOnly` (the `agent_list` tool's default)
+   * drops the ones that have already finished — with
+   * MAX_CHILDREN_PER_SESSION at 50, an unfiltered listing on a long session
+   * is mostly finished rows, and putting 50 of them into a model's context
+   * to answer "what is running?" is the thing the tool is asked least often
+   * to do. Filtered in SQL by the store, not here.
+   */
+  listChildren(opts?: { liveOnly?: boolean }): Promise<ChildAgent[]>;
+  // Whether spawnChild will accept detached: true for THIS parent session.
+  // False for an ephemeral, never-revisited session (/chat — see
+  // handler.ts's wiring) where a detached child's completion would have
+  // nobody left to observe it. Built-ins that create detached children
+  // (agent_spawn/agent_list — Task 9; agent_wait/agent_stop/agent_send —
+  // Tasks 10-12) MUST gate their own registration on this flag, not merely
+  // on ctx.spawn being truthy — /chat wires ctx.spawn too, for the
+  // BLOCKING `agent` tool. spawnChild itself also refuses a detached
+  // request when this is false, so a caller that skips the registration
+  // check still fails loudly instead of silently orphaning a child.
+  readonly allowDetached: boolean;
+  // Filled in by Task 10 (agent_wait). Present now so a caller that reaches
+  // for it fails loudly instead of silently doing nothing.
+  waitForChildren(agentIds: string[] | null, timeoutMs: number): Promise<ChildAgent[]>;
+  // Filled in by Task 11 (agent_stop).
+  stopChild(agentId: string): Promise<ChildAgent["status"]>;
+  // Filled in by Task 12 (agent_send).
+  sendToChild(agentId: string, message: string): Promise<{ delivered: boolean }>;
+}
+
+// Narrow slice of AgentStore this module actually calls — kept explicit
+// (rather than importing the full AgentStore type) so a fake in tests only
+// has to implement what spawn.ts uses.
+export interface SpawnStore {
+  countChildren(parentSessionId: string): Promise<{ live: number; total: number }>;
+  listChildren(parentSessionId: string, opts?: { liveOnly?: boolean }): Promise<ChildAgent[]>;
+  createChildSession(opts: {
+    plugin: string;
+    agent: string;
+    createdBy?: string;
+    parentSessionId: string;
+    parentTurnId: string | null;
+    subagent: string | null;
+    nickname: string;
+    detached: boolean;
+  }): Promise<string>;
+  getHistory(sessionId: string): Promise<TurnRow[]>;
+  getChild(agentId: string, parentSessionId: string): Promise<ChildAgent | null>;
+  failTurnsForSession(sessionId: string, error: string): Promise<number>;
+  queueFollowUp(sessionId: string, text: string): Promise<void>;
+  takeFollowUps(sessionId: string): Promise<FollowUp[]>;
+}
+
+export interface SpawnDeps {
+  sessionId: string; // parent session id
+  turnId: string | null; // parent turn id
+  plugin: string;
+  agent: string;
+  store: SpawnStore;
+  config: ContextConfig;
+  // See SpawnCapabilities.allowDetached — passed straight through.
+  allowDetached: boolean;
+  // The trex user id of whoever caused the PARENT turn, written to the child
+  // session's created_by. store.createChildSession has always accepted this;
+  // nothing ever supplied it, so every child session in the database was
+  // anonymous — invisible to any created_by-scoped ownership check, and
+  // unattributable in billing/audit. Optional because a channel session has
+  // no trex user at all (see handler.ts's channel wiring).
+  createdBy?: string;
+  // Kicks off the child's first turn. Fire-and-forget (same posture as
+  // handler.ts's own startTurn) — this resolves once the turn has been
+  // asked to start, not once it finishes. `history`, when given, seeds the
+  // child's first-turn messages directly (the forked slice from the
+  // PARENT's history); a brand-new child session has no persisted turns of
+  // its own for buildHistory to assemble, so this is the only way the
+  // inherited context reaches the child's first request.
+  startChildTurn(
+    o: { sessionId: string; message: unknown; subagent: string | null; history?: ModelMessage[] },
+  ): void | Promise<void>;
+}
+
+// The outcome of a child whose turn has already reached a terminal state.
+// ChildAgent carries only a display status, not the turn's actual
+// text/error — read those back from the child's own history, which is
+// parent-agnostic (a child never needs an ownership check on its own session
+// id; the CALLER has already resolved ownership through the parent-scoped
+// store.getChild). Shared by awaitChild (blocking delegation) and
+// readChildResult (the detached path) so both report an identical turn
+// identically.
+async function readTerminalOutcome(
+  store: SpawnStore,
+  agentId: string,
+  child: ChildAgent,
+): Promise<{ text: string } | { error: string }> {
+  if (child.status === "stopped") {
+    return { error: `agent "${child.nickname}" was stopped before it finished` };
+  }
+  const turns = await store.getHistory(agentId);
+  const lastTurn = turns[turns.length - 1];
+  const steps = lastTurn?.steps ?? [];
+  const textStep = [...steps].reverse().find((s) => s.kind === "text");
+  const errorStep = [...steps].reverse().find((s) => s.kind === "error");
+
+  if (child.status === "failed") {
+    const message = (errorStep?.payload as { message?: string } | undefined)?.message;
+    return { error: message ?? `agent "${child.nickname}" failed` };
+  }
+  // lastStepText (runner.ts) is step-scoped, matching what a nested
+  // in-process call's own `result.text` always gave — a preamble step
+  // ("Let me check the config...") before a tool call must not leak into a
+  // delegated answer, even if the FINAL step itself produced no text at all
+  // (then this is correctly ""; see runner.ts). `??`, not `||`: an
+  // intentional empty final step must not fall back to the (stale,
+  // earlier-step) `text` field — that fallback is only for a turn persisted
+  // before lastStepText existed at all (field genuinely absent), or a test
+  // fixture that fabricates only `text`.
+  const payload = textStep?.payload as { text?: string; lastStepText?: string } | undefined;
+  return { text: payload?.lastStepText ?? payload?.text ?? "" };
+}
+
+export function createSpawnCapabilities(deps: SpawnDeps): SpawnCapabilities {
+  const { store, sessionId: parentSessionId, turnId: parentTurnId, plugin, agent, config } = deps;
+
+  return {
+    allowDetached: deps.allowDetached,
+
+    async spawnChild({ subagent, prompt, forkTurns, detached }) {
+      if (detached && !deps.allowDetached) {
+        throw new Error(
+          "agents: this session cannot spawn a detached agent — it is never revisited, " +
+            "so a detached child's result would be silently orphaned; use blocking delegation instead",
+        );
+      }
+      const counts = await store.countChildren(parentSessionId);
+      const admit = checkSpawnAllowed(counts);
+      if (!admit.allowed) throw new Error(admit.reason);
+
+      const siblings = await store.listChildren(parentSessionId);
+      const nickname = pickNickname(siblings.map((c) => c.nickname).filter(Boolean));
+
+      // Resolved from the PARENT's history, which carries real tool calls
+      // since #275 — the whole reason fork_turns was gated on it.
+      //
+      // Fetched ONLY when the fork spec actually asks for turns. "none" is
+      // the default and the overwhelming majority of delegations, and
+      // forkParentHistory returns [] for it without reading a single turn —
+      // so an unconditional getHistory was a full history read (every turn,
+      // every step, of a session that may have run for hours) thrown away on
+      // every spawn. parseForkTurns is the same classifier forkParentHistory
+      // itself uses, so the two can never disagree about what "none" means.
+      const inherited = parseForkTurns(forkTurns) === "none"
+        ? []
+        : forkParentHistory(await store.getHistory(parentSessionId), forkTurns, config, FORK_TOKEN_BUDGET);
+
+      const agentId = await store.createChildSession({
+        plugin,
+        agent,
+        createdBy: deps.createdBy,
+        parentSessionId,
+        parentTurnId,
+        subagent,
+        nickname,
+        detached,
+      });
+
+      await deps.startChildTurn({
+        sessionId: agentId,
+        message: prompt,
+        subagent,
+        ...(inherited.length ? { history: inherited } : {}),
+      });
+      return { agentId, nickname };
+    },
+
+    async awaitChild(agentId: string): Promise<{ text: string } | { error: string }> {
+      const deadline = Date.now() + AWAIT_CHILD_TIMEOUT_MS;
+      let child: ChildAgent | null = null;
+      for (;;) {
+        child = await store.getChild(agentId, parentSessionId);
+        if (!child) return { error: `unknown agent "${agentId}"` };
+        if (child.status !== "running") break;
+        if (Date.now() >= deadline) {
+          return { error: `agent "${child.nickname}" did not finish within the wait limit` };
+        }
+        await new Promise((r) => setTimeout(r, AWAIT_CHILD_POLL_MS));
+      }
+
+      return await readTerminalOutcome(store, agentId, child);
+    },
+
+    async readChildResult(agentId: string) {
+      const child = await store.getChild(agentId, parentSessionId);
+      if (!child || child.status === "running") return null;
+      return await readTerminalOutcome(store, agentId, child);
+    },
+
+    listChildren(opts?: { liveOnly?: boolean }): Promise<ChildAgent[]> {
+      return store.listChildren(parentSessionId, opts);
+    },
+
+    // Reports WHICH children reached a terminal state, never their content —
+    // a mailbox wait, not a join. `agentIds` given: resolved ONE AT A TIME
+    // through the parent-scoped store.getChild, exactly like awaitChild —
+    // never listChildren-then-filter — so a foreign id simply comes back
+    // null and is dropped, indistinguishable from one that never existed.
+    // `agentIds` omitted: waits on every child via listChildren, which is
+    // already parent-scoped by construction.
+    async waitForChildren(agentIds: string[] | null, timeoutMs: number): Promise<ChildAgent[]> {
+      const deadline = Date.now() + Math.min(Math.max(timeoutMs, 0), WAIT_MAX_MS);
+      for (;;) {
+        const children = agentIds
+          ? (await Promise.all(agentIds.map((id) => store.getChild(id, parentSessionId))))
+            .filter((c): c is ChildAgent => c !== null)
+          : await store.listChildren(parentSessionId);
+
+        const done = children.filter((c) => TERMINAL_STATUSES.has(c.status));
+        if (done.length > 0) return done;
+        if (Date.now() >= deadline) return [];
+        await new Promise((r) => setTimeout(r, WAIT_POLL_MS));
+      }
+    },
+
+    // Ownership resolved through the parent-scoped store.getChild, same as
+    // awaitChild/waitForChildren — a child of another session comes back
+    // null and is indistinguishable from one that never existed; never
+    // widen this to a raw-id lookup filtered in JS. Returns the PREVIOUS
+    // status rather than silently no-op'ing on an already-finished child:
+    // the model must learn "already done" from the return value, not from
+    // nothing happening.
+    async stopChild(agentId: string): Promise<ChildAgent["status"]> {
+      const child = await store.getChild(agentId, parentSessionId);
+      if (!child) throw new Error(`unknown agent "${agentId}"`);
+      if (child.status === "running") {
+        // Recorded as an ordinary `failed` turn carrying this EXACT error
+        // string — store.ts's status-deriving queries key off it (strict
+        // equality) to display "stopped" instead of "failed". Must use the
+        // shared constant, never a duplicated literal.
+        //
+        // THIS COMES FIRST, and the ordering is load-bearing. The abort below
+        // ends the child's turn, and the child's own catch then calls
+        // finishTurn — which is scoped to `WHERE status = 'running'` and so
+        // reports that it did NOT win, because this UPDATE already did. That
+        // is exactly the intent: the stop owns the outcome, and the child's
+        // result is discarded rather than delivered to a parent that
+        // explicitly abandoned it (unchanged from before there was an abort
+        // at all). Aborting first would invert it — the child could finish,
+        // win finishTurn, and deliver a result for an agent the parent had
+        // just stopped.
+        await store.failTurnsForSession(agentId, STOPPED_BY_PARENT_ERROR);
+        // ...and THIS is what makes the stop an interrupt rather than only a
+        // bookkeeping entry: it cancels the child's in-flight streamText so
+        // the worker stops calling tools and stops billing, instead of
+        // running to completion and having its result thrown away on arrival.
+        //
+        // Reaches only a child running on THIS worker. A parent woken on a
+        // different worker (routine — child turns are fire-and-forget and a
+        // reap can deliver from anywhere) finds no controller and gets the
+        // database marking alone, which is the whole of what agent_stop used
+        // to do. Not an error, and not worth failing the tool over: the
+        // parent's observable outcome — the child is stopped, its result
+        // discarded — is the same either way, and the log line says which
+        // happened.
+        if (!abortChildTurn(agentId)) {
+          console.log(
+            `agents: stopped child ${agentId} by marking its turn, but its worker is not this one — ` +
+              `it will keep running until it finishes on its own and its result will be discarded`,
+          );
+        }
+      }
+      return child.status;
+    },
+    // Ownership resolved through the parent-scoped store.getChild, same as
+    // awaitChild/stopChild — a foreign or unknown agent id comes back null
+    // and is indistinguishable from "not delivered", never a thrown error.
+    // A child has exactly one turn (see runner.ts's makePrepareStep), so
+    // `running` is the only status a message can still reach — anything
+    // else means the turn already ended and there is no later turn for a
+    // queued message to ride into.
+    async sendToChild(agentId: string, message: string): Promise<{ delivered: boolean }> {
+      const child = await store.getChild(agentId, parentSessionId);
+      // Not an error: a finished (or foreign) child simply cannot receive
+      // anything, and the model needs to learn that from the return value
+      // rather than assume delivery landed.
+      if (!child || child.status !== "running") return { delivered: false };
+      await store.queueFollowUp(agentId, message);
+      return { delivered: true };
+    },
+  };
+}

@@ -1,7 +1,11 @@
 ;; :description is read by functions/skills/sync.ts, which registers this
-;; subagent as a legacy-loop built-in. The agents loader reads only
-;; :max-steps/:model and ignores the rest, so it stays inert there.
+;; subagent as a legacy-loop built-in. The agents loader reads
+;; :max-steps/:model/:reasoning-effort/:skills (loader.ts's
+;; resolveAgentRole, 2026-08-27 orchestration Task 14) and ignores the rest.
 ;; No :model here on purpose — the legacy "inherit" sentinel is not a
 ;; valid agents-loop model spec; sync.ts defaults it instead.
+;; :reasoning-effort "low" — breadth over depth, and it's the one most
+;; often run several at a time.
 {:max-steps 15
+ :reasoning-effort "low"
  :description "Use this agent to deeply analyze codebase features by tracing execution paths, mapping architecture layers, understanding patterns, and documenting dependencies."}

@@ -7,7 +7,9 @@ description: Use when facing 2+ independent tasks that can be worked on without 
 
 ## Overview
 
-You delegate tasks to specialized agents with isolated context. By precisely crafting their instructions and context, you ensure they stay focused and succeed at their task. They should never inherit your session's context or history — you construct exactly what they need. This also preserves your own context for coordination work.
+You delegate tasks to specialized agents that run as their own sessions with their own context. By precisely crafting their instructions, you keep them focused and let them succeed at their task, while preserving your own context for coordination work.
+
+**Context: construct it, and inherit only on purpose.** A subagent starts with nothing but the prompt you give it. That is the right default — an agent handed your whole history spends its budget re-reading your work instead of doing its own. But when a task genuinely depends on something you already established (a tool result the agent would otherwise have to re-derive, a decision made three turns ago), pass `fork_turns` and give it the last N of YOUR turns, verbatim tool calls and results included. `"none"` (the default) starts it clean; a number gives it that many of your most recent turns; `"all"` gives it everything, at real token cost. Reach for a small number, not `"all"` — and never as a substitute for writing a clear prompt.
 
 When you have multiple unrelated failures (different test files, different subsystems, different bugs), investigating them sequentially wastes time. Each investigation is independent and can happen in parallel.
 
@@ -65,18 +67,61 @@ Each agent gets:
 
 ### 3. Dispatch in Parallel
 
-```typescript
-// In Claude Code / AI environment
-Task("Fix agent-tool-abort.test.ts failures")
-Task("Fix batch-completion-behavior.test.ts failures")
-Task("Fix tool-approval-race-conditions.test.ts failures")
-// All three run concurrently
+`agent_spawn` starts an agent and returns immediately, so calling it three
+times fans out three agents that run concurrently. It returns an `agentId`
+and a `nickname` — use the nickname when you talk about the agent, the id
+when you call a tool about it.
+
+```
+agent_spawn(prompt: "Fix agent-tool-abort.test.ts failures: ...")
+  -> { agentId: "…", nickname: "Kepler" }
+agent_spawn(prompt: "Fix batch-completion-behavior.test.ts failures: ...")
+  -> { agentId: "…", nickname: "Faraday" }
+agent_spawn(prompt: "Fix tool-approval-race-conditions.test.ts failures: ...")
+  -> { agentId: "…", nickname: "Curie" }
 ```
 
-### 4. Review and Integrate
+All three run at once. Optional arguments:
+- `agent` — the name of a configured subagent to run the task as; omit to
+  delegate to a copy of yourself.
+- `fork_turns` — how much of YOUR history to hand it (see Overview above).
+
+**One blocking agent instead:** if you have nothing useful to do while it
+works, `agent` does the same delegation but blocks and returns `{text}` (or
+`{error}`) directly. Use it for a single delegated subtask; use `agent_spawn`
+whenever you have two or more, or work of your own to get on with.
+
+### 4. Collect Results
+
+`agent_wait` blocks until at least one of your agents finishes and returns
+those agents WITH their output (`result`, or `error` if the agent failed or
+was stopped). It returns an empty list on timeout — that is not an error,
+just call it again.
+
+```
+agent_wait()                                  -> waits on all of them
+agent_wait(agent_ids: ["…"], timeout_ms: 120000) -> waits on specific ones
+```
+
+Loop until every agent is accounted for. The other tools:
+- `agent_list` — every agent you started, with nickname and status. No output.
+- `agent_result(agent_id)` — read a finished agent's output again later.
+  `{ running: true }` means it has not finished.
+- `agent_send(agent_id, message)` — steer an agent WHILE it is still running
+  (a correction, an extra constraint). An agent has exactly one turn, so a
+  message sent after it finishes is never read.
+- `agent_stop(agent_id)` — abandon an agent: you stop waiting and its result
+  is discarded. It does NOT interrupt the work, which keeps running (and
+  costing) until it finishes on its own.
+
+If your own turn ends while agents are still running, their results are
+delivered to you as new messages when they finish. You do not have to sit in
+`agent_wait` to receive them.
+
+### 5. Review and Integrate
 
 When agents return:
-- Read each summary
+- Read each result
 - Verify fixes don't conflict
 - Run full test suite
 - Integrate all changes
@@ -143,9 +188,10 @@ Return: Summary of what you found and what you fixed.
 
 **Dispatch:**
 ```
-Agent 1 → Fix agent-tool-abort.test.ts
-Agent 2 → Fix batch-completion-behavior.test.ts
-Agent 3 → Fix tool-approval-race-conditions.test.ts
+agent_spawn → Fix agent-tool-abort.test.ts
+agent_spawn → Fix batch-completion-behavior.test.ts
+agent_spawn → Fix tool-approval-race-conditions.test.ts
+then agent_wait until all three report back
 ```
 
 **Results:**

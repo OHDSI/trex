@@ -8,7 +8,7 @@ import pg from "npm:pg@^8";
 import { loadAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
 import { createChannelStore } from "../channels/store.ts";
-import { createHandler, HEARTBEAT_STALE_MS, STALE_TURN_MS, type OAuthBrokerDeps } from "./handler.ts";
+import { buildDeliverDeps, createHandler, deliverChildResult, HEARTBEAT_STALE_MS, STALE_TURN_MS, type Deps, type OAuthBrokerDeps } from "./handler.ts";
 import { createOAuthStore } from "../connections/oauth/store.ts";
 import { decryptWithDek, encryptWithDek, initDek } from "../../auth/dek.ts";
 import { deriveSubkeyBase64, LABELS } from "../../auth/keys.ts";
@@ -49,7 +49,18 @@ if (Deno.env.get("TREX_ROOT_KEY")) {
 const store = createStore(query);
 const channelStore = createChannelStore(query);
 
-const handler = createHandler({
+// A named const (not an inline literal) so the SAME Deps object backs both
+// createHandler AND buildDeliverDeps below — the periodic sweep's `deliver`
+// needs a real, wake-capable DeliverDeps (handler.ts's private startTurn is
+// what actually starts the parent's next turn), and a sweep holding a
+// DIFFERENT store/agent/model than the handler would be a second, silently
+// divergent configuration of the same delegation path. (An earlier version
+// of this comment justified the sharing by a per-process WeakMap keyed on
+// store identity; that guard is gone — deliver-at-most-once is now enforced
+// by the database, since every caller must first win the same atomic
+// `WHERE status = 'running'` transition. See deliverChildResult's
+// Invariant 5.)
+const deps: Deps = {
   agent,
   store,
   channelStore,
@@ -58,7 +69,9 @@ const handler = createHandler({
   basePath,
   sql: query,
   oauth,
-});
+};
+const handler = createHandler(deps);
+const deliverDeps = buildDeliverDeps(deps);
 
 // Periodic sweep for turns stuck `running` past STALE_TURN_MS — the same
 // recovery handler.ts's startTurn performs lazily on-message, but this
@@ -76,6 +89,12 @@ startStaleTurnSweep(store, {
   agent: Deno.env.get("TREX_AGENT_NAME") || "agent",
   staleMs: STALE_TURN_MS,
   heartbeatStaleMs: HEARTBEAT_STALE_MS,
+  // 2026-08-27 orchestration task 13: a reaped session might be a DETACHED
+  // CHILD whose PARENT is waiting to hear about it — reapStaleTurns only
+  // flips a DB row, it has no route to deliverChildResult on its own.
+  // deliverChildResult itself no-ops for a top-level/blocking session, so
+  // this is safe to wire unconditionally.
+  deliver: (sessionId, outcome) => deliverChildResult(deliverDeps, sessionId, outcome),
   onReap: (sessionId, reaped) => {
     // Live readers (an open /stream) get it through the fan-out...
     publish(sessionId, { type: "turn.reaped", data: { count: reaped.length, reason: "stale" } });
