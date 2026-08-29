@@ -12,6 +12,7 @@ export type CoderErrorCode =
   | "git_workflow_scope"
   | "git_unrelated_base"
   | "pr_already_exists"
+  | "workspace_quarantined"
   | "unclassified";
 
 const GENERIC = "An error occurred while generating a response. Check the server logs for details.";
@@ -66,6 +67,20 @@ export function classifyCoderError(raw: string): { code: CoderErrorCode; safe: s
         "Check what the remote's default actually is (`git rev-parse --abbrev-ref origin/HEAD`) and use that; " +
         "in this repo `main` and `develop` are unrelated roots, so rebasing or opening a PR across them can never work. " +
         "Retrying the same command will produce the same error.",
+    };
+  }
+
+  // The chat's workspace was unusable and got reset. Not a failure the coder
+  // should retry or reason about — and emphatically not something a human needs
+  // to fix with git commands on their laptop, which is what the agent concluded
+  // from the raw "chat worktree ... is unusable" string it used to receive.
+  if (/quarantined .*->|is unusable .* could not be quarantined/i.test(msg)) {
+    const dest = msg.match(/->\s*(\S+)/)?.[1];
+    return {
+      code: "workspace_quarantined",
+      safe: "This chat's workspace was in a state it could not be used from, so it was reset to a clean one" +
+        (dest ? ` (the previous one is kept at \`${dest}\` and nothing was deleted)` : "") +
+        ". Send the request again and it will run on the fresh workspace.",
     };
   }
 

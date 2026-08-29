@@ -5,7 +5,12 @@ import {
   getRunWorktreePath,
 } from "./tools/workspace.ts";
 import { gitOps } from "./git.ts";
-import { foreignDirtCount, legacyChatWorktreeBranch, worktreeReuseDecision } from "./worktree_guard.ts";
+import {
+  foreignDirtCount,
+  legacyChatWorktreeBranch,
+  quarantinePath,
+  worktreeReuseDecision,
+} from "./worktree_guard.ts";
 import { resolveChatBranch } from "./chat_branch.ts";
 
 // Pin a chat to a stable, isolated git worktree so a feature's work persists
@@ -88,11 +93,20 @@ export async function ensureChatWorktree(
       .then((st) => foreignDirtCount(st.files ?? []))
       .catch(() => Number.MAX_SAFE_INTEGER);
     const decision = worktreeReuseDecision(entries, worktree, branch, dirtyCount, legacyBranch);
+
+    // A branch based on a root with no .gitignore can never come clean: every
+    // build artifact reads as untracked dirt, on this turn and forever. That is
+    // not a state to repair, it is a worktree to abandon — see poisonedBaseReason.
+    const poisoned = await poisonedBaseReason(repoRoot, worktree, entries);
+    if (poisoned) {
+      return await quarantineAndRecreate(userId, appId, chatId, repoRoot, worktree, branch, poisoned);
+    }
+
     if ("error" in decision) {
-      throw new Error(
-        `chat worktree ${worktree} is unusable: ${decision.error}. ` +
-          `Refusing to run the coder outside its isolated branch.`,
-      );
+      // Nothing here is actionable (git does not recognise the directory as a
+      // worktree at all), so move it aside and build a fresh one rather than
+      // failing this turn and every turn after it.
+      return await quarantineAndRecreate(userId, appId, chatId, repoRoot, worktree, branch, decision.error);
     }
     if ("rename" in decision) {
       console.warn(
@@ -100,11 +114,29 @@ export async function ensureChatWorktree(
       );
       await gitOps.branchRename(worktree, decision.from, branch);
     }
+    if ("preserve" in decision) {
+      // Real uncommitted work on a branch that is not this chat's. Stash it —
+      // named, findable, on the branch it belongs to — and only then switch.
+      const stashed = await gitOps.stashPush(
+        worktree,
+        `devx-preserved-chat-${chatId}-from-${decision.foreignBranch}`,
+      );
+      const ref = stashed ? await gitOps.latestStash(worktree) : null;
+      console.warn(
+        `[chat-worktree] chat worktree ${worktree} was left on '${decision.foreignBranch}' with ` +
+          `${decision.dirtyFileCount} uncommitted change(s) — ` +
+          (stashed
+            ? `stashed as ${ref ?? "(ref unknown)"} before restoring ${branch}`
+            : `nothing tracked to stash; restoring ${branch}`),
+      );
+    }
     if ("restore" in decision) {
       console.warn(
         `[chat-worktree] chat worktree ${worktree} was left on '${decision.foreignBranch}' ` +
           `(clean tree) — restoring ${branch}`,
       );
+    }
+    if ("restore" in decision || "preserve" in decision) {
       // The chat's branch can be GONE: a coder that renames its worktree's
       // branch to something it likes better (`git branch -m`) leaves nothing to
       // switch back to, and the switch below then fails for a second, far more
@@ -114,10 +146,30 @@ export async function ensureChatWorktree(
         console.warn(`[chat-worktree] ${branch} no longer exists — recreating it at the worktree's HEAD`);
         await gitOps.branchCreate(worktree, branch);
       }
-      await gitOps.branchSwitch(worktree, branch);
+      try {
+        await gitOps.branchSwitch(worktree, branch);
+      } catch (e) {
+        // Usually an untracked file that the chat branch also tracks. Nothing
+        // left to try in place; quarantine keeps the tree for recovery.
+        return await quarantineAndRecreate(
+          userId, appId, chatId, repoRoot, worktree, branch,
+          `could not switch back to ${branch}: ${e?.message || e}`,
+        );
+      }
     }
     return worktree;
   }
+  return await createChatWorktree(userId, appId, repoRoot, worktree, branch);
+}
+
+/** Build a brand-new worktree for this chat at `worktree`, on `branch`. */
+async function createChatWorktree(
+  userId: string,
+  appId: string,
+  repoRoot: string,
+  worktree: string,
+  branch: string,
+): Promise<string> {
   try {
     await ensureWorktreeParent(userId, appId);
     // Base the feature worktree on the remote's own default branch so work
@@ -148,7 +200,14 @@ export async function ensureChatWorktree(
           `(${await gitOps.revParse(repoRoot, startPoint)}) — it may be behind the remote`,
       );
     }
-    await gitOps.worktreeAdd(repoRoot, worktree, branch, startPoint);
+    // The branch may already exist (a quarantined worktree left it behind, or a
+    // previous attempt got partway). `git worktree add -b` fails on an existing
+    // branch, so reuse it in that case instead of inventing another name.
+    if (await gitOps.refExists(repoRoot, `refs/heads/${branch}`)) {
+      await gitOps.worktreeAddExisting(repoRoot, worktree, branch);
+    } else {
+      await gitOps.worktreeAdd(repoRoot, worktree, branch, startPoint);
+    }
     return worktree;
   } catch (err) {
     // Do NOT fall back to the shared app workspace — that is where other
@@ -158,4 +217,85 @@ export async function ensureChatWorktree(
         `Refusing to run the coder on the shared app workspace.`,
     );
   }
+}
+
+/**
+ * Why this worktree's checked-out branch can never come clean, or null.
+ *
+ * A branch based on a root that carries no `.gitignore` reports every build
+ * artifact — `node_modules/`, generated dirs — as untracked dirt, forever. That
+ * is what `origin/main` did in Data2Evidence: an unrelated root whose whole
+ * history is one "Initial commit" with no ignore file, so a worktree that landed
+ * there was locked permanently and no amount of stashing or switching helped.
+ *
+ * Only flagged when the repo's DEFAULT branch does have one — a project that
+ * genuinely ships no .gitignore is not broken, it is just that kind of project.
+ */
+async function poisonedBaseReason(
+  repoRoot: string,
+  worktree: string,
+  entries: Array<{ path: string; branch: string | null; detached: boolean }>,
+): Promise<string | null> {
+  const entry = entries.find((e) => e.path === worktree);
+  if (!entry || entry.detached || !entry.branch) return null;
+  try {
+    if (await gitOps.pathExistsInRef(worktree, entry.branch, ".gitignore")) return null;
+    const base = await resolveBaseBranch(repoRoot);
+    if (!(await gitOps.pathExistsInRef(repoRoot, `origin/${base}`, ".gitignore"))) return null;
+    return `branch '${entry.branch}' has no .gitignore while origin/${base} does — ` +
+      `it is based on an unrelated root, so every build artifact reads as an uncommitted change`;
+  } catch {
+    // Never let this diagnostic turn into the failure. If we cannot tell, say
+    // nothing and let the normal decision path run.
+    return null;
+  }
+}
+
+/**
+ * Move an unusable worktree aside and build a clean one in its place.
+ *
+ * The whole point of this plan: an unrecognised state used to THROW, and the
+ * throw happens before the coder starts — so nothing inside the session could
+ * repair it and the chat was dead until a human with container access
+ * intervened. Quarantine keeps every commit, stash and untracked file in the
+ * moved directory while letting the next message proceed normally.
+ */
+async function quarantineAndRecreate(
+  userId: string,
+  appId: string,
+  chatId: string,
+  repoRoot: string,
+  worktree: string,
+  branch: string,
+  reason: string,
+): Promise<string> {
+  // Timestamp, then a counter, so two quarantines in the same second cannot
+  // collide and clobber the earlier one's contents.
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  let dest = quarantinePath(worktree, stamp);
+  for (let attempt = 1; attempt < 50; attempt++) {
+    try {
+      await Deno.stat(dest);
+      dest = quarantinePath(worktree, stamp, attempt);
+    } catch {
+      break;
+    }
+  }
+  try {
+    await Deno.rename(worktree, dest);
+  } catch (err) {
+    // Only now is this fatal: we could neither use the worktree nor set it
+    // aside, so there is no clean tree to give the coder.
+    throw new Error(
+      `chat worktree ${worktree} is unusable (${reason}) and could not be quarantined ` +
+        `(${err?.message || err}). Refusing to run the coder outside its isolated branch.`,
+    );
+  }
+  // Drop git's now-dangling registration so `worktree add` can reuse the path.
+  await gitOps.worktreePrune(repoRoot);
+  console.warn(
+    `[chat-worktree] quarantined ${worktree} -> ${dest} (${reason}); ` +
+      `building a fresh worktree for chat ${chatId}`,
+  );
+  return await createChatWorktree(userId, appId, repoRoot, worktree, branch);
 }

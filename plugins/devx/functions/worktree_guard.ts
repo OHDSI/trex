@@ -129,7 +129,21 @@ export type WorktreeReuseDecision =
   | { ok: true }
   | { rename: true; from: string }
   | { restore: true; foreignBranch: string }
+  | { preserve: true; foreignBranch: string; dirtyFileCount: number }
   | { error: string };
+
+/**
+ * Where an unusable worktree gets moved so the next turn can build a clean one.
+ *
+ * Quarantine rather than delete: the directory still holds commits, stashes and
+ * untracked files that may be the only copy of somebody's work. `stamp` is
+ * supplied by the caller (not read from the clock here) so this stays pure and
+ * testable; the caller resolves collisions by probing the filesystem.
+ */
+export function quarantinePath(worktreePath: string, stamp: string, attempt = 0): string {
+  const suffix = attempt > 0 ? `-${attempt}` : "";
+  return `${worktreePath}.quarantine-${stamp}${suffix}`;
+}
 
 /**
  * Like `worktreeReuseError`, but classifies the non-matching cases instead of
@@ -146,10 +160,14 @@ export type WorktreeReuseDecision =
  * turn for that made every second turn of a work-on-existing-PR task fail. With
  * a clean tree nothing can leak across tasks, so the caller just switches back.
  *
- * A DIRTY tree on a foreign branch stays a hard error: those uncommitted
- * changes belong to *some* branch, and silently carrying them onto the chat
- * branch (or discarding them) would be the exact contamination this guard
- * exists to stop.
+ * `preserve`: a DIRTY tree, foreign or detached. Those uncommitted changes
+ * belong to *some* branch, and silently carrying them onto the chat branch (or
+ * discarding them) would be the exact contamination this guard exists to stop —
+ * so the caller stashes them first, under a message naming where they came
+ * from, and only then restores the chat branch.
+ *
+ * `error` is now reserved for the one state with nothing to act on: a directory
+ * git does not recognise as a worktree at all. The caller quarantines it.
  */
 export function worktreeReuseDecision(
   entries: Array<{ path: string; branch: string | null; detached: boolean }>,
@@ -170,10 +188,7 @@ export function worktreeReuseDecision(
     // again. Dirty stays an error for the same reason a dirty foreign branch
     // does: those edits belong to some other state.
     if (dirtyFileCount === 0) return { restore: true, foreignBranch: "a detached HEAD" };
-    return {
-      error: `worktree is detached (expected branch ${expectedBranch}) with ${dirtyFileCount} ` +
-        `uncommitted change(s) — cannot restore the chat branch without risking them`,
-    };
+    return { preserve: true, foreignBranch: "a detached HEAD", dirtyFileCount };
   }
   if (entry.branch === expectedBranch) return { ok: true };
   if (legacyBranch && entry.branch === legacyBranch && legacyBranch !== expectedBranch) {
@@ -182,8 +197,69 @@ export function worktreeReuseDecision(
   if (dirtyFileCount === 0) {
     return { restore: true, foreignBranch: entry.branch ?? "no branch" };
   }
-  return {
-    error: `worktree has '${entry.branch ?? "no branch"}' checked out (expected ${expectedBranch}) ` +
-      `with ${dirtyFileCount} uncommitted change(s) — cannot restore the chat branch without risking them`,
+  // Dirty on a foreign branch is no longer terminal. Those edits belong to
+  // SOME branch and must not ride onto the chat branch — but stashing them
+  // takes them out of the tree, which preserves them AND makes the switch
+  // safe. Refusing outright is what killed chats outright: the throw happens
+  // before the coder starts, so nothing in the session could ever repair it.
+  return { preserve: true, foreignBranch: entry.branch ?? "no branch", dirtyFileCount };
+}
+
+export interface WorktreeHealth {
+  path: string;
+  chatId: string;
+  branch: string | null;
+  expectedBranch: string;
+  dirtyFileCount: number;
+  /**
+   * `ok` — usable as-is.
+   * `self-heals` — the next turn repairs it in place (rename/restore/stash).
+   * `quarantines` — the next turn sets it aside and builds a fresh one.
+   */
+  verdict: "ok" | "self-heals" | "quarantines";
+  detail: string;
+}
+
+/**
+ * Report what the guard WOULD do to a worktree, without doing it.
+ *
+ * Deliberately built on worktreeReuseDecision rather than reimplementing the
+ * rules: an operator view that disagreed with the actual behaviour would be
+ * worse than none. Four worktrees sat locked in production and only surfaced
+ * because someone went looking — this exists so "are any chats wedged?" is a
+ * question with an answer.
+ */
+export function classifyWorktreeHealth(
+  entries: Array<{ path: string; branch: string | null; detached: boolean }>,
+  worktreePath: string,
+  chatId: string,
+  expectedBranch: string,
+  dirtyFileCount: number,
+  legacyBranch?: string,
+): WorktreeHealth {
+  const entry = entries.find((e) => e.path === worktreePath);
+  const decision = worktreeReuseDecision(entries, worktreePath, expectedBranch, dirtyFileCount, legacyBranch);
+  const base = {
+    path: worktreePath,
+    chatId,
+    branch: entry?.detached ? null : entry?.branch ?? null,
+    expectedBranch,
+    dirtyFileCount,
   };
+  if ("ok" in decision) return { ...base, verdict: "ok", detail: "on its own branch" };
+  if ("rename" in decision) {
+    return { ...base, verdict: "self-heals", detail: `legacy branch '${decision.from}' will be renamed` };
+  }
+  if ("restore" in decision) {
+    return { ...base, verdict: "self-heals", detail: `on '${decision.foreignBranch}' with a clean tree; will be restored` };
+  }
+  if ("preserve" in decision) {
+    return {
+      ...base,
+      verdict: "self-heals",
+      detail: `on '${decision.foreignBranch}' with ${decision.dirtyFileCount} uncommitted change(s); ` +
+        `they will be stashed before the branch is restored`,
+    };
+  }
+  return { ...base, verdict: "quarantines", detail: decision.error };
 }

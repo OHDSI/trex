@@ -69,3 +69,24 @@ Deno.test("the workflow-scope rejection is not mistaken for an auth/credential f
   );
   assertEquals(got.code, "git_workflow_scope");
 });
+
+// The raw "chat worktree ... is unusable" string is what led the agent to tell
+// people in the channel that a devx admin was needed, and to offer them git
+// commands that would have run against their laptops rather than the container.
+Deno.test("classifyCoderError: a quarantined workspace reads as reset-and-retry, not as a human task", () => {
+  const { code, safe } = classifyCoderError(
+    "[chat-worktree] quarantined /tmp/devx-workspaces/u/a/.worktrees/c1 -> " +
+      "/tmp/devx-workspaces/u/a/.worktrees/c1.quarantine-2026-08-28T11-00-00-000Z (worktree is detached)",
+  );
+  assertEquals(code, "workspace_quarantined");
+  assertStringIncludes(safe, "reset to a clean one");
+  assertStringIncludes(safe, "quarantine-2026-08-28T11-00-00-000Z");
+  assertStringIncludes(safe, "Send the request again");
+});
+
+Deno.test("classifyCoderError: an unquarantinable workspace is still classified, not left generic", () => {
+  const { code } = classifyCoderError(
+    "chat worktree /ws/.worktrees/c1 is unusable (worktree is detached) and could not be quarantined (EACCES)",
+  );
+  assertEquals(code, "workspace_quarantined");
+});

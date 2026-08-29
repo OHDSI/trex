@@ -27,6 +27,7 @@ import { ensureGitConfig, refreshUserGitConfigs } from "./git_identity.ts";
 import { getGithubToken, injectToken } from "./routes/github_routes.ts";
 // Phase 6: Extracted route handlers
 import { handleGitRoutes } from "./routes/git_routes.ts";
+import { handleWorktreeHealthRoutes } from "./routes/worktree_health_routes.ts";
 import { handleGithubRoutes } from "./routes/github_routes.ts";
 import { handleMcpRoutes } from "./routes/mcp_routes.ts";
 import { handleTrexRoutes } from "./routes/trex_routes.ts";
@@ -215,6 +216,7 @@ Deno.serve(async (req: Request) => {
     // Phase 6: Dispatch to extracted route handlers
     const routeResult =
       await handleGitRoutes(path, method, req, userId, sql, corsHeaders) ||
+      await handleWorktreeHealthRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleGithubRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleSigningRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleClaudeCodeRoutes(path, method, req, userId, sql, corsHeaders) ||
