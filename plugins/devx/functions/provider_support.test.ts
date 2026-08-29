@@ -153,7 +153,7 @@ Deno.test("assertProviderSupported: throws the same sentence the response wrappe
   }
 });
 
-import { assertProviderAllowedForAgent, isDevxOnlyProvider } from "./provider_support.ts";
+import { AGENT_SUPPORTED_PROVIDER_NAMES, assertProviderAllowedForAgent, isDevxOnlyProvider } from "./provider_support.ts";
 
 Deno.test("isDevxOnlyProvider: only claude-code is devx-exclusive", () => {
   assertEquals(isDevxOnlyProvider("claude-code"), true);
@@ -184,4 +184,48 @@ Deno.test("assertProviderAllowedForAgent: every other provider is allowed for ev
       assertProviderAllowedForAgent(provider, agent);
     }
   }
+});
+
+// The three provider lists — devx's assignment gate, claw's and d2esupport's
+// acceptance sets — must agree. They silently diverged once: devx offered
+// `openai-compatible`, the gate refused only `claude-code`, and the two agents
+// accepted neither, so an assignment that looked valid in Settings threw on
+// every turn. Read the real files rather than restating the lists here, or this
+// test would just be a fourth copy free to drift with them.
+Deno.test("the agent provider allowlists agree with devx's assignment gate", async () => {
+  const files = {
+    claw: new URL("../../claw/agent/lib/agent-model-override.ts", import.meta.url),
+    d2esupport: new URL("../../d2esupport/agent/lib/agent-model-override.ts", import.meta.url),
+  };
+  for (const [agent, url] of Object.entries(files)) {
+    const src = await Deno.readTextFile(url);
+    const m = src.match(/const \w*MODEL_PROVIDERS = new Set\(\[([^\]]*)\]\)/);
+    assertEquals(Boolean(m), true, `could not find the provider set in ${agent}'s agent-model-override.ts`);
+    const declared = new Set(
+      m![1].split(",").map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean),
+    );
+    assertEquals(
+      [...declared].sort(),
+      [...AGENT_SUPPORTED_PROVIDER_NAMES].sort(),
+      `${agent}'s accepted providers differ from devx's AGENT_SUPPORTED_PROVIDERS — ` +
+        "a provider devx will assign but the agent will reject throws on every turn",
+    );
+  }
+});
+
+Deno.test("assertProviderAllowedForAgent: rejects a provider the agent cannot construct", () => {
+  // devx keeps everything, including its exclusive claude-code.
+  assertProviderAllowedForAgent("claude-code", "devx");
+  assertProviderAllowedForAgent("openai-compatible", "devx");
+  // openai-compatible is now assignable to the shared agents — the whole point.
+  assertProviderAllowedForAgent("openai-compatible", "claw");
+  assertProviderAllowedForAgent("openai-compatible", "d2esupport");
+  // claude-code stays devx-only, with its own specific message.
+  assertThrows(() => assertProviderAllowedForAgent("claude-code", "claw"), Error, "only available for devx");
+  // Anything else devx might grow is refused at assignment rather than at use.
+  assertThrows(
+    () => assertProviderAllowedForAgent("some-future-provider", "claw"),
+    Error,
+    "cannot use the \"some-future-provider\" provider",
+  );
 });

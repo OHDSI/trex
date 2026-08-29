@@ -8,7 +8,14 @@ import type { ModelSpec } from "eve";
 
 type EnvFn = (k: string) => string | undefined;
 
-const CLAW_MODEL_PROVIDERS = new Set(["anthropic", "openai", "google", "bedrock"]);
+// `openai-compatible` is devx's name for "the OpenAI wire format at someone
+// else's base URL" (Azure, vLLM, a gateway). It is not a distinct client: the
+// runtime's buildModel routes it through the SAME createOpenAI as `openai`,
+// differing only by baseURL — see core/server/agents/service/model.ts, whose
+// openai branch is commented "openai and openai-compatible (custom base url)".
+// So it is accepted here and normalised to `openai` below, because ModelSpec's
+// provider union (eve-shim/types.ts) has no `openai-compatible` member.
+const CLAW_MODEL_PROVIDERS = new Set(["anthropic", "openai", "google", "bedrock", "openai-compatible"]);
 
 export async function fetchClawModelOverride(
   env: EnvFn,
@@ -54,8 +61,21 @@ export async function fetchClawModelOverride(
     );
   }
 
+  // Without a base URL an `openai-compatible` config silently falls through to
+  // OPENAI_BASE_URL (or api.openai.com) and sends a private deployment name to
+  // the wrong vendor, which fails as a confusing model-not-found rather than as
+  // the misconfiguration it is. Refuse it here instead.
+  if (body.provider === "openai-compatible" && !body.baseUrl) {
+    throw new Error(
+      `devx assigned claw the "openai-compatible" provider with no base URL — ` +
+        "set the base URL on that provider config in devx Settings.",
+    );
+  }
+
   return {
-    provider: body.provider,
+    // Normalised, not passed through: ModelSpec.provider has no
+    // `openai-compatible` member, and the client is the same either way.
+    provider: body.provider === "openai-compatible" ? "openai" : body.provider,
     modelId: body.model,
     apiKey: body.apiKey ?? undefined,
     baseURL: body.baseUrl ?? undefined,
