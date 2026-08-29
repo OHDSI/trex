@@ -925,7 +925,7 @@ Deno.test("an escalated tool on an unattended session with no channel denies imm
   const tools = await buildSdkTools(gatedCtx({
     unattended: true,
     channelBound: false,
-    escalate: [{ tool: "GitPush", scopes: [] }],
+    escalate: [{ tool: "GitPush", scopes: [], tier: "hard" }],
     store: gateStore({ createApproval: () => { approvals++; return Promise.resolve("r-1"); } }),
   }));
   assertEquals(await run(tools, "GitPush", {}), {
@@ -939,7 +939,7 @@ Deno.test("an escalated tool on a channel-bound session still creates an approva
   const tools = await buildSdkTools(gatedCtx({
     unattended: true,
     channelBound: true,
-    escalate: [{ tool: "GitPush", scopes: [] }],
+    escalate: [{ tool: "GitPush", scopes: [], tier: "hard" }],
     store: gateStore({ createApproval: () => { approvals++; return Promise.resolve("r-1"); } }),
   }));
   assertEquals(await run(tools, "GitPush", {}), "pushed");
@@ -1002,9 +1002,11 @@ Deno.test("an escalated tool falls back to the built-in default list when ctx.es
   assertEquals(approvals, 0);
 });
 
-// End to end through the real deriveScopeKey and the real default list: `rm`
-// hidden behind a harmless first token must still hit the floor. Two unit tests
-// meeting at the literal "cd+rm" proved nothing about the wiring between them.
+// End to end through the real deriveScopeKey and the real default list: `sudo`
+// hidden behind a harmless first token must still hit the (hard) floor. `rm`
+// is soft in the default list — this must exercise a genuinely hard entry.
+// Two unit tests meeting at the literal "cd+sudo" proved nothing about the
+// wiring between them.
 Deno.test("a compound Bash command reaches the default floor through the derived scope key", async () => {
   let approvals = 0;
   const tools = await buildSdkTools(gatedCtx({
@@ -1012,7 +1014,7 @@ Deno.test("a compound Bash command reaches the default floor through the derived
     channelBound: false,
     store: gateStore({ createApproval: () => { approvals++; return Promise.resolve("r-1"); } }),
   }));
-  assertEquals(await run(tools, "Bash", { command: "cd /app && rm -rf ." }), {
+  assertEquals(await run(tools, "Bash", { command: "cd /app && sudo rm -rf ." }), {
     error: "requires approval but this session has no approver",
   });
   assertEquals(approvals, 0);
@@ -1024,7 +1026,7 @@ Deno.test("a sticky always does not bypass an escalated tool on a channel-bound 
   let approvals = 0;
   const tools = await buildSdkTools(gatedCtx({
     channelBound: true,
-    escalate: [{ tool: "GitPush", scopes: [] }],
+    escalate: [{ tool: "GitPush", scopes: [], tier: "hard" }],
     store: gateStore({
       getToolConsent: () => Promise.resolve("always"),
       createApproval: () => { approvals++; return Promise.resolve("r-1"); },
@@ -1038,7 +1040,7 @@ Deno.test("a sticky always does not bypass an escalated tool on a channel-bound 
 // own denial, not the no-approver message — the two reasons must not blur.
 Deno.test("a sticky never on an escalated tool still reports denied by user, not no-approver", async () => {
   const tools = await buildSdkTools(gatedCtx({
-    escalate: [{ tool: "GitPush", scopes: [] }],
+    escalate: [{ tool: "GitPush", scopes: [], tier: "hard" }],
     store: gateStore({ getToolConsent: () => Promise.resolve("never") }),
   }));
   assertEquals(await run(tools, "GitPush", {}), { error: "denied by user" });

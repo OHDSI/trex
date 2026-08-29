@@ -1,13 +1,17 @@
 import { assertEquals } from "jsr:@std/assert";
 import {
   type EscalateList,
+  matchEscalate,
   matchesEscalate,
   parseEscalateList,
   resolveApproval,
 } from "./approval-policy.ts";
 
 const NONE: EscalateList = [];
-const ESC: EscalateList = [{ tool: "GitPush", scopes: [] }, { tool: "Bash", scopes: ["rm"] }];
+const ESC: EscalateList = [
+  { tool: "GitPush", scopes: [], tier: "hard" },
+  { tool: "Bash", scopes: ["rm"], tier: "hard" },
+];
 
 function outcome(over: Partial<Parameters<typeof resolveApproval>[0]>) {
   return resolveApproval({
@@ -59,7 +63,10 @@ Deno.test("matchesEscalate is case-insensitive on the scope, exact on the tool",
 
 Deno.test("parseEscalateList reads the grammar", () => {
   const list = parseEscalateList("GitPush,Bash:rm|sudo");
-  assertEquals(list, [{ tool: "GitPush", scopes: [] }, { tool: "Bash", scopes: ["rm", "sudo"] }]);
+  assertEquals(list, [
+    { tool: "GitPush", scopes: [], tier: "soft" },
+    { tool: "Bash", scopes: ["rm", "sudo"], tier: "soft" },
+  ]);
 });
 
 Deno.test("an unset value uses the built-in default", () => {
@@ -80,7 +87,7 @@ Deno.test("an unparseable value falls back to the default, not to empty", () => 
 });
 
 Deno.test("malformed entries are skipped without dropping good ones", () => {
-  assertEquals(parseEscalateList("GitPush,:,Bash:"), [{ tool: "GitPush", scopes: [] }]);
+  assertEquals(parseEscalateList("GitPush,:,Bash:"), [{ tool: "GitPush", scopes: [], tier: "soft" }]);
 });
 
 Deno.test("a deny reports which rule produced it", () => {
@@ -103,4 +110,73 @@ Deno.test("a compound Bash scope key escalates on ANY of its parts", () => {
     outcome({ toolName: "Bash", scopeKey: "cd+rm", escalate: ESC, unattended: true, channelBound: true }),
     "gate",
   );
+});
+
+const HARD: EscalateList = [
+  { tool: "GitPush", scopes: [], tier: "hard" },
+  { tool: "Bash", scopes: ["sudo"], tier: "hard" },
+];
+const SOFT: EscalateList = [
+  { tool: "DeleteFile", scopes: [], tier: "soft" },
+  { tool: "Bash", scopes: ["rm"], tier: "soft" },
+];
+
+// THE sub-project in one assertion: on the same unattended session a hard
+// match denies and a soft match runs.
+Deno.test("soft yields to unattended, hard does not", () => {
+  assertEquals(outcome({ toolName: "GitPush", escalate: HARD, unattended: true, channelBound: false }), "deny");
+  assertEquals(outcome({ toolName: "DeleteFile", escalate: SOFT, unattended: true, channelBound: false }), "allow");
+  assertEquals(outcome({ toolName: "Bash", scopeKey: "sudo", escalate: HARD, unattended: true, channelBound: false }), "deny");
+  assertEquals(outcome({ toolName: "Bash", scopeKey: "rm", escalate: SOFT, unattended: true, channelBound: false }), "allow");
+});
+
+// Soft still gates a human, so an interactive user is unaffected.
+Deno.test("soft gates an attended session", () => {
+  assertEquals(outcome({ toolName: "DeleteFile", escalate: SOFT, unattended: false }), "gate");
+});
+
+// Neither tier may be bypassed by a sticky grant.
+Deno.test("neither tier yields to a sticky always", () => {
+  assertEquals(outcome({ toolName: "GitPush", escalate: HARD, consent: "always", channelBound: true }), "gate");
+  assertEquals(outcome({ toolName: "DeleteFile", escalate: SOFT, consent: "always" }), "gate");
+});
+
+Deno.test("sticky never still outranks both tiers", () => {
+  assertEquals(outcome({ toolName: "GitPush", escalate: HARD, consent: "never", channelBound: true }), "deny");
+  assertEquals(outcome({ toolName: "DeleteFile", escalate: SOFT, consent: "never", unattended: true }), "deny");
+});
+
+Deno.test("hard on a channel-bound session gates rather than denying", () => {
+  assertEquals(outcome({ toolName: "GitPush", escalate: HARD, unattended: true, channelBound: true }), "gate");
+});
+
+Deno.test("matchEscalate reports the tier, or null", () => {
+  assertEquals(matchEscalate(HARD, "GitPush", ""), "hard");
+  assertEquals(matchEscalate(SOFT, "Bash", "rm"), "soft");
+  assertEquals(matchEscalate(SOFT, "Bash", "npm"), null);
+  assertEquals(matchEscalate(HARD, "Write", "a.ts"), null);
+});
+
+Deno.test("the ! prefix marks hard, its absence marks soft", () => {
+  const list = parseEscalateList("!GitPush,DeleteFile,!Bash:sudo,Bash:rm");
+  assertEquals(list, [
+    { tool: "GitPush", scopes: [], tier: "hard" },
+    { tool: "DeleteFile", scopes: [], tier: "soft" },
+    { tool: "Bash", scopes: ["sudo"], tier: "hard" },
+    { tool: "Bash", scopes: ["rm"], tier: "soft" },
+  ]);
+});
+
+// A bare `!` has no tool name and must be skipped like any malformed entry.
+Deno.test("a lone ! is malformed, not a hard match on the empty tool", () => {
+  assertEquals(parseEscalateList("!,GitPush"), [{ tool: "GitPush", scopes: [], tier: "soft" }]);
+});
+
+Deno.test("the default list keeps sudo hard and rm soft", () => {
+  const list = parseEscalateList(undefined);
+  assertEquals(matchEscalate(list, "Bash", "sudo"), "hard");
+  assertEquals(matchEscalate(list, "Bash", "rm"), "soft");
+  assertEquals(matchEscalate(list, "GitPush", ""), "hard");
+  assertEquals(matchEscalate(list, "DeleteFile", ""), "soft");
+  assertEquals(matchEscalate(list, "Bash", "npm"), null);
 });
