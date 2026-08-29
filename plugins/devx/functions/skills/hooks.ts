@@ -67,11 +67,13 @@ export async function runPreToolHooks(
         currentArgs = { ...currentArgs, ...result.modifications };
       }
     } catch (err) {
-      // Trust boundary: a hook that was supposed to decide allow/deny and
-      // threw must not be treated as approval -- deny, don't just log.
       console.error(`[hooks] PreToolUse hook error:`, err);
       onFailure?.({ event: "PreToolUse", error: err instanceof Error ? err.message : String(err) });
-      return { allow: false };
+      // Hook errors don't block tool execution by default -- the
+      // escalate/approval system is the trust boundary for tool calls, a
+      // user-configured advisory hook is not. A DuckDB hiccup, timeout, or
+      // connection reset must not itself deny every tool call; report it
+      // via onFailure above and let the loop continue to the next hook.
     }
   }
 
@@ -161,13 +163,15 @@ async function executeHook(
   }
 
   // Row's hook_type is neither "command" nor "prompt" -- the schema
-  // requires one of the two, so this means the row is malformed, not a
-  // legitimate no-op. Deny rather than silently approve: only PreToolUse
-  // reads `.action`, so this is inert for Post/Stop beyond the onFailure.
+  // requires one of the two, so this means the row is malformed. Reported
+  // via onFailure, but still approves: a hook that never even started is
+  // the same "don't block on hook failures" posture as everything else in
+  // this file -- the escalate/approval system is the trust boundary, not a
+  // user-configured hook.
   const error = `unknown hook_type: ${String((hook as { hook_type?: unknown }).hook_type)}`;
   console.error(`[hooks] ${error}`);
   onFailure?.({ event: hook.event, error });
-  return { action: "deny" };
+  return { action: "approve" };
 }
 
 // Executables allowed for hook commands
@@ -225,11 +229,9 @@ async function executeCommandHook(
 
   try {
     const ran = await runHookCommand(hook, input, onFailure);
-    // A disallowed executable means the hook never ran at all -- it could
-    // not render a verdict, so (unlike the non-zero-exit case below, where
-    // the hook DID run) this is fail-closed. onFailure already fired inside
-    // runHookCommand.
-    if (!ran) return { action: "deny" };
+    // A disallowed executable approves, same as every other non-blocking
+    // failure below -- onFailure already fired inside runHookCommand.
+    if (!ran) return { action: "approve" };
     const { exitCode, output } = ran;
 
     // Claude Code hook convention: exit code 2 means "block" -- a
@@ -266,11 +268,11 @@ async function executeCommandHook(
       return { action: "approve" };
     }
   } catch (err) {
-    // The hook crashed before producing any verdict -- same fail-closed
-    // reasoning as the disallowed-executable branch above.
+    // Don't block on hook failures -- a DuckDB hiccup, timeout, or
+    // connection reset must not deny the tool call it happened to guard.
     console.error(`[hooks] Command hook execution error:`, err);
     onFailure?.({ event: hook.event, error: err instanceof Error ? err.message : String(err) });
-    return { action: "deny" };
+    return { action: "approve" };
   }
 }
 

@@ -127,17 +127,22 @@ Deno.test("a non-zero-but-not-2 exit code command hook still approves (not a blo
 });
 
 // A row whose hook_type is neither "command" nor "prompt" (the schema-only
-// two values, functions/skills/types.ts's HookType) is malformed, not a
-// legitimate no-op -- hooks.ts's executeHook now denies rather than
-// silently approving it. PreToolUse is the trust-boundary event: this MUST
-// still deny, additively reported via hook.failed, not softened into
-// approval by adding the event.
-Deno.test("a failing PreToolUse hook still denies the call and emits hook.failed", async () => {
+// two values, functions/skills/types.ts's HookType) is malformed -- it never
+// even ran, let alone rendered a verdict. This is deliberately NOT denied:
+// the escalate/approval system is the trust boundary for tool calls, a
+// user-configured advisory hook is not, and this whole branch exists so a
+// coding agent isn't blocked by approvals -- a broken/crashed hook (or a
+// transient DuckDB hiccup, timeout, connection reset) must not turn into a
+// denial of every subsequent tool call. Report it via hook.failed and let
+// the operator fix the hook; don't stop the turn over it. Only an explicit
+// verdict (exit 2, or {"action":"deny"} output) denies -- see the exit-2
+// tests below.
+Deno.test("a failing PreToolUse hook emits hook.failed and the call proceeds (fail-open, not a trust boundary)", async () => {
   const events: Array<{ type: string; data: unknown }> = [];
   const ctx = ctxWithHooks([{ command: "exit 1", event: "PreToolUse" }]);
   ctx.emit = (type: string, data: unknown) => events.push({ type, data });
   const decision = await onToolCall({ name: "Write", input: {} }, ctx);
-  assertEquals(decision.allow, false);
+  assertEquals(decision.allow, true);
   const failure = events.find((e) => e.type === "hook.failed");
   assert(failure, "expected a hook.failed event");
   assertEquals((failure!.data as { event: string }).event, "PreToolUse");
