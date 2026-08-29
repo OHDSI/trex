@@ -102,6 +102,11 @@ export interface Deps {
   // Test seam: called with the per-turn resolved escalate list every time
   // resolveEscalate runs. Undefined in production.
   captureEscalate?: (list: EscalateList) => void;
+  // Resolves the git worktree a session's file tools write into. Core has no
+  // workspace concept of its own; the plugin that owns one supplies this.
+  // Absent (or resolving to undefined) => the turn-diff route reports
+  // unavailable rather than guessing at a cwd — see gitDiffForPaths.
+  resolveWorkspace?: (sessionId: string) => Promise<string | undefined>;
 }
 
 const defaultEnv: EnvFn = (k) => Deno.env.get(k);
@@ -112,25 +117,30 @@ const json = (body: unknown, status = 200, headers: Record<string, string> = {})
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
 
 // Task 11's diff mechanism. core/server/agents has no workspace/filesystem
-// concept of its own (Deps carries no cwd/workspacePath, and scope-key.ts's
-// touchedPaths is deliberately pure — computed from tool inputs, never the
-// disk); devx's GitDiff tool goes through a DuckDB table function
-// (trex_devx_git_diff) only the plugin runtime has loaded, which core has no
-// business reaching into. Shelling out to `git diff` in the worker's own
-// process cwd, scoped to exactly the recorded paths, is the narrowest thing
-// reachable from this layer. Never throws — a diff failure degrades to an
-// empty diff rather than a 500 on an otherwise read-only, informational route.
-async function gitDiffForPaths(paths: string[]): Promise<string> {
+// concept of its own (scope-key.ts's touchedPaths is deliberately pure —
+// computed from tool inputs, never the disk); devx's GitDiff tool goes
+// through a DuckDB table function (trex_devx_git_diff) only the plugin
+// runtime has loaded, which core has no business reaching into. Shelling out
+// to `git diff` scoped to exactly the recorded paths, in a cwd the CALLER
+// resolves (Deps.resolveWorkspace — never guessed), is the narrowest thing
+// reachable from this layer. `--` is load-bearing: it stops a model-authored
+// path like "--output=x" from being read as a git flag (args-array form
+// already rules out shell injection). Distinguishes "nothing to show" from
+// "couldn't look" — fix round 1: a swallowed failure is indistinguishable
+// from a clean turn, which is worse than surfacing it.
+async function gitDiffForPaths(cwd: string, paths: string[]): Promise<{ ok: true; diff: string } | { ok: false; error: string }> {
   try {
-    const { code, stdout, stderr } = await new Deno.Command("git", { args: ["diff", "--", ...paths] }).output();
+    const { code, stdout, stderr } = await new Deno.Command("git", { args: ["diff", "--", ...paths], cwd }).output();
     if (code !== 0) {
-      console.error(`agents: git diff failed (exit ${code}): ${new TextDecoder().decode(stderr)}`);
-      return "";
+      const error = new TextDecoder().decode(stderr).trim() || `git diff exited ${code}`;
+      console.error(`agents: git diff failed (exit ${code}) in ${cwd}: ${error}`);
+      return { ok: false, error };
     }
-    return new TextDecoder().decode(stdout);
+    return { ok: true, diff: new TextDecoder().decode(stdout) };
   } catch (e) {
-    console.error("agents: git diff failed:", e);
-    return "";
+    const error = e instanceof Error ? e.message : String(e);
+    console.error(`agents: git diff failed in ${cwd}:`, e);
+    return { ok: false, error };
   }
 }
 
@@ -1611,7 +1621,10 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
     // Task 11: read-only diff of exactly what this turn's file tools touched
     // (Task 10's touched_paths). Only Write/Edit/DeleteFile/CopyFile/RenameFile
     // are tracked (scope-key.ts's touchedPaths) — a turn whose changes came
-    // from a Bash command reports an empty diff here, not an error.
+    // from a Bash command reports an empty diff here, not an error. Fix
+    // round 1: "no paths" (empty diff) and "couldn't produce a diff" (error,
+    // no diff key) are kept distinguishable in the body — a caller must never
+    // be told "nothing changed" when the truth is "we could not look".
     const diffRoute = path.match(/^\/eve\/v1\/session\/([^/]+)\/turn\/([^/]+)\/diff$/);
     if (diffRoute && req.method === "GET") {
       const [, sessionId, turnId] = diffRoute;
@@ -1619,8 +1632,11 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // a turn from another session 404s exactly like an unknown one.
       if (!(await store.turnBelongsToSession(turnId, sessionId))) return json({ error: "turn not found" }, 404);
       const paths = await store.getTouchedPaths(turnId);
-      const diff = paths.length === 0 ? "" : await gitDiffForPaths(paths);
-      return json({ diff });
+      if (paths.length === 0) return json({ paths, diff: "" });
+      const cwd = await deps.resolveWorkspace?.(sessionId);
+      if (!cwd) return json({ paths, error: "no workspace available to diff against" });
+      const result = await gitDiffForPaths(cwd, paths);
+      return result.ok ? json({ paths, diff: result.diff }) : json({ paths, error: result.error });
     }
 
     if (req.method === "POST" && path === "/chat") {

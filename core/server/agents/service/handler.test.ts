@@ -479,6 +479,10 @@ async function makeHandler(
     wrapStore?: (s: ReturnType<typeof createStore>) => ReturnType<typeof createStore>;
     // Test seam for the per-turn resolved escalate list — see Deps.captureEscalate.
     captureEscalate?: (list: EscalateList) => void;
+    // Test seam for the turn-diff route's workspace resolution — see
+    // Deps.resolveWorkspace. Undefined (the default) matches production with
+    // no plugin wiring: the diff route reports unavailable, never a cwd guess.
+    resolveWorkspace?: (sessionId: string) => Promise<string | undefined>;
   } = {},
 ) {
   const agent = await loadAgent(TOY);
@@ -490,6 +494,7 @@ async function makeHandler(
     plugin: "toy-agent", agentName: "toy",
     basePath: "/plugins/trex/toy", model: opts.model ?? model("hello from toy"),
     captureEscalate: opts.captureEscalate,
+    resolveWorkspace: opts.resolveWorkspace,
   });
   return { handler, db };
 }
@@ -4676,21 +4681,22 @@ Deno.test("an unparseable agent override falls back to the deployment list", asy
   assertEquals(seen[0].length > 1, true, "must be the default list, not empty");
 });
 
-// --- turn-diff route (task 11) ------------------------------------------
+// --- turn-diff route (task 11, fix round 1) -----------------------------
 
-Deno.test("GET turn diff returns a diff scoped to that turn's paths", async () => {
-  const { handler, db } = await makeHandler();
-  db.turns.push({
-    id: "t-1", session_id: "s-1", seq: 1, status: "completed", error: null,
-    message: null, startedAt: new Date(), touched_paths: ["testdata/task-11-diff-fixture-does-not-exist.txt"],
-  });
-  const res = await handler(new Request(`${BASE}/eve/v1/session/s-1/turn/t-1/diff`));
-  assertEquals(res.status, 200);
-  const body = await res.json();
-  assertEquals(typeof body.diff, "string");
-});
+async function gitFixture(): Promise<string> {
+  const dir = await Deno.makeTempDir();
+  const git = (...args: string[]) => new Deno.Command("git", { args, cwd: dir }).output();
+  await git("init", "-q");
+  await git("config", "user.email", "t@t.com");
+  await git("config", "user.name", "t");
+  await Deno.writeTextFile(`${dir}/a.txt`, "one\n");
+  await git("add", "a.txt");
+  await git("commit", "-q", "-m", "init");
+  await Deno.writeTextFile(`${dir}/a.txt`, "two\n");
+  return dir;
+}
 
-Deno.test("a turn that touched nothing returns an empty diff, not an error", async () => {
+Deno.test("a turn with no touched paths returns an empty diff and empty paths, not an error", async () => {
   const { handler, db } = await makeHandler();
   db.turns.push({
     id: "t-2", session_id: "s-1", seq: 1, status: "completed", error: null,
@@ -4698,7 +4704,63 @@ Deno.test("a turn that touched nothing returns an empty diff, not an error", asy
   });
   const res = await handler(new Request(`${BASE}/eve/v1/session/s-1/turn/t-2/diff`));
   assertEquals(res.status, 200);
-  assertEquals((await res.json()).diff, "");
+  const body = await res.json();
+  assertEquals(body.paths, []);
+  assertEquals(body.diff, "");
+  assertEquals(body.error, undefined);
+});
+
+Deno.test("GET turn diff returns a real diff scoped to that turn's paths when a workspace resolves", async () => {
+  const dir = await gitFixture();
+  try {
+    const { handler, db } = await makeHandler({ resolveWorkspace: () => Promise.resolve(dir) });
+    db.turns.push({
+      id: "t-1", session_id: "s-1", seq: 1, status: "completed", error: null,
+      message: null, startedAt: new Date(), touched_paths: ["a.txt"],
+    });
+    const res = await handler(new Request(`${BASE}/eve/v1/session/s-1/turn/t-1/diff`));
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assertEquals(body.paths, ["a.txt"]);
+    assert(body.diff.includes("-one"));
+    assert(body.diff.includes("+two"));
+    assertEquals(body.error, undefined);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("a turn with touched paths but no workspace resolver reports unavailable, not an empty diff", async () => {
+  const { handler, db } = await makeHandler();
+  db.turns.push({
+    id: "t-3", session_id: "s-1", seq: 1, status: "completed", error: null,
+    message: null, startedAt: new Date(), touched_paths: ["some/file.ts"],
+  });
+  const res = await handler(new Request(`${BASE}/eve/v1/session/s-1/turn/t-3/diff`));
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  assertEquals(body.paths, ["some/file.ts"]);
+  assertEquals(body.diff, undefined);
+  assert(typeof body.error === "string" && body.error.length > 0);
+});
+
+Deno.test("a turn whose resolved workspace is not a git repo reports the git failure, not an empty diff", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const { handler, db } = await makeHandler({ resolveWorkspace: () => Promise.resolve(dir) });
+    db.turns.push({
+      id: "t-4", session_id: "s-1", seq: 1, status: "completed", error: null,
+      message: null, startedAt: new Date(), touched_paths: ["x.txt"],
+    });
+    const res = await handler(new Request(`${BASE}/eve/v1/session/s-1/turn/t-4/diff`));
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assertEquals(body.paths, ["x.txt"]);
+    assertEquals(body.diff, undefined);
+    assert(typeof body.error === "string" && body.error.length > 0);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });
 
 Deno.test("a turn belonging to another session is refused", async () => {
