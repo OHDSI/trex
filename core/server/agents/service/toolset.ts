@@ -3,7 +3,7 @@
 // Shared by runner.ts (session API) and handler.ts (/chat) so the two
 // endpoints cannot drift. Spec §3 (skills/subagents) + §4 (extensions).
 // deno-lint-ignore-file no-explicit-any
-import { tool, jsonSchema } from "ai";
+import { tool, jsonSchema, type JSONSchema7 } from "ai";
 import { withToolCachePoint } from "./model.ts";
 import { isZodSchema } from "../eve-shim/types.ts";
 import type { HookCtx, ToolDef } from "../eve-shim/types.ts";
@@ -270,7 +270,10 @@ function skillTool(ctx: ToolBuildCtx): any {
 
 // Shared JSON Schema for the fork_turns parameter — reused by agent_spawn
 // (Task 9) so both spawn paths describe the trade-off identically.
-const FORK_TURNS_SCHEMA = {
+// Annotated rather than inferred: without it `type` widens to `string` and
+// the object stops being assignable to JSONSchema7Definition at both use
+// sites, even though the value IS a valid JSON Schema.
+const FORK_TURNS_SCHEMA: JSONSchema7 = {
   type: "string",
   description: 'How much of YOUR history to give the subagent: "none" (default) may leave it ' +
     'without context it needs; "all" gives it everything, at real token cost; or a number for the ' +

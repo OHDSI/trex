@@ -34,7 +34,15 @@ Stream event vocabulary (subset of eve's documented set — see
 `action.result`, `input.requested`, `turn.completed`, `turn.failed`,
 `session.waiting`, `session.failed`, plus additive trex extensions not in
 eve's vocabulary at all: `tool.event` (see divergence 10 below),
-`message.queued`, `turn.reaped`, and `context.compacted` (divergence 18).
+`message.queued`, `turn.reaped`, `context.compacted` (divergence 18), and
+`model.retrying` — published when a model call is refused with a 429/5xx or a
+connection error and will be retried after a backoff (`service/retry.ts`), so
+a client can say "rate limited, retrying in 10s" instead of appearing hung
+through a wait that reaches 60s. Carries `phase` (`"turn"` for the turn's own
+`streamText`, `"compaction"` for the pre-turn summarizer) plus `attempt`,
+`maxAttempts`, `delayMs` and `reason`; `turnId` is absent for the compaction
+phase, which runs before the turn exists. Live-only, like `message.queued`,
+`turn.reaped` and `context.compacted` — never persisted, never replayed.
 `session.waiting`/`session.failed`
 matter more than they look: eve's own client (`eve/client`'s
 `MessageResponse.result()`) ends its per-turn read on

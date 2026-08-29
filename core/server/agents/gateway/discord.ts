@@ -118,9 +118,13 @@ export class DiscordGatewayClient {
 
   #running = false;
   #socket: GatewaySocket | null = null;
-  #heartbeatTimer: number | undefined;
-  #reconnectTimer: number | undefined;
-  #readyTimer: number | undefined;
+// `number` is the browser/Deno return type; under this workspace's node typings
+// setTimeout/setInterval return a Node `Timeout` object instead. Deriving the
+// type from the function keeps it correct either way — hardcoding `number` is
+// what `deno check` flags here.
+  #heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  #reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  #readyTimer: ReturnType<typeof setTimeout> | undefined;
   #heartbeatAcked = true;
   #seq: number | null = null;
   #sessionId: string | null = null;

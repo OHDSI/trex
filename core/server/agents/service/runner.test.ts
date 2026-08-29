@@ -1,4 +1,5 @@
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
+import { APICallError } from "ai";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
 import { runTurn, makePrepareStep } from "./runner.ts";
 import { loadAgent } from "../loader.ts";
@@ -80,8 +81,10 @@ const textChunks = (text: string) => [
   { type: "text-end", id: "1" },
   FINISH,
 ];
-const toolCallChunks = (toolName: string, input: unknown) => [
-  { type: "tool-call", toolCallId: "c-1", toolName, input: JSON.stringify(input) },
+// toolCallId is a parameter so a multi-step turn can issue DISTINCT calls;
+// it defaults to the single id every existing caller relied on.
+const toolCallChunks = (toolName: string, input: unknown, toolCallId = "c-1") => [
+  { type: "tool-call", toolCallId, toolName, input: JSON.stringify(input) },
   {
     type: "finish",
     finishReason: { unified: "tool-calls", raw: "tool-calls" },
@@ -749,9 +752,13 @@ Deno.test("authored tools get ToolContext.sql; provider-sourced (dynamic-tools) 
 
 Deno.test("runTurn: onTurnEnd receives the final text and finishReason", async () => {
   const agent = await loadAgent(TOY);
-  let seen: { text: string; finishReason: string } | null = null;
+  // Collected rather than held in a `let ... | null`: TS narrows such a
+  // binding to `null` at the read site (it cannot see the callback assign to
+  // it), which made `seen?.text` an access on `never`. An array also lets the
+  // test say the hook ran EXACTLY once, which the nullable form never checked.
+  const seen: { text: string; finishReason: string }[] = [];
   agent.config.onTurnEnd = (turn: { text: string; finishReason: string }) => {
-    seen = turn;
+    seen.push(turn);
     return Promise.resolve();
   };
   const { store } = memoryStoreCalls();
@@ -762,8 +769,9 @@ Deno.test("runTurn: onTurnEnd receives the final text and finishReason", async (
     hookCtx: fakeHookCtx(),
   });
   assertEquals(out.text, "all done");
-  assertEquals(seen?.text, "all done");
-  assertEquals(seen?.finishReason, "stop");
+  assertEquals(seen.length, 1, "onTurnEnd must run exactly once per turn");
+  assertEquals(seen[0]?.text, "all done");
+  assertEquals(seen[0]?.finishReason, "stop");
 });
 
 Deno.test("runTurn: a throwing onTurnEnd does not fail the turn", async () => {
@@ -974,7 +982,7 @@ Deno.test("a single-step turn's lastStepInputTokens equals its only step's prefi
 
 Deno.test("makePrepareStep injects a pending follow-up before the next step", async () => {
   const drained: string[] = [];
-  const prepare = makePrepareStep({
+  const { prepareStep: prepare } = makePrepareStep({
     sessionId: "c-1",
     store: {
       takeFollowUps: (sid: string) => {
@@ -991,7 +999,7 @@ Deno.test("makePrepareStep injects a pending follow-up before the next step", as
 });
 
 Deno.test("makePrepareStep leaves messages untouched when nothing is pending", async () => {
-  const prepare = makePrepareStep({
+  const { prepareStep: prepare } = makePrepareStep({
     sessionId: "c-1",
     store: { takeFollowUps: () => Promise.resolve([]) },
   });
@@ -1114,4 +1122,252 @@ Deno.test("runTurn never calls takeFollowUps for a top-level (non-child) turn �
     // depth omitted entirely — the overwhelmingly common (top-level) case.
   });
   assertEquals(called, false, "a top-level turn must not query the follow-up queue at all");
+});
+
+// --- model-call retry wiring (service/retry.ts) ------------------------------
+
+// A rate limit that arrives as an `error` PART rather than a rejection — the
+// case runner.ts's own comment flags, and the one a naive
+// withModelRetry(() => streamText(...)) cannot see at all.
+const rateLimited = () =>
+  new APICallError({
+    message: "rate limit exceeded",
+    url: "https://example.test/v1",
+    requestBodyValues: {},
+    statusCode: 429,
+  });
+
+Deno.test("runTurn retries a 429 that arrives before any output, and publishes model.retrying", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  const waits: number[] = [];
+
+  const res = await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "hello", store, emit: (e) => events.push(e),
+    model: sequencedModel([{ type: "error", error: rateLimited() }], textChunks("hi there")),
+    retrySleep: (ms) => (waits.push(ms), Promise.resolve()),
+  });
+
+  assertEquals(res.text, "hi there");
+  assertEquals(waits, [5_000]);
+  const retrying = events.filter((e) => e.type === "model.retrying");
+  assertEquals(retrying.length, 1);
+  const data = (retrying[0] as { data: { attempt: number; delayMs: number; phase: string; turnId?: string } }).data;
+  assertEquals(data.attempt, 1);
+  assertEquals(data.delayMs, 5_000);
+  assertEquals(data.phase, "turn");
+  assertEquals(data.turnId, "t-1");
+  // The abandoned attempt contributed no text and no duplicate turn boundary.
+  assertEquals(events.filter((e) => e.type === "turn.completed").length, 1);
+  assertEquals(
+    events.filter((e) => e.type === "message.appended").map((e) => (e as { data: { messageDelta: string } }).data.messageDelta),
+    ["hi there"],
+  );
+});
+
+Deno.test("runTurn does not retry a 401 — it fails the turn on the first attempt", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  const waits: number[] = [];
+  let starts = 0;
+
+  const model = new MockLanguageModelV3({
+    doStream: () => {
+      starts++;
+      return Promise.resolve({
+        stream: simulateReadableStream({
+          chunks: [{
+            type: "error",
+            error: new APICallError({
+              message: "invalid api key",
+              url: "https://example.test/v1",
+              requestBodyValues: {},
+              statusCode: 401,
+            }),
+          }],
+        }),
+      });
+    },
+  });
+
+  await assertRejects(() =>
+    runTurn({
+      agent, sessionId: "s-1", turnId: "t-1", history: [],
+      message: "hello", store, emit: (e) => events.push(e),
+      model,
+      retrySleep: (ms) => (waits.push(ms), Promise.resolve()),
+    })
+  );
+
+  assertEquals(starts, 1, "an auth failure must not be re-requested");
+  assertEquals(waits, []);
+  assertEquals(events.filter((e) => e.type === "model.retrying").length, 0);
+});
+
+Deno.test("runTurn does NOT retry a 429 that arrives after text was already emitted", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  const waits: number[] = [];
+  let starts = 0;
+
+  const model = new MockLanguageModelV3({
+    doStream: () => {
+      starts++;
+      return Promise.resolve({
+        stream: simulateReadableStream({
+          chunks: [
+            { type: "text-start", id: "1" },
+            { type: "text-delta", id: "1", delta: "partial" },
+            { type: "error", error: rateLimited() },
+          ],
+        }),
+      });
+    },
+  });
+
+  // Retrying here would re-stream "partial" into the channel a second time.
+  // The contract is pre-output only, so the turn fails instead.
+  await assertRejects(() =>
+    runTurn({
+      agent, sessionId: "s-1", turnId: "t-1", history: [],
+      message: "hello", store, emit: (e) => events.push(e),
+      model,
+      retrySleep: (ms) => (waits.push(ms), Promise.resolve()),
+    })
+  );
+
+  assertEquals(starts, 1);
+  assertEquals(waits, []);
+  assertEquals(events.filter((e) => e.type === "message.appended").length, 1);
+});
+
+// The retry contract is defined over stream PARTS, but prepareStep fires
+// BEFORE any part exists — and for a child turn it is DESTRUCTIVE
+// (takeFollowUps is a DELETE ... RETURNING). An abandoned attempt therefore
+// takes the row out of the queue and then throws away the prompt it was
+// injected into. Without makePrepareStep's carry-across buffer the message is
+// gone from both the database and the retried request, while sendToChild has
+// already told the sender it was queued.
+Deno.test("a retried child turn still delivers a follow-up the abandoned attempt drained", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  let drains = 0;
+  const wrapped = {
+    ...store,
+    takeFollowUps: (_sid: string) => {
+      drains++;
+      // DELETE ... RETURNING: only the FIRST drain ever sees the row.
+      return Promise.resolve(
+        drains === 1 ? [{ message: "stop and summarize", originChildSessionId: null }] : [],
+      );
+    },
+  };
+
+  // capturingModel records each doStream call's options, so the assertions
+  // below read the prompt the model was ACTUALLY handed on each attempt.
+  const { model, calls } = capturingModel([{ type: "error", error: rateLimited() }], textChunks("ok"));
+  const waits: number[] = [];
+  const res = await runTurn({
+    agent, sessionId: "c-1", turnId: "t-1", history: [],
+    message: "explore", store: wrapped as never, emit: () => {},
+    model, depth: 1,
+    retrySleep: (ms) => (waits.push(ms), Promise.resolve()),
+  });
+
+  assertEquals(res.text, "ok");
+  assertEquals(waits, [5_000], "the 429 must have been retried");
+  assertEquals(calls.length, 2, "the model must have been called twice");
+  assertEquals(drains, 2, "the retried attempt runs prepareStep again");
+  assert(
+    JSON.stringify(calls[0]?.prompt).includes("stop and summarize"),
+    "sanity: the first attempt did receive the follow-up",
+  );
+  // The queue is empty by now, so ONLY the carry-across buffer can put the
+  // message in front of the model on the second attempt.
+  assert(
+    JSON.stringify(calls[1]?.prompt).includes("stop and summarize"),
+    "the drained follow-up never reached the model on the retry: " + JSON.stringify(calls[1]?.prompt),
+  );
+});
+
+// The buffer must not turn "delivered once" into "delivered every step".
+// Worth pinning because the two facts that make it safe are both non-obvious:
+// a committing part from step 1 clears the buffer before step 2 prepareStep
+// runs, AND ai@6 per-step "messages" override does NOT persist into later
+// steps (verified here - step 2 prompt is the SDK own accumulated
+// conversation, with no trace of step 1 override). So the message reaches the
+// model exactly once, which is the pre-existing semantic the carry-across
+// buffer had to preserve rather than change.
+Deno.test("a follow-up delivered to one step is not re-injected into the next", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  let drains = 0;
+  const wrapped = {
+    ...store,
+    takeFollowUps: (_sid: string) => {
+      drains++;
+      return Promise.resolve(
+        drains === 1 ? [{ message: "wrap up now", originChildSessionId: null }] : [],
+      );
+    },
+  };
+  const { model, calls } = capturingModel(toolCallChunks("echo", { text: "hi" }), textChunks("done"));
+
+  await runTurn({
+    agent, sessionId: "c-1", turnId: "t-1", history: [],
+    message: "start", store: wrapped as never, emit: () => {},
+    model, depth: 1,
+  });
+
+  assert(drains >= 2, "prepareStep runs before each step");
+  const per = calls.map((c) => JSON.stringify(c?.prompt ?? c).split("wrap up now").length - 1);
+  const total = per.reduce((a: number, b: number) => a + b, 0);
+  assertEquals(total, 1, "the follow-up must reach the model exactly once across the turn, got " + per);
+  assertEquals(per[0], 1, "and it must be the step it was injected into that carried it");
+});
+
+// The test above drains at step 0, which is the case that was ALREADY safe:
+// the seal clears the buffer before step 1 ever asks. The dangerous case is a
+// message that arrives LATER — which is the case agent_send exists for, since
+// a message sent while the child is inside a long tool call reaches step >= 1
+// by construction. After the stream has sealed there is no further attempt to
+// carry into, so continuing to carry is not merely redundant, it re-injects
+// the same instruction into every remaining step of the turn.
+Deno.test("a follow-up arriving at a LATER step is delivered once, not re-injected into every remaining step", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  let drains = 0;
+  const wrapped = {
+    ...store,
+    takeFollowUps: (_sid: string) => {
+      drains++;
+      // Nothing queued before step 0; the message lands during the turn, on
+      // the SECOND drain.
+      return Promise.resolve(
+        drains === 2 ? [{ message: "do X now", originChildSessionId: null }] : [],
+      );
+    },
+  };
+  // Three steps: two tool calls (distinct ids) then a closing text step, so
+  // there are two prepareStep calls AFTER the one that picked the message up.
+  const { model, calls } = capturingModel(
+    toolCallChunks("echo", { text: "one" }, "c-1"),
+    toolCallChunks("echo", { text: "two" }, "c-2"),
+    textChunks("done"),
+  );
+
+  await runTurn({
+    agent, sessionId: "c-1", turnId: "t-1", history: [],
+    message: "start", store: wrapped as never, emit: () => {},
+    model, depth: 1,
+  });
+
+  assert(drains >= 3, "the turn must have run at least three steps, got " + drains);
+  const per = calls.map((c) => JSON.stringify(c?.prompt ?? c).split("do X now").length - 1);
+  const total = per.reduce((a: number, b: number) => a + b, 0);
+  assertEquals(total, 1, "the follow-up must reach the model exactly once across the turn, per-step counts: " + per);
 });

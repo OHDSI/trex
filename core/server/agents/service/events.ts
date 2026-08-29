@@ -135,4 +135,28 @@ export type AgentEvent =
   | {
     type: "context.compacted";
     data: { via: "summary" | "drop"; replacedTurnSeqTo: number; warning?: string };
+  }
+  // Trex extension (not part of eve's documented vocabulary): a model call
+  // was refused with a 429/5xx/connection error and will be retried after
+  // `delayMs` (see service/retry.ts). Emitted so a client can show "rate
+  // limited, retrying in 10s" instead of appearing hung — the backoff
+  // schedule tops out at a 60s wait, long enough that silence reads as a hang.
+  //
+  // `phase` says WHICH model call is being retried, because they fail
+  // differently from the user's point of view: "turn" is the turn's own
+  // streamText, "compaction" is the pre-turn summarization call whose failure
+  // silently degrades to dropping the oldest turns. Turn-agnostic when
+  // `phase` is "compaction" (compaction runs BEFORE the turn is created, so
+  // there is no turnId yet) — same wire posture as context.compacted above:
+  // live-only, not persisted, not replayed.
+  | {
+    type: "model.retrying";
+    data: {
+      turnId?: string;
+      phase: "turn" | "compaction";
+      attempt: number;
+      maxAttempts: number;
+      delayMs: number;
+      reason: string;
+    };
   };

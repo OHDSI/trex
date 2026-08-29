@@ -219,6 +219,26 @@ jobs:
       # core/server can never satisfy them. Runtime npm: resolution works from
       # core/server/node_modules either way. Typechecking runs on dev machines
       # via the same command without --no-check.
+      # Blocking type gate for the agents runtime, run as its OWN step rather
+      # than by dropping --no-check from the test leg above. The --no-check
+      # rationale documented right above applies to that leg's WHOLE file set
+      # (plugin/, memory/, d2e-compat/, webapi-native.test.ts pull in npm
+      # packages whose /// <reference types="..."> directives resolve against
+      # core/node_modules); agents/ imports no such package, so it can be
+      # checked on the npm ci layout CI actually has. Verified by checking
+      # agents/ with core/node_modules removed.
+      #
+      # Depends on the `npm ci` step above for the same reason the test legs
+      # do: nodeModulesDir is "manual" (byonm), so npm:ai / npm:@ai-sdk/*
+      # resolve out of core/server/node_modules.
+      #
+      # Worth gating despite the cost: agents/ carries a tagged union added
+      # specifically to make a class of bug a compile error, and under
+      # --no-check that protection bound nothing. Tests are gated too — a
+      # fixture that drifts out of sync with an interface is exactly the
+      # defect a tests-excluded gate keeps missing.
+      - name: core/server type check (agents runtime)
+        run: cd core/server && deno check agents/
       - name: core/server tests (agents, plugin loader, memory importer, d2e-compat)
         run: cd core/server && deno test --no-check --allow-all agents/ plugin/ memory/importer.test.ts d2e-compat/ webapi-native.test.ts
       # The gbrain worker suite runs under its OWN import map (gbrain/ alias +

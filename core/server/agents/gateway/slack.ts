@@ -79,7 +79,11 @@ export class SlackGatewayClient {
 
   #running = false;
   #socket: GatewaySocket | null = null;
-  #reconnectTimer: number | undefined;
+// `number` is the browser/Deno return type; under this workspace's node typings
+// setTimeout/setInterval return a Node `Timeout` object instead. Deriving the
+// type from the function keeps it correct either way — hardcoding `number` is
+// what `deno check` flags here.
+  #reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   #attempts = 0;
   #seen = new Set<string>();
   #seenOrder: string[] = [];

@@ -10,6 +10,7 @@ import type { LoadedAgent } from "../loader.ts";
 import type { AgentStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
 import { buildSdkTools, resolveInstructions, resolveUserMessage } from "./toolset.ts";
+import { classifyModelError, type ModelRetryOpts, retryEmitter, streamWithModelRetry } from "./retry.ts";
 import type { ConnectionProviderOpts } from "../connections/provider.ts";
 import type { SpawnCapabilities } from "./spawn.ts";
 
@@ -70,6 +71,10 @@ interface RunTurnOpts {
   // for every other turn: nothing else can be stopped from the outside today,
   // and an unused controller per turn is bookkeeping nobody reads.
   abortSignal?: AbortSignal;
+  // Test seam for the model-call retry schedule (service/retry.ts): lets a
+  // test assert the 5s/10s/20s/40s waits without spending 75 seconds in
+  // them. Undefined in production, where retry.ts uses a real timer.
+  retrySleep?: ModelRetryOpts["sleep"];
 }
 
 // A child has exactly ONE turn, so a message queued for it (spawn.ts's
@@ -88,21 +93,70 @@ interface RunTurnOpts {
 // is executing lands only once that call returns and the next step's
 // prepareStep runs; a message sent after the turn's FINAL step has already
 // started is never read at all.
+//
+// Returns the callback together with a `commit()`, because the drain is
+// DESTRUCTIVE and the turn's model call can now be RETRIED (retry.ts).
+// takeFollowUps is a DELETE ... RETURNING: once a row is drained the queue no
+// longer holds it. A retry builds a FRESH streamText, so this callback runs
+// again — against a queue the abandoned attempt already emptied — while the
+// `messages` array the retried request closes over never had the row either.
+// Without the buffer below the message is gone from the database AND absent
+// from the replayed prompt, after spawn.ts's sendToChild already told the
+// sender it was queued: silently destroyed, in precisely the
+// fan-out-hits-a-429 scenario the retry layer exists for. Note the retry
+// contract itself is defined over stream PARTS and this side effect happens
+// before the first part exists, which is why it needs handling of its own.
 export function makePrepareStep(deps: { sessionId: string; store: Pick<AgentStore, "takeFollowUps"> }) {
-  return async ({ messages }: { messages: any[] }) => {
+  // Rows taken OUT of the database but not yet known to have reached the
+  // model. Held until commit() reports the carrying attempt can no longer be
+  // abandoned.
+  let carried: string[] = [];
+  // Whether the stream has sealed. Carrying is ONLY meaningful before that:
+  // once no further attempt can be made, a row handed to a step has been
+  // delivered, full stop. Keeping it in the buffer past the seal re-injects
+  // the same instruction into every remaining step of the turn — which is the
+  // common case, not an edge one, because a message sent while the child is
+  // inside a long tool call arrives at step >= 1 by construction.
+  let sealed = false;
+
+  const prepareStep = async ({ messages }: { messages: any[] }) => {
     const pending = await deps.store.takeFollowUps(deps.sessionId);
-    if (pending.length === 0) return {}; // no override: leave the step untouched
     // Only the text matters here. A row's origin (V10) answers "did a CHILD
     // cause the next turn?", and mid-turn delivery creates no turn at all —
     // nor could a child's own queue carry one: agent_send is the only thing
     // that writes to it, and it never names an origin.
-    return {
+    if (pending.length > 0) carried = [...carried, ...pending.map((p) => p.message)];
+    if (carried.length === 0) return {}; // no override: leave the step untouched
+    const override = {
       messages: [
         ...messages,
-        ...pending.map((p) => ({ role: "user" as const, content: p.message })),
+        ...carried.map((content) => ({ role: "user" as const, content })),
       ],
     };
+    // Delivered: this step's request is the last one that could have been
+    // replayed, so nothing is left to carry.
+    if (sealed) carried = [];
+    return override;
   };
+
+  /**
+   * The stream produced something the turn acted on, so the attempt carrying
+   * these messages can no longer be abandoned — they really did reach the
+   * model. Called by runTurn once streamWithModelRetry seals an attempt.
+   *
+   * Fires once per TURN, not once per step, which is the whole reason `sealed`
+   * exists alongside the clear. Clearing here only ever covers rows drained
+   * BEFORE the seal (the step-0 arrival); a row drained by any later step is
+   * never seen by this function again, so `prepareStep` has to clear those
+   * itself. Assuming this one call was enough is what re-injected a
+   * late-arriving message into every remaining step.
+   */
+  const commit = () => {
+    carried = [];
+    sealed = true;
+  };
+
+  return { prepareStep, commit };
 }
 
 export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finishReason: string }> {
@@ -172,36 +226,85 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
   // withSystemCachePoint) the high-value cache target the brief calls for;
   // per-turn `messages` are deliberately left uncached since they change
   // every turn.
-  const result = streamText({
-    model,
-    system: withSystemCachePoint(model, system),
-    messages,
-    tools,
-    // Only ever set for a child turn (see RunTurnOpts.abortSignal). Passing
-    // undefined is exactly the same as not passing it at all.
-    abortSignal: opts.abortSignal,
-    stopWhen: stepCountIs(agent.config.maxSteps ?? 25),
-    // openai/Responses caches automatically; a stable per-agent key keeps the
-    // TOOLS+SYSTEM prefix routed to the same cache across turns. No-op ({}) for
-    // bedrock/anthropic (they cache via withSystemCachePoint's markers above).
-    // Task 14: reasoningEffortProviderOptions is agent.config.reasoningEffort
-    // applied to THIS turn's own resolved model — nothing spawn-specific is
-    // needed beyond ordinary turn execution, since a child's turn already
-    // runs with its OWN LoadedAgent.config (handler.ts's buildSpawnCapabilities
-    // resolves it before ever calling startTurn).
-    providerOptions: mergeProviderOptions(
-      cacheProviderOptions(model, agent.dir),
-      reasoningEffortProviderOptions(model, agent.config.reasoningEffort, agent.dir),
-    ),
-    // Only wired for a CHILD turn (depth===1). prepareStep runs on every
-    // step of every turn if it's set at all — leaving it undefined for the
-    // overwhelming majority (top-level) case means zero DB round trips for
-    // a feature only children use, rather than relying on makePrepareStep's
-    // own no-op path to be cheap enough. `opts.depth` is already derived once
-    // per turn by handler.ts's startTurn (store.isChildSession) — reusing it
-    // here costs nothing extra.
-    ...(opts.depth === 1 ? { prepareStep: makePrepareStep({ sessionId: opts.sessionId, store: opts.store }) } : {}),
-  });
+  // Built ONCE and hoisted out of startStream, unlike everything else in the
+  // request: it owns a buffer of follow-ups drained from the database but not
+  // yet delivered, and rebuilding it per attempt would reset that buffer to
+  // empty and destroy them. See makePrepareStep.
+  const prep = opts.depth === 1 ? makePrepareStep({ sessionId: opts.sessionId, store: opts.store }) : undefined;
+
+  // A factory, not a value: streamWithModelRetry calls it again for each
+  // retry, and a streamText result is single-use. Every argument it closes
+  // over is already resolved above and identical across attempts, so a retried
+  // attempt is the same request, not a re-derived one.
+  const startStream = () =>
+    streamText({
+      model,
+      system: withSystemCachePoint(model, system),
+      messages,
+      tools,
+      // Only ever set for a child turn (see RunTurnOpts.abortSignal). Passing
+      // undefined is exactly the same as not passing it at all.
+      abortSignal: opts.abortSignal,
+      stopWhen: stepCountIs(agent.config.maxSteps ?? 25),
+      // openai/Responses caches automatically; a stable per-agent key keeps the
+      // TOOLS+SYSTEM prefix routed to the same cache across turns. No-op ({}) for
+      // bedrock/anthropic (they cache via withSystemCachePoint's markers above).
+      // Task 14: reasoningEffortProviderOptions is agent.config.reasoningEffort
+      // applied to THIS turn's own resolved model — nothing spawn-specific is
+      // needed beyond ordinary turn execution, since a child's turn already
+      // runs with its OWN LoadedAgent.config (handler.ts's buildSpawnCapabilities
+      // resolves it before ever calling startTurn).
+      providerOptions: mergeProviderOptions(
+        cacheProviderOptions(model, agent.dir),
+        reasoningEffortProviderOptions(model, agent.config.reasoningEffort, agent.dir),
+      ),
+      // Only wired for a CHILD turn (depth===1). prepareStep runs on every
+      // step of every turn if it's set at all — leaving it undefined for the
+      // overwhelming majority (top-level) case means zero DB round trips for
+      // a feature only children use, rather than relying on makePrepareStep's
+      // own no-op path to be cheap enough. `opts.depth` is already derived once
+      // per turn by handler.ts's startTurn (store.isChildSession) — reusing it
+      // here costs nothing extra.
+      ...(prep ? { prepareStep: prep.prepareStep } : {}),
+      // ai's default onError console.errors EVERY stream failure, including
+      // the attempts retry.ts is about to abandon — so a 429 that recovered on
+      // attempt 2 still printed a stack trace that reads like a failed turn.
+      // Retryable ones are therefore left to the model.retrying event (and, if
+      // the budget runs out, to withModelRetry's own giving-up log); a
+      // TERMINAL error keeps its diagnostic, because the turn really is ending
+      // and the persisted error step alone is not something an operator sees.
+      onError: ({ error }: { error: unknown }) => {
+        if (classifyModelError(error).retryable) return;
+        console.error("agents: model stream error:", error);
+      },
+    });
+
+  // Retry a 429/5xx/connection refusal on the way IN — see retry.ts for the
+  // exact contract, which is deliberately "retry only while the stream has
+  // produced nothing this loop acted on". A child turn runs through this same
+  // function (handler.ts's startTurn is the only caller for both), so wiring
+  // it here covers children too; nothing spawn-specific is needed.
+  //
+  // The try/catch keeps the bookkeeping identical to the in-loop "error" case
+  // below: a failure the retry budget could not absorb still persists an
+  // `error` step (so a replay shows where the turn stopped) and throws a plain
+  // Error for handler.ts's startTurn catch to turn into turn.failed. Without
+  // it, a pre-stream failure — which used to arrive as an `error` PART inside
+  // the loop — would now bypass that persist entirely.
+  let fullStream: AsyncIterable<any>;
+  try {
+    fullStream = await streamWithModelRetry(startStream, {
+      onRetry: retryEmitter(emit, { turnId, phase: "turn" }),
+      // Tells the follow-up buffer its messages really did reach the model.
+      onCommit: prep?.commit,
+      sleep: opts.retrySleep,
+      signal: opts.abortSignal,
+    });
+  } catch (err) {
+    const message = String(err ?? "unknown model error");
+    await persist("error", null, { message });
+    throw new Error(message);
+  }
 
   let text = "";
   // The text produced by the CURRENT step only, reset at every step
@@ -269,7 +372,7 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
     await persist("text", null, { text, finishReason, lastStepText });
   };
   try {
-    for await (const part of result.fullStream) {
+    for await (const part of fullStream) {
       switch (part.type) {
         case "text-delta": {
           const delta = (part as any).text ?? (part as any).delta ?? "";
