@@ -22,6 +22,9 @@ import { loadHooks, runContextHook, runPostToolHooks, runPreToolHooks, runStopHo
 import type { Hook } from "../functions/skills/types.ts";
 import { materializeAttachments, renderAttachmentBlock } from "../functions/attachments.ts";
 import { DEFERRED_TOOLS } from "./lib/deferred_tools.ts";
+// Real runtime import (not type-only), same posture as dynamic-tools.ts's
+// core/server/agents/connections/mcp.ts import above it.
+import { capHookOutput } from "../../../core/server/agents/service/context/hook-output.ts";
 
 // Port of functions/tools/registry.ts's buildToolSet PLAN_MODE_TOOLS
 // (registry.ts:197-205) — legacy names map 1:1 to the eve wrapper names
@@ -518,7 +521,9 @@ async function runUserPromptSubmitHooks(hooks: Hook[], prompt: string): Promise<
   for (const hook of hooks) {
     try {
       const text = await runContextHook(hook, { event: "UserPromptSubmit", prompt });
-      if (text) outputs.push(text);
+      // Cap and spill BEFORE this hook's output reaches the prompt — an
+      // unbounded hook can undo the compaction that just ran to make room.
+      if (text) outputs.push((await capHookOutput(text)).text);
     } catch (err) {
       console.error("[devx] UserPromptSubmit hook failed:", err instanceof Error ? err.message : err);
     }

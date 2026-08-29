@@ -5,6 +5,7 @@
 // directly; this module deliberately re-exports neither.
 import { assembleHistory, type ModelMessage, type TurnRow } from "./history.ts";
 import { type ContextConfig, estimateTokens, resolveContextWindow, shouldCompact } from "./budget.ts";
+import { capHookOutput } from "./hook-output.ts";
 import { SUMMARIZATION_PROMPT } from "./prompts.ts";
 import { TRUNCATION_HEADER_OVERHEAD, truncateMiddle } from "./truncate.ts";
 import type { AgentEvent } from "../events.ts";
@@ -175,6 +176,18 @@ export async function maybeCompact(opts: {
   // drop-fallback branches below are "before" it in that sense) — its return
   // value, if any, is spliced into that input verbatim, below.
   const preserved = await runOnCompact(onCompact, hookCtx, "pre", hookInfo);
+  // Cap what the pre hook preserved before it enters the summarizer's own
+  // input — an unbounded onCompact hook would blow the very budget this
+  // compaction is running to relieve. capHookOutput never throws; the outer
+  // catch is defense-in-depth matching this function's fail-open posture.
+  let cappedPreserved: string | undefined;
+  if (preserved !== undefined) {
+    try {
+      cappedPreserved = (await capHookOutput(preserved)).text;
+    } catch (err) {
+      console.error("[agents] failed to cap preserved compaction context:", err);
+    }
+  }
   try {
     // Summarize ONLY the turns being compacted away. Passing the whole
     // history also summarized the `keep` most recent turns, which survive
@@ -193,7 +206,7 @@ export async function maybeCompact(opts: {
     // The pre hook's whole point: keep something the summarizer would
     // otherwise drop. Appended, not prepended — the transcript's own chronology
     // stays intact for the summarizer to read top to bottom.
-    const summaryInput = preserved !== undefined ? `${transcript}\n${preserved}` : transcript;
+    const summaryInput = cappedPreserved !== undefined ? `${transcript}\n${cappedPreserved}` : transcript;
     const raw = await summarize(summaryInput, config, callModel);
     // A summary that itself exceeds the window defeats the purpose. Allow it
     // a quarter of the window and truncate the rest away. truncateMiddle's
