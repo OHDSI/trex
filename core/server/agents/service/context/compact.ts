@@ -180,6 +180,8 @@ export async function maybeCompact(opts: {
   // input — an unbounded onCompact hook would blow the very budget this
   // compaction is running to relieve. capHookOutput never throws; the outer
   // catch is defense-in-depth matching this function's fail-open posture.
+  // No spillPath: the summarizer has no file access, so a pointer here would
+  // be inert — truncation is the only honest degradation.
   let cappedPreserved: string | undefined;
   if (preserved !== undefined) {
     try {

@@ -516,14 +516,16 @@ export async function onTurnEnd(turn: { text: string; finishReason: string }, ct
 // onToolCall's fail-closed contract: a disallowed/failing/timed-out hook
 // just contributes no text, it never fails the turn (runContextHook itself
 // never throws, the try/catch here is defense-in-depth).
-async function runUserPromptSubmitHooks(hooks: Hook[], prompt: string): Promise<string[]> {
+async function runUserPromptSubmitHooks(hooks: Hook[], prompt: string, spillPath?: string): Promise<string[]> {
   const outputs: string[] = [];
   for (const hook of hooks) {
     try {
       const text = await runContextHook(hook, { event: "UserPromptSubmit", prompt });
       // Cap and spill BEFORE this hook's output reaches the prompt — an
       // unbounded hook can undo the compaction that just ran to make room.
-      if (text) outputs.push((await capHookOutput(text)).text);
+      // spillPath (when given) is workspace-scoped, so the pointer this
+      // produces is one the coding model's Read tool can actually open.
+      if (text) outputs.push((await capHookOutput(text, { spillPath })).text);
     } catch (err) {
       console.error("[devx] UserPromptSubmit hook failed:", err instanceof Error ? err.message : err);
     }
@@ -557,7 +559,11 @@ export async function buildUserMessage(base: string, ctx: HookCtx): Promise<stri
   // header comment for why that ordering is load-bearing.
   const hooks = await turnHooks(ctx, "UserPromptSubmit");
   if (hooks.length > 0) {
-    const injected = await runUserPromptSubmitHooks(hooks, base);
+    // Dot-prefixed so an over-cap spill doesn't litter the project root the
+    // model browses. No appId (no workspace) means no reachable place to
+    // point to -- capHookOutput truncates instead in that case.
+    const spillPath = ctx.userId && appId ? `${await ensureAppWorkspace(ctx.userId, appId)}/.devx/hook-spill` : undefined;
+    const injected = await runUserPromptSubmitHooks(hooks, base, spillPath);
     for (const text of injected) message += `\n${text}`;
   }
   return message;

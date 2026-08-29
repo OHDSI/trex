@@ -8,7 +8,27 @@ Deno.test("output under the cap is returned unchanged", async () => {
   assertEquals(spilled, undefined);
 });
 
-Deno.test("output over the cap is replaced by a one-line pointer", async () => {
+// A pointer that names a file its reader cannot open is worse than plain
+// truncation, so spilling only ever happens when a caller names a reachable
+// path. No spillPath must degrade to inline truncation, not a temp file.
+Deno.test("over the cap with no spillPath truncates inline and creates no temp dir", async () => {
+  const tmpRoot = Deno.env.get("TMPDIR") ?? "/tmp";
+  const before = new Set<string>();
+  for await (const entry of Deno.readDir(tmpRoot)) before.add(entry.name);
+
+  const big = "x ".repeat(20_000);
+  const { text, spilled } = await capHookOutput(big, { maxTokens: 2500 });
+  assertEquals(spilled, undefined);
+  assert(text.length < big.length, "the injected text must shrink, not carry the full payload");
+  assert(text.includes("truncated"), "the truncation must be noted, not silent");
+
+  const after: string[] = [];
+  for await (const entry of Deno.readDir(tmpRoot)) after.push(entry.name);
+  const newEntries = after.filter((name) => !before.has(name));
+  assertEquals(newEntries, [], "no temp directory or file should be created without an explicit spillPath");
+});
+
+Deno.test("output over the cap with an explicit spillPath is replaced by a one-line pointer", async () => {
   const tmpDir = await Deno.makeTempDir();
   try {
     const big = "x ".repeat(20_000);
@@ -28,20 +48,15 @@ Deno.test("output over the cap is replaced by a one-line pointer", async () => {
 // budget.ts uses everywhere else — that would over-spill on any text longer
 // than maxTokens characters, CJK or not.
 Deno.test("the cap is measured in tokens, not raw character count", async () => {
-  const tmpDir = await Deno.makeTempDir();
-  try {
-    const wide = "中".repeat(8_000); // 8,000 chars > maxTokens, but ~2,000 estimated tokens < maxTokens
-    assert(wide.length > 2500, "test setup: char count must exceed maxTokens to exercise the distinction");
-    assert(estimateTokens(wide) < 2500, "test setup: real token estimate must stay under maxTokens");
-    const { text, spilled } = await capHookOutput(wide, { maxTokens: 2500, spillPath: tmpDir });
-    assertEquals(text, wide);
-    assertEquals(spilled, undefined);
-  } finally {
-    await Deno.remove(tmpDir, { recursive: true });
-  }
+  const wide = "中".repeat(8_000); // 8,000 chars > maxTokens, but ~2,000 estimated tokens < maxTokens
+  assert(wide.length > 2500, "test setup: char count must exceed maxTokens to exercise the distinction");
+  assert(estimateTokens(wide) < 2500, "test setup: real token estimate must stay under maxTokens");
+  const { text, spilled } = await capHookOutput(wide, { maxTokens: 2500 });
+  assertEquals(text, wide);
+  assertEquals(spilled, undefined);
 });
 
-Deno.test("a wide-character run that genuinely exceeds the token cap still spills", async () => {
+Deno.test("a wide-character run that genuinely exceeds the token cap still spills when given a spillPath", async () => {
   const tmpDir = await Deno.makeTempDir();
   try {
     const wide = "中".repeat(11_000); // ~2,750 estimated tokens > 2500 cap
@@ -54,7 +69,7 @@ Deno.test("a wide-character run that genuinely exceeds the token cap still spill
   }
 });
 
-Deno.test("a spill failure falls back to inline truncation instead of throwing", async () => {
+Deno.test("a spill write failure falls back to inline truncation instead of throwing", async () => {
   const tmpDir = await Deno.makeTempDir();
   try {
     // A regular file, not a directory: writing "<spillPath>/<name>" under it fails.
@@ -70,16 +85,12 @@ Deno.test("a spill failure falls back to inline truncation instead of throwing",
 });
 
 Deno.test("default cap is 2500 tokens when maxTokens is omitted", async () => {
-  const tmpDir = await Deno.makeTempDir();
-  try {
-    const justUnder = "a".repeat(2500 * 4 - 4); // stays at or below the ceil(chars/4) cap
-    const { spilled: notSpilled } = await capHookOutput(justUnder, { spillPath: tmpDir });
-    assertEquals(notSpilled, undefined);
+  const justUnder = "a".repeat(2500 * 4 - 4); // stays at or below the ceil(chars/4) cap
+  const { spilled: notSpilled } = await capHookOutput(justUnder);
+  assertEquals(notSpilled, undefined);
 
-    const over = "a".repeat(2500 * 4 + 40);
-    const { spilled } = await capHookOutput(over, { spillPath: tmpDir });
-    assert(spilled !== undefined);
-  } finally {
-    await Deno.remove(tmpDir, { recursive: true });
-  }
+  const over = "a".repeat(2500 * 4 + 40);
+  const { text, spilled } = await capHookOutput(over);
+  assertEquals(spilled, undefined); // no spillPath given -> truncates, doesn't spill
+  assert(text.length < over.length);
 });
