@@ -63,15 +63,30 @@ export function resolveIdpConfig(
     // Includes the `/oidc` mount, matching what registerOidcRoutes advertises
     // and where the discovery document actually lives.
     const issuer = issuerUrl(env.TREX_OIDC_ISSUER, `${basePath}/oidc`);
+    // Where THIS process fetches the provider's own endpoints. Normally the
+    // issuer itself, but a deployment can point it at an address that resolves
+    // from inside the container.
+    //
+    // The two differ only where the public FQDN is not a route back to the
+    // gateway from within the network — a local stack or CI, where it is
+    // `localhost` and therefore resolves to this container. Real deployments
+    // leave it unset and both are the public issuer.
+    //
+    // Only server-to-server calls use it. `iss` stays the public issuer, so
+    // tokens still verify for anyone outside; a spec-compliant third-party
+    // client that fetches the issuer directly is unaffected.
+    const internalBase = env.TREX_OIDC_INTERNAL_BASE
+      ? issuerUrl(env.TREX_OIDC_INTERNAL_BASE, `${basePath}/oidc`)
+      : issuer;
     return {
       idp,
       issuer,
-      jwksUri: `${issuer}/.well-known/jwks.json`,
+      jwksUri: `${internalBase}/.well-known/jwks.json`,
       audiences: splitList(env.D2E_IDP_AUDIENCES ?? env.TREX_OIDC_CLIENT_ID),
       clientId: env.TREX_OIDC_CLIENT_ID ?? "",
       clientSecret: env.TREX_OIDC_CLIENT_SECRET ?? "",
       scope: env.D2E_IDP_SCOPE ?? "openid profile email",
-      tokenUrl: `${issuer}/token`,
+      tokenUrl: `${internalBase}/token`,
       resource: env.D2E_IDP_RESOURCE ?? "",
       // Browser-visible paths, relative to the public gateway origin. They carry
       // the mount's base path because the d2e front door does NOT strip it: it
