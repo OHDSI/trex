@@ -484,12 +484,20 @@ async function _callInit(
     },
   };
 
+  let bundled = false;
   if (eszip) {
     // Prebuilt eszip; fall back to source if absent.
     try {
       options.maybeEszip = await readEszipCached(`${dir}${eszip}`);
+      bundled = true;
     } catch {
-      /* no bundle on disk — use servicePath source */
+      // Said out loud, because the fallback is invisible otherwise: a function
+      // configured to run from a bundle that quietly runs from source instead
+      // behaves differently, and if the source then fails to boot the bundle is
+      // the first thing worth knowing about.
+      console.warn(
+        `init fn ${servicePath}: no eszip at ${dir}${eszip}; falling back to source`,
+      );
     }
   }
 
@@ -497,7 +505,22 @@ async function _callInit(
     // deno-lint-ignore no-explicit-any
     await (globalThis as any).EdgeRuntime.userWorkers.create(options);
   } catch (e) {
-    console.error("Init worker error:", e);
+    // The runtime reports a failed bootstrap as a bare errno with no path, which
+    // says nothing about which function failed or why. What it almost always
+    // means is that the function's dependencies are not in the runtime's module
+    // cache: a bundled function carries its own, a source one does not.
+    const detail = e instanceof Error ? e.message : String(e);
+    console.error(
+      `Init worker error for ${servicePath} (${bundled ? "eszip" : "source"}` +
+        `${imports ? `, import map ${imports}` : ""}): ${detail}`,
+    );
+    if (!bundled && /bootstrap|No such file or directory/i.test(detail)) {
+      console.error(
+        `  ${servicePath} runs from source, so its dependencies must already be in the ` +
+          `runtime's module cache. Cache them at build time, or ship the function ` +
+          `as an eszip bundle.`,
+      );
+    }
   }
 }
 
