@@ -7,12 +7,16 @@ import rateLimit from "express-rate-limit";
  * one NAT gateway or one CI runner shares a bucket, so a limit sized for a
  * single attacker locks out an entire site once the password grant is the
  * deployment's ordinary sign-in path rather than something only a script uses.
- * The ceiling still bounds brute force at a few hundred attempts an hour, and a
- * deployment that fronts trex with its own protection can set its own number.
+ *
+ * One sign-in spends more than one request - the password grant, then the
+ * authorization code exchange - so the ceiling has to cover a site's combined
+ * traffic rather than its headcount. It still bounds brute force well below
+ * what an offline attack achieves, and a deployment that fronts trex with its
+ * own protection can set its own number.
  */
 const authRateLimitMax = (raw: string | undefined = Deno.env.get("TREX_AUTH_RATE_LIMIT_MAX")): number => {
   const n = Number(raw);
-  return Number.isInteger(n) && n > 0 ? n : 100;
+  return Number.isInteger(n) && n > 0 ? n : 600;
 };
 
 export const authLimiter = rateLimit({
