@@ -115,6 +115,36 @@ function headers(userId?: string): Record<string, string> {
   return h;
 }
 
+// Ask directly whether a gate is pending (handler.ts's additive, read-only
+// GET /pending-approval) instead of relying on `input.requested` arriving on
+// a live stream — that event has no stepToEvent mapping (never persisted or
+// replayed), so a stream that attaches after it was published sees nothing
+// and would otherwise block until the turn's timeout. A plain DB read, so it
+// is exact regardless of subscribe timing. Best-effort: a failed query must
+// not fail the turn — it just means we fall back to reading the stream.
+async function getPendingApproval(
+  client: TokioClient,
+  args: { codeSessionId: string; userId?: string },
+): Promise<PendingApproval | null> {
+  try {
+    const res = await client.req(
+      `${CODE_BASE}/eve/v1/session/${args.codeSessionId}/pending-approval`,
+      { method: "GET", headers: headers(args.userId) },
+    );
+    if (!res.ok) return null;
+    const body = (await res.json().catch(() => null)) as { pending?: { requestId: string; tool: string } | null } | null;
+    const p = body?.pending;
+    // The route mirrors getSinglePendingApproval's shape (requestId/tool), not
+    // toolset.ts's input.requested wire shape — no raw tool-call `input` to
+    // preview here; coder-approval.ts's renderer already handles that (falls
+    // back to "No arguments.").
+    return p ? { requestId: p.requestId, toolName: p.tool, input: undefined } : null;
+  } catch (e) {
+    console.error(`claw: pending-approval query failed for session ${args.codeSessionId} (falling back to the stream):`, e);
+    return null;
+  }
+}
+
 export async function runCodeTurn(
   client: TokioClient,
   args: RunArgs,
@@ -216,7 +246,7 @@ export async function attachCodeStream(client: TokioClient, args: StreamArgs): P
   if (!res.ok || !res.body) throw new Error(`code stream failed: ${res.status}`);
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   return {
-    collect: () => consumeStream(reader, args),
+    collect: () => consumeStream(client, reader, args),
     cancel: async () => {
       try { await reader.cancel(); } catch { /* already closed */ }
     },
@@ -228,11 +258,43 @@ async function streamTurn(client: TokioClient, args: StreamArgs): Promise<TurnRe
   return await attached.collect();
 }
 
+// Wraps a would-be terminal return in a pending-approval query first: if a
+// gate is pending, that's the real outcome regardless of what the stream did
+// or didn't show (a query is exact; the stream is not, for a live-only event
+// — see getPendingApproval). Used both before this attach's first read (a gate
+// published before we subscribed is otherwise invisible and would block until
+// timeoutMs) and at the stream-ended fallback (a connection that closed with
+// no terminal event is ambiguous the same way).
+async function resultOrPendingGate(
+  client: TokioClient,
+  args: StreamArgs,
+  cursor: number,
+  replyText: string,
+  fallback: TurnResult,
+): Promise<TurnResult> {
+  const pending = await getPendingApproval(client, { codeSessionId: args.codeSessionId, userId: args.userId });
+  return pending
+    ? { codeSessionId: args.codeSessionId, replyText, nextCursor: cursor, reason: "input-requested", pending: [pending] }
+    : fallback;
+}
+
 async function consumeStream(
+  client: TokioClient,
   reader: ReadableStreamDefaultReader<string>,
   args: StreamArgs,
 ): Promise<TurnResult> {
   const codeSessionId = args.codeSessionId;
+  // A gate published before this attach subscribed is live-only (no
+  // stepToEvent mapping) and so is invisible to both replay and the live tail
+  // — ask the approvals table directly before ever blocking on a read that
+  // may never come (see getPendingApproval).
+  const early = await resultOrPendingGate(client, args, args.startCursor, "", {
+    codeSessionId, replyText: "", nextCursor: args.startCursor, reason: "stream-ended", pending: [],
+  });
+  if (early.reason === "input-requested") {
+    try { await reader.cancel(); } catch { /* already closed */ }
+    return early;
+  }
   let buf = "";
   let read = 0;
   let replyText = "";
@@ -306,5 +368,10 @@ async function consumeStream(
     clearTimeout(timeout);
     try { await reader.cancel(); } catch { /* already closed */ }
   }
-  return { codeSessionId, replyText, nextCursor: args.startCursor + read, reason: "stream-ended", pending: [] };
+  // The connection closed with no terminal event ever seen — ambiguous
+  // whether the turn is genuinely over or a gate published right as it
+  // dropped was missed. One more direct check before calling it "ended".
+  return await resultOrPendingGate(client, args, args.startCursor + read, replyText, {
+    codeSessionId, replyText, nextCursor: args.startCursor + read, reason: "stream-ended", pending: [],
+  });
 }

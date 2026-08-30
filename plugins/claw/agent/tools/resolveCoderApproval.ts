@@ -108,7 +108,10 @@ export async function resolveCore(
   if (turn.reason === "input-requested") {
     // A pending set that still names the request just resolved means the
     // decision did not take effect — report it rather than re-posting the same
-    // gate and looping on it.
+    // gate and looping on it. This is origin-agnostic by construction: `turn.pending`
+    // reads the same whether code-session.ts found it on the live stream or via
+    // its pending-approval query (resultOrPendingGate), so one filter covers both
+    // without a second, parallel dedup for the query path.
     const fresh = turn.pending.filter((p) => p.requestId !== input.requestId);
     const posted = await postGates(fetch, {
       botToken: deps.botToken ?? Deno.env.get("DISCORD_BOT_TOKEN"),

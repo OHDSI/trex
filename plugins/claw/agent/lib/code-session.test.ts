@@ -43,12 +43,24 @@ function openStream() {
   return { response, get controller() { return controller; }, state };
 }
 
-// Records requests; returns queued responses in order.
-function fakeClient(responses: Response[]) {
+// Records requests; returns queued responses in order. GET .../pending-approval
+// is intercepted separately (and does NOT consume `responses`) since every
+// consumeStream() call now issues one — see resultOrPendingGate in
+// code-session.ts — and the vast majority of existing tests here have nothing
+// to do with that query. Defaults to "nothing pending"; pass `pendingApproval`
+// to simulate a gate the query itself discovers.
+function fakeClient(responses: Response[], opts: { pendingApproval?: { requestId: string; tool: string } } = {}) {
   const reqs: { url: string; init: any }[] = [];
   const client: TokioClient = {
     req(url, init) {
       reqs.push({ url, init });
+      if (url.includes("/pending-approval")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ pending: opts.pendingApproval ?? null }), {
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
       return Promise.resolve(responses.shift()!);
     },
   };
@@ -418,8 +430,11 @@ Deno.test("a parked turn's cursor carries into the re-attach: monotonic, and onl
 
   assertEquals(reqs2[0].url, `${CODE_BASE}/eve/v1/session/code-10/stream?startIndex=1`);
   assertEquals(reqs2[0].init.method, "GET");
-  // No fresh message: a re-attach must never start a second turn.
-  assertEquals(reqs2.length, 1);
+  // No fresh message: a re-attach must never start a second turn. The second
+  // request is consumeStream's own pending-approval query (resultOrPendingGate),
+  // issued before the first read — not a message, and not counted by REPLAYABLE.
+  assertEquals(reqs2.length, 2);
+  assertEquals(reqs2[1].url, `${CODE_BASE}/eve/v1/session/code-10/pending-approval`);
   assertEquals(rest.reason, "completed");
   assertEquals(rest.replyText, "done");
   // Monotonic, and counting ONLY the three replayable events not already seen.
@@ -440,6 +455,47 @@ Deno.test("a re-attach that finds the turn still parked returns rather than spin
   assertEquals(res.reason, "input-requested");
   assertEquals(res.pending.map((p) => p.requestId), ["req-2"]);
   assertEquals(res.nextCursor, 4); // input.requested is live-only: the cursor stands still
+});
+
+// The bug this pins: input.requested is live-only, so a re-attach that opens
+// AFTER a gate was published sees nothing on the stream and used to block
+// until timeoutMs (90 minutes — see DEFAULT_TIMEOUT_MS). openStream() never
+// enqueues or closes, so if resultOrPendingGate's check did not run before the
+// first read, this test would hang rather than resolve.
+Deno.test("a re-attach to a turn parked on a gate it never saw live renders that gate instead of blocking on the stream", async () => {
+  const { response: stream, state } = openStream();
+  const gate = { requestId: "req-9", tool: "runCommand" };
+  const { client, reqs } = fakeClient([stream], { pendingApproval: gate });
+
+  const res = await reattachCodeTurn(client, { codeSessionId: "code-20", startCursor: 3 });
+
+  assertEquals(res.reason, "input-requested");
+  assertEquals(res.pending, [{ requestId: "req-9", toolName: "runCommand", input: undefined }]);
+  // Nothing was ever read from the stream — the cursor stands still, and the
+  // never-used reader is released rather than left open.
+  assertEquals(res.nextCursor, 3);
+  assertEquals(state.cancelled, true);
+  assertEquals(reqs[1].url, `${CODE_BASE}/eve/v1/session/code-20/pending-approval`);
+});
+
+// The dedup guarantee: a gate that is BOTH sitting live on the stream AND
+// visible to the pending-approval query must still surface exactly once.
+// resultOrPendingGate runs before the first read, so when it finds something
+// it returns immediately — the live event for that same requestId is never
+// even reached, by construction, not by filtering it out after the fact.
+Deno.test("a gate visible on the stream AND via the pending-approval query still surfaces exactly once", async () => {
+  const stream = ndjson({
+    type: "input.requested",
+    data: { turnId: "t1", requests: [{ requestId: "req-9", action: { toolName: "runCommand", input: {} } }] },
+  });
+  const gate = { requestId: "req-9", tool: "runCommand" };
+  const { client } = fakeClient([stream], { pendingApproval: gate });
+
+  const res = await reattachCodeTurn(client, { codeSessionId: "code-21", startCursor: 0 });
+
+  assertEquals(res.reason, "input-requested");
+  assertEquals(res.pending.length, 1);
+  assertEquals(res.pending[0].requestId, "req-9");
 });
 
 Deno.test("resolveCodeApproval posts the decision to the approval route and reports success", async () => {
