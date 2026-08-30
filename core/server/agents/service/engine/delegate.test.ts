@@ -46,6 +46,10 @@ function sequencedModel(...responses: any[][]) {
 }
 
 interface RecordedStep {
+  // addStep's FIRST argument. Part of what equivalence means: a step row that
+  // lands on the wrong turn id replays as an empty turn, and every other
+  // assertion in this file passes anyway.
+  turnId: string;
   seq: number;
   kind: string;
   name: string | null;
@@ -57,8 +61,9 @@ function recordingStore() {
   const steps: RecordedStep[] = [];
   const fn = (sql: string, params?: unknown[]): Promise<{ rows: unknown[] }> => {
     if (sql.includes("INSERT INTO agents.steps") && params) {
-      const [, seq, kind, name, payload, usage] = params;
+      const [stepTurnId, seq, kind, name, payload, usage] = params;
       steps.push({
+        turnId: String(stepTurnId),
         seq: Number(seq),
         kind: String(kind),
         name: typeof name === "string" ? name : null,
@@ -179,13 +184,17 @@ Deno.test("a delegated turn emits the same events, in the same order, runner.ts 
 Deno.test("a delegated turn's events carry eve's turn id, not the engine's session id", async () => {
   const agent = await loadAgent(TOY);
   const events: AgentEvent[] = [];
+  const { store, steps } = recordingStore();
   await runDelegatedTurn({
     agent, sessionId: SESSION, turnId: "turn-abc", message: "hi",
-    store: recordingStore().store, emit: (e) => events.push(e),
+    store, emit: (e) => events.push(e),
     engine: scriptedEngine([assistantText("hello"), resultOk(1, 1)]),
   });
   const ids = events.map((e) => ("turnId" in e.data ? e.data.turnId : "turn-abc"));
   assertEquals(ids, ["turn-abc", "turn-abc", "turn-abc"]);
+  // The rows must land on the same turn: SESSION is the engine's own id and
+  // matches no row in agents.turns.
+  assertEquals(steps.map((s) => s.turnId), ["turn-abc", "turn-abc"]);
 });
 
 Deno.test("a delegated turn's events reach a live subscriber in order", async () => {

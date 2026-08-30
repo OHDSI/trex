@@ -130,9 +130,11 @@ export async function runDelegatedTurn(opts: DelegatedTurnOpts): Promise<{ text:
             await persist("tool-result", result.toolName, { toolCallId: result.callId, output: result.output });
             break;
           }
+          // `return` rather than a break after it: failTurn's Promise<never>
+          // makes a break unreachable, but without a terminator the case falls
+          // through and TS widens the next case's narrowing.
           case "turn.failed":
-            await failTurn(event.data.message);
-            break;
+            return await failTurn(event.data.message);
           case "turn.completed": {
             closed = true;
             finishReason = event.data.finishReason ?? "stop";
@@ -159,10 +161,17 @@ export async function runDelegatedTurn(opts: DelegatedTurnOpts): Promise<{ text:
             await persist("finish", null, { finishReason }, usage);
             break;
           }
-          default:
-            // context.compacted and anything else turn-agnostic: live-only,
-            // never persisted by runner.ts either.
+          case "context.compacted":
+            // Turn-agnostic and live-only: runner.ts never persists one either.
             emit(event);
+            break;
+          default: {
+            // Every kind the translator can produce is handled above. A new one
+            // must be re-pointed at eve's turnId like the rest, so it fails to
+            // compile HERE rather than leaking the sidecar's session id.
+            const _exhaustive: never = event;
+            return _exhaustive;
+          }
         }
         // The terminal event ends the turn exactly once; breaking also closes
         // the engine's stream (for-await calls its return()), so a talkative

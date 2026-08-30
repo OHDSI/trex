@@ -25,6 +25,22 @@
 // exact types read.
 import type { AgentEvent } from "../events.ts";
 
+// Exactly the AgentEvent kinds this file can produce. Declared so a consumer
+// can exhaustiveness-check against it (engine/delegate.ts does): adding a kind
+// here becomes a compile error there instead of a silent passthrough.
+export type TranslatedEvent = Extract<
+  AgentEvent,
+  {
+    type:
+      | "message.appended"
+      | "actions.requested"
+      | "action.result"
+      | "turn.completed"
+      | "turn.failed"
+      | "context.compacted";
+  }
+>;
+
 // Anthropic's wire content blocks. `message` is typed loosely (object OR a
 // plain string) because the SDK's own MessageParam/BetaMessage.content field
 // is `string | Array<ContentBlock>` — a plain-text message has no blocks at
@@ -77,7 +93,7 @@ function contentBlocks(m: SdkMessageLike): SdkContentBlock[] {
   return msg.content;
 }
 
-function translateResult(m: SdkMessageLike): AgentEvent | null {
+function translateResult(m: SdkMessageLike): TranslatedEvent | null {
   const turnId = m.session_id;
   if (typeof turnId !== "string" || typeof m.is_error !== "boolean") return null;
   if (m.is_error) {
@@ -102,13 +118,13 @@ function translateResult(m: SdkMessageLike): AgentEvent | null {
 // of silently misattributing the compaction to turn 1. `via` is always
 // "summary": the SDK only emits this event after an actual compaction ran
 // (unlike eve's own compactor, it has no "gave up and dropped" case here).
-function translateCompactBoundary(): AgentEvent {
+function translateCompactBoundary(): TranslatedEvent {
   return { type: "context.compacted", data: { via: "summary", replacedTurnSeqTo: -1 } };
 }
 
 // Unlike a tool_result block, permission_denied carries the tool's name
 // directly, so this action.result is more complete than a real tool result's.
-function translatePermissionDenied(m: SdkMessageLike): AgentEvent | null {
+function translatePermissionDenied(m: SdkMessageLike): TranslatedEvent | null {
   const turnId = m.session_id;
   if (typeof turnId !== "string" || typeof m.tool_use_id !== "string") return null;
   const reason = typeof m.message === "string" ? m.message : "denied";
@@ -127,12 +143,12 @@ function translatePermissionDenied(m: SdkMessageLike): AgentEvent | null {
 // tool_use block in the same turn's stream. This factory holds exactly that
 // one piece of per-turn state (no I/O; still fully testable via its
 // returned closure) and nothing else is stateful here.
-export function createSdkTranslator(): (m: SdkMessageLike) => AgentEvent | null {
+export function createSdkTranslator(): (m: SdkMessageLike) => TranslatedEvent | null {
   // tool_use_id -> toolName. Deleted on read so a long turn with many tool
   // calls doesn't grow this unboundedly.
   const toolNames = new Map<string, string>();
 
-  function translateAssistant(m: SdkMessageLike): AgentEvent | null {
+  function translateAssistant(m: SdkMessageLike): TranslatedEvent | null {
     const turnId = m.session_id;
     if (typeof turnId !== "string") return null;
     const blocks = contentBlocks(m);
@@ -164,7 +180,7 @@ export function createSdkTranslator(): (m: SdkMessageLike) => AgentEvent | null 
     return { type: "message.appended", data: { turnId, messageDelta: text, messageSoFar: text } };
   }
 
-  function translateToolResult(m: SdkMessageLike): AgentEvent | null {
+  function translateToolResult(m: SdkMessageLike): TranslatedEvent | null {
     const turnId = m.session_id;
     if (typeof turnId !== "string") return null;
     const block = contentBlocks(m).find((b) => b.type === "tool_result" && typeof b.tool_use_id === "string");
@@ -185,7 +201,7 @@ export function createSdkTranslator(): (m: SdkMessageLike) => AgentEvent | null 
     };
   }
 
-  return (m: SdkMessageLike): AgentEvent | null => {
+  return (m: SdkMessageLike): TranslatedEvent | null => {
     if (!m || typeof m.type !== "string") return null;
     switch (m.type) {
       case "assistant":
