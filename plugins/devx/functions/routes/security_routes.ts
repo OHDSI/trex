@@ -310,25 +310,28 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
           });
 
           const findings = opts.parseFindings(result.content || "");
-
-          // A review that found nothing because its tools were refused is not a
-          // review that found nothing — say so on the wire, both ways.
+          // Deliberately NOT a _progress frame: onDone clears the progress line
+          // the moment it arrives, so a denial sent that way is never displayed.
+          // It rides the review object instead, which is also what reloads.
           const denialNotice = denialSummary(result.denials);
-          if (denialNotice) {
-            send({ type: `${opts.eventPrefix}_progress`, message: denialNotice });
-          }
+          if (denialNotice) console.warn(`[devx] ${opts.table} review: ${denialNotice}`);
 
-          // Store in DB
+          // Stored WITH the denials (V21): on the live wire alone, a reload
+          // shows a clean-looking review that never had the tools it needed.
           const insertResult = await sql(
-            `INSERT INTO devx.agent_results (app_id, user_id, result_type, findings)
-             VALUES ($1, $2, $3, $4) RETURNING id, created_at`,
-            [opts.appId, userId, opts.table, JSON.stringify(findings)],
+            `INSERT INTO devx.agent_results (app_id, user_id, result_type, findings, denials)
+             VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at`,
+            [opts.appId, userId, opts.table, JSON.stringify(findings), JSON.stringify(result.denials)],
           );
 
           send({
             type: `${opts.eventPrefix}_done`,
-            review: { id: insertResult.rows[0].id, findings, created_at: insertResult.rows[0].created_at },
-            denials: result.denials,
+            review: {
+              id: insertResult.rows[0].id,
+              findings,
+              created_at: insertResult.rows[0].created_at,
+              denials: result.denials,
+            },
           });
         } catch (err) {
           send({ type: `${opts.eventPrefix}_error`, error: err.message });
@@ -352,7 +355,7 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
   // Helper: get latest review by result type
   async function getLatestReview(appId: string, resultType: string) {
     const result = await sql(
-      `SELECT id, findings, created_at FROM devx.agent_results WHERE app_id = $1 AND user_id = $2 AND result_type = $3 ORDER BY created_at DESC LIMIT 1`,
+      `SELECT id, findings, denials, created_at FROM devx.agent_results WHERE app_id = $1 AND user_id = $2 AND result_type = $3 ORDER BY created_at DESC LIMIT 1`,
       [appId, userId, resultType],
     );
     return result.rows.length === 0 ? null : result.rows[0];

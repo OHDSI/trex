@@ -104,7 +104,8 @@ const server = http.createServer(async (req, res) => {
     let body = "";
     for await (const chunk of req) body += chunk;
 
-    const { prompt, systemPrompt, model, maxTurns, oauthToken, cwd, chatId, figmaToken } = JSON.parse(body);
+    const { prompt, systemPrompt, model, maxTurns, oauthToken, cwd, chatId, figmaToken, allowedTools } =
+      JSON.parse(body);
     const sessionKey = chatId || "__default__";
 
     if (oauthToken) process.env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
@@ -193,6 +194,16 @@ const server = http.createServer(async (req, res) => {
         settingSources: ["user"],
         // Forward subagent (Task) text so consumers can render nested transcripts.
         forwardSubagentText: true,
+        // The eve session's declared allowlist becomes the BASE built-in tool
+        // set. `tools`, not `allowedTools`: per the SDK's own types (0.3.214
+        // sdk.d.ts:1341-1348) `allowedTools` is the AUTO-APPROVE list — "To
+        // restrict which tools are available, use the `tools` option instead" —
+        // so setting it here would waive canUseTool for exactly the tools we
+        // want gated. `[]` means literally no built-ins (sdk.d.ts:1398-1404);
+        // an undeclared allowlist leaves the default preset alone.
+        // Governs BUILT-INS only: the kb/ask MCP tools are unaffected, which is
+        // why sidecar_engine.ts re-checks the allowlist in canUseTool.
+        ...(Array.isArray(allowedTools) ? { tools: allowedTools } : {}),
       });
 
       const resumeId = chatSessions.get(sessionKey);

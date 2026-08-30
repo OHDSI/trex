@@ -257,34 +257,17 @@ Deno.test("refuses to start a turn whose declared scope it cannot write", async 
   assertEquals(calls.length, 1);
 });
 
-// acceptDeclaredWorkspace validates the declared path against the TURN's
-// appId, so a workspace declared for a session whose turn carries none never
-// takes effect. runOnEve posts exactly one turn per session, so the appId that
-// validates the declaration is the one on these opts — assert both halves.
-Deno.test("refuses to declare a workspace the turn's appId could never validate", async () => {
-  const { fetchImpl, calls } = scripted(completedRun);
-  const err = await assertRejects(() =>
-    runOnEve({
-      ...baseOpts(fetchImpl, () => {}),
-      appId: null,
-      workspacePathOverride: "/w/u-1/app-1/.worktrees/run-1",
-      sql: () => Promise.resolve({ rows: [] }),
-    })
-  );
-  assertStringIncludes(String(err), "appId");
-  assertEquals(calls.length, 1);
-});
+// session_scope.ts's acceptDeclaredWorkspace round-trips the declared path
+// through devx's own run-worktree generator for this user — an equality test on
+// the exact string. So the declaration must reach the row VERBATIM: any
+// normalising here (a trimmed slash, a resolved segment) would make a
+// legitimate worktree fail that equality and silently fall back.
+Deno.test("writes the declared workspace verbatim — the validator compares the exact string", async () => {
+  const { fetchImpl, sql, updates } = scriptedWithDb(completedRun);
+  const declared = "/w/u-1/app-1/.worktrees/run-1";
+  await runOnEve({ ...baseOpts(fetchImpl, () => {}), workspacePathOverride: declared, sql });
 
-Deno.test("the turn carries the same appId the declared workspace is validated against", async () => {
-  const { fetchImpl, calls, sql, updates } = scriptedWithDb(completedRun);
-  await runOnEve({
-    ...baseOpts(fetchImpl, () => {}),
-    workspacePathOverride: "/w/u-1/app-1/.worktrees/run-1",
-    sql,
-  });
-
-  assertEquals(updates[0].params[2], "/w/u-1/app-1/.worktrees/run-1");
-  assertEquals(JSON.parse(calls[2].body).metadata.appId, "app-1");
+  assertEquals(updates[0].params[2], declared);
 });
 
 Deno.test("sends the caller's bearer token on every eve call", async () => {

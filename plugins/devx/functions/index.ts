@@ -9,7 +9,7 @@ import { maskKey, settingsKeyWriteDecision } from "./api_key_mask.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey, writeProviderKeyFields } from "./provider_key.ts";
 import { isNoKeyProvider, removedProviderResponse } from "./provider_support.ts";
 import { streamAgentChat, resolveConsent, clearPendingConsents } from "./agent.ts";
-import { isPlanRun, runAgentRunOnEve } from "./lib/agent_run.ts";
+import { isPlanRun, planStatusAfterRun, runAgentRunOnEve } from "./lib/agent_run.ts";
 import { bearerFromRequest, denialSummary } from "./lib/eve_run.ts";
 import { clearPendingResponses } from "./tools/plan_tools.ts";
 import { ensureAppWorkspace, getAppWorkspacePath, getRunWorktreePath, ensureWorktreeParent, readProjectRules } from "./tools/workspace.ts";
@@ -1240,11 +1240,12 @@ Deno.serve(async (req: Request) => {
               `UPDATE devx.subagent_runs SET status = 'completed', result = $1, completed_at = NOW() WHERE id = $2`,
               [fullContent.slice(0, 50000), runId],
             );
-            // Plan-execution runs mark their plan implemented on success.
+            // Plan-execution runs mark their plan implemented on success — but
+            // NOT when eve refused the tools the plan needed (planStatusAfterRun).
             if (run.plan_id) {
               await sql(
-                `UPDATE devx.plans SET status = 'implemented', updated_at = NOW() WHERE id = $1`,
-                [run.plan_id],
+                `UPDATE devx.plans SET status = $1, updated_at = NOW() WHERE id = $2`,
+                [planStatusAfterRun(result.denials), run.plan_id],
               ).catch(() => {});
             }
             // Save final assistant message

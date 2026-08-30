@@ -42,13 +42,16 @@ async function withWorkspace<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-function makeFakeDb(activeProviderRow: Record<string, unknown> | null) {
+function makeFakeDb(activeProviderRow: Record<string, unknown> | null, order?: string[]) {
   const calls: string[] = [];
   const params: unknown[][] = [];
 
   const sql = async (q: string, p: unknown[] = []) => {
     calls.push(q);
     params.push(p);
+    // Only the queries this file asserts an ORDER on go in the shared log —
+    // the provider-gate reads would bury the four calls that matter.
+    if (order && q.includes("UPDATE agents.sessions")) order.push("sql UPDATE agents.sessions");
 
     if (q.includes("information_schema.columns")) {
       // Simulate the encryption migration applied, so the route exercises its
@@ -207,7 +210,11 @@ interface EveCall {
 }
 
 /** Stand in for the eve loopback for the duration of one review. */
-async function withEve<T>(events: unknown[], fn: (calls: EveCall[]) => Promise<T>): Promise<T> {
+async function withEve<T>(
+  events: unknown[],
+  fn: (calls: EveCall[]) => Promise<T>,
+  order?: string[],
+): Promise<T> {
   const calls: EveCall[] = [];
   const enc = new TextEncoder();
   const realFetch = globalThis.fetch;
@@ -224,6 +231,7 @@ async function withEve<T>(events: unknown[], fn: (calls: EveCall[]) => Promise<T
       body: typeof init?.body === "string" ? init.body : "",
       authorization: new Headers(init?.headers).get("authorization"),
     });
+    order?.push(`${method} ${url.replace(EVE_BASE, "")}`.trim());
     if (method === "POST" && url.endsWith("/session")) {
       return Promise.resolve(new Response(JSON.stringify({ sessionId: "s-rev" }), { status: 200 }));
     }
@@ -287,7 +295,7 @@ Deno.test("security review: runs on eve and returns the findings its reply carri
       assertEquals((done?.review as { findings: unknown[] }).findings, [
         { title: "Hardcoded key", level: "high", description: "main.ts embeds an API key." },
       ]);
-      assertEquals(done?.denials, []);
+      assertEquals((done?.review as { denials: unknown[] }).denials, []);
 
       // The review reached eve, on the caller's own token.
       assertEquals(calls.map((c) => `${c.method} ${c.url}`), [
@@ -306,8 +314,12 @@ Deno.test("security review: runs on eve and returns the findings its reply carri
 
 Deno.test("security review: the read-only allowlist is on the session row before the turn is posted", async () => {
   await withWorkspace(async () => {
-    const db = makeFakeDb(OPENAI_ROW);
-    await withEve(turnEvents("Reviewed."), async (calls) => {
+    // ONE log for the db writes and the eve calls, so this asserts an
+    // interleaving. Two separate arrays cannot: each is in order by
+    // construction whatever the other did.
+    const order: string[] = [];
+    const db = makeFakeDb(OPENAI_ROW, order);
+    await withEve(turnEvents("Reviewed."), async () => {
       const res = await handleSecurityRoutes(
         `/apps/${APP}/security/review`,
         "POST",
@@ -320,17 +332,19 @@ Deno.test("security review: the read-only allowlist is on the session row before
       // waits for the run to finish.
       await res.text();
 
+      assertEquals(order, [
+        "POST",
+        "sql UPDATE agents.sessions",
+        "GET /s-rev/stream?startIndex=0",
+        "POST /s-rev",
+      ]);
       const scopeIdx = db.calls.findIndex((q) => q.includes("UPDATE agents.sessions"));
-      assertEquals(scopeIdx >= 0, true);
       const [tools, declared, workspace, sessionId] = db.params[scopeIdx];
       assertEquals(tools, ["Read", "Glob", "Grep", "CodeSearch", "GitDiff", "GitLog", "GitStatus"]);
       assertEquals(declared, true);
       assertEquals(workspace, "");
       assertEquals(sessionId, "s-rev");
-      // Ordering: the scope write happens between the create and the turn.
-      // Only the create has run by then — the turn post is calls[2].
-      assertEquals(calls.length, 3);
-    });
+    }, order);
   });
 });
 
@@ -362,17 +376,22 @@ Deno.test("security review: a hard-tier denial completes the review and is repor
 
       const frames = await sseFrames(res);
       const done = frames.find((f) => f.type === "review_done");
-      // The review still completed and was stored…
-      assertEquals(typeof (done?.review as { id: unknown }).id, "string");
-      // …but a run whose tools were refused is not a clean run.
-      assertEquals(done?.denials, [{
+      const denials = [{
         toolName: "ExecuteSQL",
         reason: "ExecuteSQL requires approval but this session has no approver",
-      }]);
-      const notice = frames.find((f) =>
-        f.type === "review_progress" && String(f.message).includes("no approver")
-      );
-      assertEquals(typeof notice?.message, "string");
+      }];
+      // The review still completed and was stored…
+      assertEquals(typeof (done?.review as { id: unknown }).id, "string");
+      // …and the denial rides the REVIEW object, not a sibling field: onDone
+      // forwards only `parsed.review`, and the progress line it would otherwise
+      // use is cleared by onDone in the same breath.
+      assertEquals((done?.review as { denials: unknown[] }).denials, denials);
+      // Durable, not just live: a reload of a review whose tools were refused
+      // must not look like a review that cleanly found nothing (V21).
+      const insertIdx = db.calls.findIndex((q) => q.includes("INSERT INTO devx.agent_results"));
+      assertEquals(insertIdx >= 0, true);
+      assertEquals(db.calls[insertIdx].includes("denials"), true);
+      assertEquals(JSON.parse(String(db.params[insertIdx][4])), denials);
     });
   });
 });

@@ -6,7 +6,7 @@
 // imported.
 import { assertEquals, assertStringIncludes } from "jsr:@std/assert";
 import { NO_APPROVER_ERROR } from "./eve_run.ts";
-import { buildRunPrompt, isPlanRun, runAgentRunOnEve } from "./agent_run.ts";
+import { buildRunPrompt, isPlanRun, planStatusAfterRun, runAgentRunOnEve } from "./agent_run.ts";
 
 const BASE = "http://eve.test/plugins/trex/devx-agent/eve/v1/session";
 
@@ -176,4 +176,15 @@ Deno.test("a hard-tier tool denied for want of an approver completes the run and
 
   assertEquals(result.finishReason, "stop");
   assertEquals(result.denials, [{ toolName: "GitPush", reason: NO_APPROVER_ERROR }]);
+});
+
+// MF1: the Plans tab reads devx.plans.status as its only signal, and the
+// denial notice lives in devx.subagent_runs on another screen. A run that
+// could not push and could not run SQL must not report "implemented".
+Deno.test("planStatusAfterRun: a denied run leaves the plan accepted, a clean one implements it", () => {
+  assertEquals(planStatusAfterRun([]), "implemented");
+  assertEquals(
+    planStatusAfterRun([{ toolName: "GitPush", reason: NO_APPROVER_ERROR }]),
+    "accepted",
+  );
 });

@@ -351,15 +351,17 @@ async function runScoped(
 ) {
   const decisions: PermissionDecision[] = [];
   let workspacePathOverride: string | undefined;
+  let allowedTools: readonly string[] | undefined;
   const stream: SidecarStream = async (args) => {
     workspacePathOverride = args.workspacePathOverride;
+    allowedTools = args.allowedTools;
     if (opts.permission && args.resolvePermission) decisions.push(await args.resolvePermission(opts.permission));
     return { content: "", toolCalls: [] };
   };
   const ctx: HookCtx = { ...hookCtx(sql), sessionId: session, metadata: opts.metadata ?? {} };
   const engine = createSidecarEngine(ctx, { stream, approvalPollMs: 1, approvalTimeoutMs: 150 });
   for await (const _ of engine.run({ sessionId: session, turnId: TURN, prompt: "do it" })) { /* drains */ }
-  return { decisions, workspacePathOverride };
+  return { decisions, workspacePathOverride, allowedTools };
 }
 
 Deno.test("sidecar engine: a delegated turn enforces the session's declared tool allowlist", async () => {
@@ -430,4 +432,33 @@ Deno.test("sidecar engine: a rejected declared workspace falls back to the deriv
     metadata: { appId: "app-eng" },
   });
   assertEquals(workspacePathOverride, await ensureAppWorkspace("u-1", "app-eng"));
+});
+
+// canUseTool alone cannot close the allowlist: the SDK auto-approves the
+// read-only built-ins in `default` permission mode, so Read/Glob/Grep never
+// reach it. The allowlist therefore also has to reach the sidecar's query()
+// as the SDK `tools` option (server.js), which is what drops them from the
+// model's context in the first place.
+Deno.test("sidecar engine: the declared allowlist is handed to the sidecar, not only to canUseTool", async () => {
+  const { allowedTools } = await runScoped(
+    "s-eng-allowlist-forward",
+    scopedSql({ tool_allowlist: ["Read", "Grep"], tool_allowlist_declared: true, workspace_path: "" }),
+  );
+  assertEquals(allowedTools, ["Read", "Grep"]);
+});
+
+Deno.test("sidecar engine: a declared EMPTY allowlist is forwarded as empty, never as absent", async () => {
+  const { allowedTools } = await runScoped(
+    "s-eng-allowlist-forward-empty",
+    scopedSql({ tool_allowlist: [], tool_allowlist_declared: true, workspace_path: "" }),
+  );
+  assertEquals(allowedTools, []);
+});
+
+Deno.test("sidecar engine: an undeclared allowlist forwards nothing, leaving the SDK preset alone", async () => {
+  const { allowedTools } = await runScoped(
+    "s-eng-allowlist-forward-none",
+    scopedSql({ tool_allowlist: [], tool_allowlist_declared: false, workspace_path: "" }),
+  );
+  assertEquals(allowedTools, undefined);
 });

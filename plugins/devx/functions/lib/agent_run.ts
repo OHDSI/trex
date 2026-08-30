@@ -9,7 +9,7 @@
 // the delegating sidecar engine off the user's provider row (see
 // agent/lib/resolve_engine.test.ts), so this seam never sees a provider.
 
-import { type EveSql, runOnEve, type RunOnEveResult } from "./eve_run.ts";
+import { type EveDenial, type EveSql, runOnEve, type RunOnEveResult } from "./eve_run.ts";
 import type { DevxSseFrame } from "./eve_sse.ts";
 
 /** The devx.subagent_runs columns this seam reads. */
@@ -31,6 +31,15 @@ export function buildRunPrompt(run: AgentRunRow): string {
   return isPlanRun(run)
     ? `Execute the following implementation plan using the subagent-driven-development skill. Do not ask which execution strategy to use — use subagent-driven execution. Implement everything end-to-end with your tools.\n\nPLAN:\n${task}`
     : `${task}. Use your tools to thoroughly analyze the project.`;
+}
+
+// A run that could not push, could not run SQL and committed nothing did not
+// implement the plan. `accepted` is the vocabulary's pre-implementation state
+// (migrations/V9__plan_implemented_status.sql), and the Plans tab reads status
+// as its ONLY signal — the denial notice lives in another table on another
+// screen, so leaving `implemented` here reports work that never happened.
+export function planStatusAfterRun(denials: readonly EveDenial[]): "implemented" | "accepted" {
+  return denials.length > 0 ? "accepted" : "implemented";
 }
 
 export interface AgentRunOpts {

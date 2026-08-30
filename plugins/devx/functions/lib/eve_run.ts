@@ -51,8 +51,9 @@ export interface RunOnEveOpts {
   allowedTools?: string[] | null;
   /** Prepended to the message; eve's devx loop refuses a client-supplied system prompt. */
   skillContext?: string;
-  /** Declared on the session row; agent.ts's resolveWorkspace honours it, but
-   * only when it is a run worktree this user/app could have produced. */
+  /** Declared on the session row. Honoured only when it round-trips through
+   * devx's own run-worktree generator for this USER (session_scope.ts's
+   * acceptDeclaredWorkspace) — written verbatim here, validated there. */
   workspacePathOverride?: string;
   /** agent.ts's filterTools reads it from the turn's metadata. */
   mode?: "ask" | "plan" | "build";
@@ -99,12 +100,6 @@ async function writeSessionScope(opts: RunOnEveOpts, sessionId: string): Promise
   if (!allowlist && !workspace) return;
   if (!opts.sql) {
     throw new Error("runOnEve: a declared tool allowlist or workspace needs `sql` to write it onto the session row");
-  }
-  // acceptDeclaredWorkspace validates the path against getRunWorktreePath(user,
-  // appId, leaf) and returns undefined without an appId — so a workspace
-  // declared on an appId-less turn silently does nothing. Refuse instead.
-  if (workspace && !opts.appId) {
-    throw new Error("runOnEve: a declared workspace needs an appId — without one the declaration cannot take effect");
   }
   await opts.sql(
     `UPDATE agents.sessions

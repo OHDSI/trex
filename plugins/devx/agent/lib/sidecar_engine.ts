@@ -58,6 +58,7 @@ export type SidecarStream = (args: {
   appId?: string;
   chatMode: string;
   workspacePathOverride?: string;
+  allowedTools?: readonly string[];
   settings: Record<string, unknown>;
   history: Array<{ role: string; content: string }>;
   send: (e: SidecarEvent) => void;
@@ -226,15 +227,13 @@ async function* runSidecarTurn(
     // The SDK's argument names are not devx's, and deriveScopeKey reads
     // devx's — an unmapped shape yields an empty action half, which gates.
     // The session's declared allowlist (V14), checked before the gate so no
-    // stored consent can override it. PARTIAL, and deliberately not faked:
-    // streamClaudeCodeChat takes no allowedTools and the sidecar's query()
-    // sets none, so canUseTool -> here is this path's ONLY hook. It covers
-    // every call the SDK routes to the `ask` outcome — Bash/Write/Edit/
-    // WebFetch/Task, i.e. all the mutating ones, since permission_policy.js's
-    // managed tier makes settings-file allow rules and PreToolUse hooks
-    // unreachable — but NOT the read-only built-ins the SDK auto-approves in
-    // `default` permission mode. Closing that gap needs allowedTools/
-    // disallowedTools wired into fn-claude-code/server.js's query() opts.
+    // stored consent can override it. Second of two layers now: the allowlist
+    // also reaches the sidecar's query() as the SDK `tools` option, which drops
+    // every unlisted BUILT-IN from the model's context — including the
+    // read-only ones (Read/Glob/Grep) the SDK auto-approves in `default` mode
+    // and which therefore never reach this callback. This check still earns its
+    // place: `tools` governs built-ins only, so the kb/ask MCP tools are caught
+    // only here, and it is what survives if the option is ever dropped.
     if (scope.allowedTools && !scope.allowedTools.includes(req.toolName)) {
       return { behavior: "deny", message: `${req.toolName} is not in this session's tool allowlist` };
     }
@@ -277,6 +276,10 @@ async function* runSidecarTurn(
     // Without this the sidecar re-derives appId ? app tree : user tree, and an
     // autonomous run mutates the main app tree instead of its own worktree.
     workspacePathOverride: workspace,
+    // Becomes the SDK's `tools` option (the base built-in set) in
+    // fn-claude-code/server.js. resolvePermission below still re-checks it:
+    // that is what covers MCP tools, which `tools` does not govern.
+    allowedTools: scope.allowedTools,
     // auto_approve is deliberately NOT forwarded: eve's gate owns that
     // decision now (resolveApproval's unattended/escalate tiers), and a
     // forwarded `true` would short-circuit the gate before it ever ran.

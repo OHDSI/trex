@@ -133,6 +133,9 @@ async function decidePermission({ id, toolName, input, chatId, userId, sqlFn, se
 export async function streamClaudeCodeChat({
   chatId, userId, appId, chatMode, settings, history, send, sqlFn,
   skillContext, commandOverride, hasComponentSelection, workspacePathOverride, useWorktree, remoteChannel, attachments,
+  // The eve session's declared tool allowlist (V14). Undefined = unrestricted;
+  // an EMPTY array declares "no tools" and must stay distinct from undefined.
+  allowedTools,
   // Set only when this stream IS an eve turn (agent/lib/sidecar_engine.ts) —
   // see answerPermissionRequest for what supplying it changes.
   resolvePermission,
@@ -233,6 +236,9 @@ export async function streamClaudeCodeChat({
         oauthToken,
         figmaToken: figmaToken || undefined,
         cwd: workspacePath,
+        // Restricts the SDK's built-in tool set (server.js maps it to `tools`).
+        // Sent only when declared, so an unrestricted session keeps the preset.
+        allowedTools: Array.isArray(allowedTools) ? [...allowedTools] : undefined,
         // Resume each chat's OWN claude session — a single global session would
         // bleed context across chats and let one bad session break all of them.
         chatId,
