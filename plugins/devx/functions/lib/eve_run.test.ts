@@ -1,18 +1,19 @@
 // deno test --no-check --allow-all plugins/devx/functions/lib/eve_run.test.ts
 import { assertEquals, assertRejects, assertStringIncludes } from "jsr:@std/assert";
 import type { DevxSseFrame } from "./eve_sse.ts";
-import { NO_APPROVER_ERROR, runOnEve } from "./eve_run.ts";
+import { bearerFromRequest, denialSummary, NO_APPROVER_ERROR, runOnEve } from "./eve_run.ts";
 
 interface Call {
   url: string;
   method: string;
   body: string;
+  headers: Record<string, string>;
 }
 
 // A fake eve seam that REFUSES to accept a turn before the event stream has
 // been subscribed — so posting first fails loudly here instead of hanging in
 // production the way Phase 1 did.
-function scripted(events: unknown[], opts: { closeAfterTurn?: boolean } = {}) {
+function scripted(events: unknown[], opts: { closeAfterTurn?: boolean; log?: string[] } = {}) {
   const calls: Call[] = [];
   const enc = new TextEncoder();
   let streamOpened = false;
@@ -21,7 +22,10 @@ function scripted(events: unknown[], opts: { closeAfterTurn?: boolean } = {}) {
   const fetchImpl = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const method = init?.method ?? "GET";
-    calls.push({ url, method, body: typeof init?.body === "string" ? init.body : "" });
+    const headers: Record<string, string> = {};
+    for (const [k, v] of new Headers(init?.headers).entries()) headers[k] = v;
+    calls.push({ url, method, body: typeof init?.body === "string" ? init.body : "", headers });
+    opts.log?.push(`${method} ${url}`);
 
     if (method === "POST" && url.endsWith("/session")) {
       return Promise.resolve(new Response(JSON.stringify({ sessionId: "s-1", continuationToken: "s-1" }), { status: 200 }));
@@ -113,7 +117,7 @@ Deno.test("does not claim an approver on the session it creates", async () => {
   assertEquals(createBody.unattended, true);
 });
 
-Deno.test("carries appId, mode and the skill context onto the turn", async () => {
+Deno.test("carries appId, mode and the skill context onto the turn — and the scope NOT at all", async () => {
   const { fetchImpl, calls } = scripted(completedRun);
   await runOnEve({
     ...baseOpts(fetchImpl, () => {}),
@@ -121,13 +125,16 @@ Deno.test("carries appId, mode and the skill context onto the turn", async () =>
     skillContext: "You are a security reviewer.",
     allowedTools: ["Read", "Grep"],
     workspacePathOverride: "/w/run-1",
+    sql: () => Promise.resolve({ rows: [] }),
   });
 
   const turn = JSON.parse(calls[2].body);
   assertEquals(turn.metadata.appId, "app-1");
   assertEquals(turn.metadata.mode, "ask");
-  assertEquals(turn.metadata.allowedTools, ["Read", "Grep"]);
-  assertEquals(turn.metadata.workspacePathOverride, "/w/run-1");
+  // The scope is enforced from the session ROW (V14). Sending it as turn
+  // metadata too would give the same restriction a second, per-turn source.
+  assertEquals("allowedTools" in turn.metadata, false);
+  assertEquals("workspacePathOverride" in turn.metadata, false);
   assertStringIncludes(turn.message, "You are a security reviewer.");
   assertStringIncludes(turn.message, "review this app");
 });
@@ -190,4 +197,122 @@ Deno.test("surfaces a create failure rather than starting a turn", async () => {
   const err = await assertRejects(() => runOnEve(baseOpts(fetchImpl, () => {})));
   assertStringIncludes(String(err), "503");
   assertEquals(calls.length, 1);
+});
+
+// ── The declared session scope (V14) ───────────────────────────────────────
+// A fake db whose writes land in the SAME ordered log as the eve calls, so
+// "written before the turn was posted" is asserted as an order, not merely as
+// a value that happened to be present by the end.
+function scriptedWithDb(events: unknown[]) {
+  const log: string[] = [];
+  const updates: Array<{ query: string; params: unknown[] }> = [];
+  const { fetchImpl, calls } = scripted(events, { log });
+  const sql = (query: string, params: unknown[] = []) => {
+    log.push(`sql ${query.trim().split(/\s+/).slice(0, 3).join(" ")}`);
+    updates.push({ query, params });
+    return Promise.resolve({ rows: [] });
+  };
+  return { fetchImpl, calls, sql, log, updates };
+}
+
+Deno.test("writes the declared allowlist and workspace onto the session row BEFORE posting the turn", async () => {
+  const { fetchImpl, sql, log, updates } = scriptedWithDb(completedRun);
+  await runOnEve({
+    ...baseOpts(fetchImpl, () => {}),
+    allowedTools: ["Read", "Grep"],
+    workspacePathOverride: "/w/u-1/app-1/.worktrees/run-1",
+    sql,
+  });
+
+  assertEquals(log, [
+    `POST ${BASE}`,
+    "sql UPDATE agents.sessions SET",
+    `GET ${BASE}/s-1/stream?startIndex=0`,
+    `POST ${BASE}/s-1`,
+  ]);
+  assertEquals(updates.length, 1);
+  assertEquals(updates[0].params, [["Read", "Grep"], true, "/w/u-1/app-1/.worktrees/run-1", "s-1"]);
+});
+
+Deno.test("an EMPTY declared allowlist is a declaration of nothing, not the absence of one", async () => {
+  const { fetchImpl, sql, updates } = scriptedWithDb(completedRun);
+  await runOnEve({ ...baseOpts(fetchImpl, () => {}), allowedTools: [], sql });
+
+  assertEquals(updates[0].params, [[], true, "", "s-1"]);
+});
+
+Deno.test("declares nothing when the caller declared nothing", async () => {
+  const { fetchImpl, sql, updates, log } = scriptedWithDb(completedRun);
+  await runOnEve({ ...baseOpts(fetchImpl, () => {}), sql });
+
+  assertEquals(updates.length, 0);
+  assertEquals(log.some((l) => l.startsWith("sql")), false);
+});
+
+Deno.test("refuses to start a turn whose declared scope it cannot write", async () => {
+  const { fetchImpl, calls } = scripted(completedRun);
+  const err = await assertRejects(() => runOnEve({ ...baseOpts(fetchImpl, () => {}), allowedTools: ["Read"] }));
+  assertStringIncludes(String(err), "session row");
+  // Nothing past the create: an unenforceable allowlist must not reach a turn.
+  assertEquals(calls.length, 1);
+});
+
+// acceptDeclaredWorkspace validates the declared path against the TURN's
+// appId, so a workspace declared for a session whose turn carries none never
+// takes effect. runOnEve posts exactly one turn per session, so the appId that
+// validates the declaration is the one on these opts — assert both halves.
+Deno.test("refuses to declare a workspace the turn's appId could never validate", async () => {
+  const { fetchImpl, calls } = scripted(completedRun);
+  const err = await assertRejects(() =>
+    runOnEve({
+      ...baseOpts(fetchImpl, () => {}),
+      appId: null,
+      workspacePathOverride: "/w/u-1/app-1/.worktrees/run-1",
+      sql: () => Promise.resolve({ rows: [] }),
+    })
+  );
+  assertStringIncludes(String(err), "appId");
+  assertEquals(calls.length, 1);
+});
+
+Deno.test("the turn carries the same appId the declared workspace is validated against", async () => {
+  const { fetchImpl, calls, sql, updates } = scriptedWithDb(completedRun);
+  await runOnEve({
+    ...baseOpts(fetchImpl, () => {}),
+    workspacePathOverride: "/w/u-1/app-1/.worktrees/run-1",
+    sql,
+  });
+
+  assertEquals(updates[0].params[2], "/w/u-1/app-1/.worktrees/run-1");
+  assertEquals(JSON.parse(calls[2].body).metadata.appId, "app-1");
+});
+
+Deno.test("sends the caller's bearer token on every eve call", async () => {
+  const { fetchImpl, calls } = scripted(completedRun);
+  await runOnEve({ ...baseOpts(fetchImpl, () => {}), bearerToken: "jwt-abc" });
+
+  for (const c of calls) {
+    assertEquals(c.headers.authorization, "Bearer jwt-abc");
+    assertEquals(c.headers["x-user-id"], "u-1");
+  }
+});
+
+Deno.test("bearerFromRequest reads the caller's Authorization header, and nothing else", () => {
+  const h = (v: string | null) => new Request("http://x/", v === null ? undefined : { headers: { authorization: v } });
+  assertEquals(bearerFromRequest(h("Bearer jwt-abc")), "jwt-abc");
+  assertEquals(bearerFromRequest(h("bearer jwt-abc")), "jwt-abc");
+  assertEquals(bearerFromRequest(h("Basic abc")), undefined);
+  assertEquals(bearerFromRequest(h(null)), undefined);
+});
+
+Deno.test("denialSummary names the refused tools, and is null on a clean run", () => {
+  assertEquals(denialSummary([]), null);
+  const s = denialSummary([
+    { toolName: "GitPush", reason: NO_APPROVER_ERROR },
+    { toolName: "GitPush", reason: NO_APPROVER_ERROR },
+    { toolName: "ExecuteSQL", reason: NO_APPROVER_ERROR },
+  ]);
+  assertStringIncludes(String(s), "GitPush");
+  assertStringIncludes(String(s), "ExecuteSQL");
+  assertStringIncludes(String(s), "no approver");
 });

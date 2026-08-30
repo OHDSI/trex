@@ -38,19 +38,27 @@ export interface EveDenial {
   reason: string;
 }
 
+/** devx's own sql helper (index.ts), declared locally so this file still
+ * imports nothing from core/. */
+export type EveSql = (query: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>;
+
 export interface RunOnEveOpts {
   userId: string;
   appId?: string | null;
   prompt: string;
-  /** Recorded on the turn, NOT enforced — see buildMetadata. */
+  /** Declared on the session row; agent.ts's filterTools enforces it. An EMPTY
+   * array declares "no tools" — only `undefined` is "no restriction". */
   allowedTools?: string[] | null;
   /** Prepended to the message; eve's devx loop refuses a client-supplied system prompt. */
   skillContext?: string;
-  /** Recorded on the turn, NOT enforced — see buildMetadata. */
+  /** Declared on the session row; agent.ts's resolveWorkspace honours it, but
+   * only when it is a run worktree this user/app could have produced. */
   workspacePathOverride?: string;
-  /** The one tool-scoping knob eve honours: agent.ts's filterTools reads it. */
+  /** agent.ts's filterTools reads it from the turn's metadata. */
   mode?: "ask" | "plan" | "build";
   send: (frame: DevxSseFrame) => void;
+  /** Required to declare a scope — writeSessionScope needs it. */
+  sql?: EveSql;
   fetchImpl?: typeof fetch;
   baseUrl?: string;
   bearerToken?: string;
@@ -70,18 +78,55 @@ export function eveSessionBase(): string {
   return `${root}/plugins/trex/devx-agent/eve/v1/session`;
 }
 
-// mode is the only key here the eve devx loop acts on (agent/lib/context.ts
-// reads mode/chatId/appId/attachments). allowedTools and workspacePathOverride
-// are carried so the caller's intent reaches ctx.metadata unaltered, but
-// NOTHING enforces them server-side today — a legacy allowed_tools restriction
-// does not survive this migration, and neither does a run's worktree cwd.
+// Deliberately carries NO allowlist and no workspace: those are session-row
+// scope (V14), and a restriction that also arrives as per-turn metadata is one
+// a later turn could restate differently. agent/lib/context.ts reads
+// mode/chatId/appId/attachments from here; nothing else.
 function buildMetadata(opts: RunOnEveOpts): Record<string, unknown> {
   return {
     ...(opts.appId ? { appId: opts.appId } : {}),
     ...(opts.mode ? { mode: opts.mode } : {}),
-    ...(opts.allowedTools?.length ? { allowedTools: opts.allowedTools } : {}),
-    ...(opts.workspacePathOverride ? { workspacePathOverride: opts.workspacePathOverride } : {}),
   };
+}
+
+// The scope agent/lib/session_scope.ts reads back. It MUST land between the
+// create and the turn: filterTools/resolveWorkspace snapshot the row once,
+// before the tool set is built, so a turn posted first runs unrestricted in
+// the derived workspace — the regression V14 exists to prevent.
+async function writeSessionScope(opts: RunOnEveOpts, sessionId: string): Promise<void> {
+  const allowlist = Array.isArray(opts.allowedTools) ? opts.allowedTools : null;
+  const workspace = opts.workspacePathOverride ?? "";
+  if (!allowlist && !workspace) return;
+  if (!opts.sql) {
+    throw new Error("runOnEve: a declared tool allowlist or workspace needs `sql` to write it onto the session row");
+  }
+  // acceptDeclaredWorkspace validates the path against getRunWorktreePath(user,
+  // appId, leaf) and returns undefined without an appId — so a workspace
+  // declared on an appId-less turn silently does nothing. Refuse instead.
+  if (workspace && !opts.appId) {
+    throw new Error("runOnEve: a declared workspace needs an appId — without one the declaration cannot take effect");
+  }
+  await opts.sql(
+    `UPDATE agents.sessions
+        SET tool_allowlist = $1::text[], tool_allowlist_declared = $2, workspace_path = $3
+      WHERE id = $4`,
+    [allowlist ?? [], allowlist !== null, workspace, sessionId],
+  );
+}
+
+/** The caller's own bearer token, for a loopback call made on their behalf.
+ * functions/ has no signing key, so there is no other token it may send. */
+export function bearerFromRequest(req: Request): string | undefined {
+  const match = /^Bearer\s+(.+)$/i.exec(req.headers.get("authorization")?.trim() ?? "");
+  return match ? match[1] : undefined;
+}
+
+/** One line naming what eve refused for want of an approver, so a run that
+ * completed WITHOUT its hard-tier tools is not mistaken for a clean one. */
+export function denialSummary(denials: EveDenial[]): string | null {
+  if (denials.length === 0) return null;
+  const tools = [...new Set(denials.map((d) => d.toolName))].join(", ");
+  return `${denials.length} tool call(s) denied — this run is unattended and has no approver: ${tools}`;
 }
 
 // Legacy passed skillContext into the system prompt; eve's devx loop
@@ -117,6 +162,8 @@ export async function runOnEve(opts: RunOnEveOpts): Promise<RunOnEveResult> {
   }
   const sessionId = (await created.json() as { sessionId?: unknown }).sessionId;
   if (typeof sessionId !== "string" || !sessionId) throw new Error("eve session create returned no sessionId");
+
+  await writeSessionScope(opts, sessionId);
 
   // Subscribe FIRST. Posting the turn before this attach loses every event it
   // emits in the gap — the 90-minute silent hang Phase 1 shipped.

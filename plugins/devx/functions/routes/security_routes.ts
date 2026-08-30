@@ -12,6 +12,7 @@ import { devServerManager } from "../dev_server.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey } from "../provider_key.ts";
 import { isNoKeyProvider, removedProviderResponse } from "../provider_support.ts";
 import { classifyCoderError } from "../error_codes.ts";
+import { bearerFromRequest, denialSummary, runOnEve } from "../lib/eve_run.ts";
 
 const EXCLUDED_DIRS = new Set([
   "node_modules", ".git", "dist", "build", ".next", ".venv", "venv",
@@ -133,25 +134,18 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
     table: string;
     eventPrefix: string;
     allowedTools: string[];
-    maxSteps?: number;
   }) {
-    // Read active provider config, fall back to legacy settings. Probe
-    // before selecting the encrypted columns — see provider_key.ts's
-    // assertProviderConfigEncryptionMigrated header comment.
+    // Pre-flight provider gate. The model itself is now resolved inside the
+    // eve devx agent (agent.ts's resolveModel, off the same rows) — this is
+    // kept so a misconfigured provider fails the REQUEST with a usable message
+    // instead of failing the turn halfway through a stream.
     await assertProviderConfigEncryptionMigrated(sql);
     const activePC = await sql(
       `SELECT provider, model, api_key, api_key_encrypted, api_key_iv, base_url FROM devx.provider_configs WHERE user_id = $1 AND is_active = true LIMIT 1`,
       [userId],
     );
-    const prefsResult = await sql(
-      `SELECT ai_rules, auto_approve, max_steps FROM devx.settings WHERE user_id = $1 LIMIT 1`,
-      [userId],
-    );
     const providerRow = activePC.rows[0];
-    const prefs = prefsResult.rows[0] || {};
 
-    // Assigned by exactly one of the two branches below and read after them.
-    let settings;
     if (!providerRow) {
       // Legacy fallback. devx.settings carries the same encrypted-pair
       // columns as provider_configs (V16) now — resolved through
@@ -196,18 +190,12 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
           { status: 400, headers: corsHeaders },
         );
       }
-      // Same "no ciphertext in the settings object" posture as the
-      // providerRow branch below.
-      const { api_key_encrypted: _legacyEnc, api_key_iv: _legacyIv, ...legacyNoCiphertext } = legacyRow;
-      settings = { ...legacyNoCiphertext, api_key: resolvedLegacyApiKey };
     } else {
-      // Resolve through the encryption helper before the no-key check
-      // (which must run on the resolved value, same as index.ts) and before
-      // `settings` is built — never let the raw api_key_encrypted/api_key_iv
-      // columns leak into settings.api_key unresolved, and never swallow a
-      // decrypt failure (this streams straight into streamAgentChat's
-      // createModel, which would otherwise fall through to an env-var
-      // credential on a NULL api_key).
+      // Resolve through the encryption helper before the no-key check, which
+      // must run on the RESOLVED value (same as index.ts): api_key is NULL once
+      // a row is encrypted, and a key gate reading the raw column would wave a
+      // keyless row through to the agent's own resolveModel. A decrypt failure
+      // must fail the request, never continue with an absent key.
       let resolvedApiKey;
       try {
         resolvedApiKey = await readProviderKey(providerRow);
@@ -230,20 +218,14 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       // Only providers that genuinely authenticate without a stored key belong
       // in the shared waiver (provider_support.ts, one definition for every
       // read site). A provider whose engine no longer exists must NOT be waived:
-      // streamAgentChat's createModel would route it to the OpenAI-compatible
-      // client, which resolves an absent key from the worker's own
-      // OPENAI_API_KEY.
+      // the model builder would route it to the OpenAI-compatible client, which
+      // resolves an absent key from the worker's own OPENAI_API_KEY.
       if (!resolvedApiKey && !isNoKeyProvider(providerRow.provider)) {
         return Response.json(
           { error: "AI provider not configured. Set your API key in Settings." },
           { status: 400, headers: corsHeaders },
         );
       }
-      // The comment above says ciphertext never leaks into `settings` — make
-      // that true by destructuring it out rather than spreading the raw row
-      // (same fix as index.ts's settings/agentSettings assembly).
-      const { api_key_encrypted: _providerRowEnc, api_key_iv: _providerRowIv, ...providerRowNoCiphertext } = providerRow;
-      settings = { ...providerRowNoCiphertext, api_key: resolvedApiKey, ...prefs };
     }
 
     // Fetch previous review for context
@@ -279,9 +261,6 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
         try {
           send({ type: `${opts.eventPrefix}_progress`, message: "Starting review agent..." });
 
-          // Import streamAgentChat dynamically to avoid circular deps
-          const { streamAgentChat } = await import("../agent.ts");
-
           // Create a send wrapper that forwards agent events as review progress
           let lastProgressTime = 0;
           const agentSend = (data: any) => {
@@ -311,39 +290,33 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
               };
               const msg = toolMessages[data.name] || `Using ${data.name}...`;
               send({ type: `${opts.eventPrefix}_progress`, message: msg });
-            } else if (data.type === "step") {
-              send({ type: `${opts.eventPrefix}_progress`, message: `Step ${data.step}/${data.maxSteps}...` });
             }
           };
 
-          // Run the agent
-          const result = await streamAgentChat({
-            // Synthetic chatId — not a real chat row. Safe because auto_approve
-            // bypasses consent (which uses chatId for resolution), and hooks
-            // query by userId, not chatId.
-            chatId: `review-${opts.appId}-${Date.now()}`,
+          // An unattended eve session with no approver: the review's tools are
+          // read-only, and anything in the hard escalate tier is denied outright
+          // rather than parked on a gate nobody is watching. runOnEve declares
+          // opts.allowedTools on the session row BEFORE the turn, which is what
+          // makes the per-review allowlist actually restrict the tool set.
+          const result = await runOnEve({
             userId,
             appId: opts.appId,
-            chatMode: "agent",
-            settings: {
-              ...settings,
-              max_steps: opts.maxSteps || 20,
-              auto_approve: true, // Auto-approve all tool calls for reviews
-            },
-            history: [{ role: "user", content: fullUserMessage }],
-            send: agentSend,
-            sqlFn: sql,
+            prompt: fullUserMessage,
             skillContext: opts.systemPrompt,
-            commandOverride: {
-              allowed_tools: opts.allowedTools,
-              model: null,
-              body: "",
-            },
+            allowedTools: opts.allowedTools,
+            send: agentSend,
+            sql,
+            bearerToken: bearerFromRequest(req),
           });
 
-          // Parse findings from the agent's final response
-          const agentResponse = result.content || "";
-          const findings = opts.parseFindings(agentResponse);
+          const findings = opts.parseFindings(result.content || "");
+
+          // A review that found nothing because its tools were refused is not a
+          // review that found nothing — say so on the wire, both ways.
+          const denialNotice = denialSummary(result.denials);
+          if (denialNotice) {
+            send({ type: `${opts.eventPrefix}_progress`, message: denialNotice });
+          }
 
           // Store in DB
           const insertResult = await sql(
@@ -355,6 +328,7 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
           send({
             type: `${opts.eventPrefix}_done`,
             review: { id: insertResult.rows[0].id, findings, created_at: insertResult.rows[0].created_at },
+            denials: result.denials,
           });
         } catch (err) {
           send({ type: `${opts.eventPrefix}_error`, error: err.message });
@@ -458,7 +432,6 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       table: "security-review",
       eventPrefix: "review",
       allowedTools: SECURITY_REVIEW_TOOLS,
-      maxSteps: 20,
     });
   }
 
@@ -493,7 +466,6 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       table: "code-review",
       eventPrefix: "code_review",
       allowedTools: CODE_REVIEW_TOOLS,
-      maxSteps: 20,
     });
   }
 
@@ -528,7 +500,6 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       table: "qa-test",
       eventPrefix: "qa_review",
       allowedTools: QA_REVIEW_TOOLS,
-      maxSteps: 30,
     });
   }
 
@@ -563,7 +534,6 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       table: "design-review",
       eventPrefix: "design_review",
       allowedTools: DESIGN_REVIEW_TOOLS,
-      maxSteps: 25,
     });
   }
 
@@ -604,7 +574,6 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       table: "docs-update",
       eventPrefix: "docs_review",
       allowedTools: DOCS_UPDATE_TOOLS,
-      maxSteps: 30,
     });
   }
 

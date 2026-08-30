@@ -44,9 +44,11 @@ async function withWorkspace<T>(fn: () => Promise<T>): Promise<T> {
 
 function makeFakeDb(activeProviderRow: Record<string, unknown> | null) {
   const calls: string[] = [];
+  const params: unknown[][] = [];
 
-  const sql = async (q: string, _p: unknown[] = []) => {
+  const sql = async (q: string, p: unknown[] = []) => {
     calls.push(q);
+    params.push(p);
 
     if (q.includes("information_schema.columns")) {
       // Simulate the encryption migration applied, so the route exercises its
@@ -69,10 +71,17 @@ function makeFakeDb(activeProviderRow: Record<string, unknown> | null) {
     if (q.includes("FROM devx.settings")) {
       return { rows: [{ ai_rules: null, auto_approve: false, max_steps: 20 }] };
     }
+    // The happy path continues past the gate: no previous review, the session
+    // scope write, then the findings insert.
+    if (q.includes("SELECT findings")) return { rows: [] };
+    if (q.includes("UPDATE agents.sessions")) return { rows: [] };
+    if (q.includes("INSERT INTO devx.agent_results")) {
+      return { rows: [{ id: "rev-1", created_at: "2026-08-30T00:00:00.000Z" }] };
+    }
     throw new Error(`unexpected query: ${q}`);
   };
 
-  return { sql, calls };
+  return { sql, calls, params };
 }
 
 function reviewRequest() {
@@ -170,5 +179,200 @@ Deno.test("security review: a keyless openai row is rejected the same way (the g
 
     assertEquals(res.status, 400);
     assertEquals(await res.json(), { error: "AI provider not configured. Set your API key in Settings." });
+  });
+});
+
+// ── The review runs on eve (Phase 3) ───────────────────────────────────────
+// The legacy call passed a SYNTHETIC chat id and auto_approve:true to bypass
+// consent. On eve the review is an unattended session with no approver, so
+// hard-tier tools deny instead — and the caller has to be able to see that.
+
+const OPENAI_ROW = {
+  provider: "openai",
+  model: "gpt-4o",
+  api_key: "sk-real",
+  api_key_encrypted: null,
+  api_key_iv: null,
+  base_url: null,
+};
+
+const EVE_ROOT = "http://eve.test";
+const EVE_BASE = `${EVE_ROOT}/plugins/trex/devx-agent/eve/v1/session`;
+
+interface EveCall {
+  url: string;
+  method: string;
+  body: string;
+  authorization: string | null;
+}
+
+/** Stand in for the eve loopback for the duration of one review. */
+async function withEve<T>(events: unknown[], fn: (calls: EveCall[]) => Promise<T>): Promise<T> {
+  const calls: EveCall[] = [];
+  const enc = new TextEncoder();
+  const realFetch = globalThis.fetch;
+  const prevUrl = Deno.env.get("DEVX_EVE_LOOPBACK_URL");
+  Deno.env.set("DEVX_EVE_LOOPBACK_URL", EVE_ROOT);
+  let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const method = init?.method ?? "GET";
+    calls.push({
+      url,
+      method,
+      body: typeof init?.body === "string" ? init.body : "",
+      authorization: new Headers(init?.headers).get("authorization"),
+    });
+    if (method === "POST" && url.endsWith("/session")) {
+      return Promise.resolve(new Response(JSON.stringify({ sessionId: "s-rev" }), { status: 200 }));
+    }
+    if (method === "GET" && url.includes("/stream")) {
+      return Promise.resolve(
+        new Response(new ReadableStream<Uint8Array>({ start: (c) => { controller = c; } }), { status: 200 }),
+      );
+    }
+    for (const e of events) controller?.enqueue(enc.encode(`${JSON.stringify(e)}\n`));
+    controller?.close();
+    return Promise.resolve(new Response("{}", { status: 202 }));
+  }) as typeof fetch;
+
+  try {
+    return await fn(calls);
+  } finally {
+    globalThis.fetch = realFetch;
+    if (prevUrl === undefined) Deno.env.delete("DEVX_EVE_LOOPBACK_URL");
+    else Deno.env.set("DEVX_EVE_LOOPBACK_URL", prevUrl);
+  }
+}
+
+function turnEvents(text: string, extra: unknown[] = []) {
+  return [
+    ...extra,
+    { type: "message.completed", data: { turnId: "t1", message: text, finishReason: "stop" } },
+    { type: "turn.completed", data: { turnId: "t1", finishReason: "stop" } },
+  ];
+}
+
+async function sseFrames(res: Response): Promise<Record<string, unknown>[]> {
+  const text = await res.text();
+  return text.split("\n\n")
+    .map((b) => b.replace(/^data: /, "").trim())
+    .filter((b) => b.length > 0)
+    .map((b) => JSON.parse(b) as Record<string, unknown>);
+}
+
+const FINDING =
+  `<security-finding title="Hardcoded key" level="high">main.ts embeds an API key.</security-finding>`;
+
+Deno.test("security review: runs on eve and returns the findings its reply carried", async () => {
+  await withWorkspace(async () => {
+    const db = makeFakeDb(OPENAI_ROW);
+    await withEve(turnEvents(`Reviewed.\n${FINDING}`), async (calls) => {
+      const res = await handleSecurityRoutes(
+        `/apps/${APP}/security/review`,
+        "POST",
+        new Request(`http://x/apps/${APP}/security/review`, {
+          method: "POST",
+          headers: { authorization: "Bearer caller-jwt" },
+        }),
+        USER,
+        db.sql,
+        CORS,
+      );
+
+      const frames = await sseFrames(res);
+      const done = frames.find((f) => f.type === "review_done");
+      assertEquals(frames.some((f) => f.type === "review_error"), false);
+      assertEquals((done?.review as { findings: unknown[] }).findings, [
+        { title: "Hardcoded key", level: "high", description: "main.ts embeds an API key." },
+      ]);
+      assertEquals(done?.denials, []);
+
+      // The review reached eve, on the caller's own token.
+      assertEquals(calls.map((c) => `${c.method} ${c.url}`), [
+        `POST ${EVE_BASE}`,
+        `GET ${EVE_BASE}/s-rev/stream?startIndex=0`,
+        `POST ${EVE_BASE}/s-rev`,
+      ]);
+      for (const c of calls) assertEquals(c.authorization, "Bearer caller-jwt");
+      // Unattended, and claiming no approver it does not have.
+      const create = JSON.parse(calls[0].body);
+      assertEquals(create.unattended, true);
+      assertEquals("approverReachable" in create, false);
+    });
+  });
+});
+
+Deno.test("security review: the read-only allowlist is on the session row before the turn is posted", async () => {
+  await withWorkspace(async () => {
+    const db = makeFakeDb(OPENAI_ROW);
+    await withEve(turnEvents("Reviewed."), async (calls) => {
+      const res = await handleSecurityRoutes(
+        `/apps/${APP}/security/review`,
+        "POST",
+        reviewRequest(),
+        USER,
+        db.sql,
+        CORS,
+      );
+      // The route's work happens in the stream's start(); draining it is what
+      // waits for the run to finish.
+      await res.text();
+
+      const scopeIdx = db.calls.findIndex((q) => q.includes("UPDATE agents.sessions"));
+      assertEquals(scopeIdx >= 0, true);
+      const [tools, declared, workspace, sessionId] = db.params[scopeIdx];
+      assertEquals(tools, ["Read", "Glob", "Grep", "CodeSearch", "GitDiff", "GitLog", "GitStatus"]);
+      assertEquals(declared, true);
+      assertEquals(workspace, "");
+      assertEquals(sessionId, "s-rev");
+      // Ordering: the scope write happens between the create and the turn.
+      // Only the create has run by then — the turn post is calls[2].
+      assertEquals(calls.length, 3);
+    });
+  });
+});
+
+Deno.test("security review: a hard-tier denial completes the review and is reported to the caller", async () => {
+  await withWorkspace(async () => {
+    const db = makeFakeDb(OPENAI_ROW);
+    const denied = {
+      type: "action.result",
+      data: {
+        turnId: "t1",
+        result: {
+          kind: "tool-result",
+          callId: "c1",
+          toolName: "ExecuteSQL",
+          output: { error: "ExecuteSQL requires approval but this session has no approver" },
+        },
+        status: "completed",
+      },
+    };
+    await withEve(turnEvents("Reviewed what I could.", [denied]), async () => {
+      const res = await handleSecurityRoutes(
+        `/apps/${APP}/security/review`,
+        "POST",
+        reviewRequest(),
+        USER,
+        db.sql,
+        CORS,
+      );
+
+      const frames = await sseFrames(res);
+      const done = frames.find((f) => f.type === "review_done");
+      // The review still completed and was stored…
+      assertEquals(typeof (done?.review as { id: unknown }).id, "string");
+      // …but a run whose tools were refused is not a clean run.
+      assertEquals(done?.denials, [{
+        toolName: "ExecuteSQL",
+        reason: "ExecuteSQL requires approval but this session has no approver",
+      }]);
+      const notice = frames.find((f) =>
+        f.type === "review_progress" && String(f.message).includes("no approver")
+      );
+      assertEquals(typeof notice?.message, "string");
+    });
   });
 });
