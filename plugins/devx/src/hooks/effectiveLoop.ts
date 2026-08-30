@@ -31,6 +31,30 @@ export type EffectiveLoop = "legacy" | "agents";
 // decision; the UI renders it as a retryable error instead.
 export const SETTINGS_FETCH_FAILED = "settings-fetch-failed" as const;
 
+// task-4 must-fix: the hook's catch/loading branches must build these two
+// non-resolved states by calling here, not by writing `{ status: ... }`
+// inline — inline construction is exactly how a future edit could quietly
+// reinstate `{ status: "resolved", loop: "legacy" }` (the bug this task
+// removed, respelled) without any test noticing. This does NOT test
+// useEffectiveLoop's React effect itself — devx has no UI test harness
+// (no RTL/vitest/jsdom) — it only pins the shape these two states must
+// take, so a hook that stops calling them is a smaller, more obvious diff.
+export interface EffectiveLoopLoadingState {
+  status: "loading";
+}
+
+export function stateForLoading(): EffectiveLoopLoadingState {
+  return { status: "loading" };
+}
+
+export interface EffectiveLoopFailedState {
+  status: "error";
+}
+
+export function stateForSettingsFailure(): EffectiveLoopFailedState {
+  return { status: "error" };
+}
+
 export interface ResolveEffectiveLoopInput {
   // devx.settings.loop, as returned by GET /settings. ABSENT (null/undefined/
   // empty — the user has no devx.settings row at all, which

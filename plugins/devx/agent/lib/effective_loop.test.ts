@@ -17,7 +17,13 @@
 // user now resolves to "agents" like everyone else and fails loudly at
 // agent.ts's resolveModel instead.
 import { assert, assertEquals } from "jsr:@std/assert";
-import { resolveEffectiveLoop, SETTINGS_FETCH_FAILED, type EffectiveLoop } from "../../src/hooks/effectiveLoop.ts";
+import {
+  resolveEffectiveLoop,
+  SETTINGS_FETCH_FAILED,
+  stateForLoading,
+  stateForSettingsFailure,
+  type EffectiveLoop,
+} from "../../src/hooks/effectiveLoop.ts";
 
 Deno.test("resolveEffectiveLoop: loop='agents' + anthropic -> 'agents'", () => {
   assertEquals(resolveEffectiveLoop({ loop: "agents", provider: "anthropic" }), "agents");
@@ -90,4 +96,25 @@ Deno.test("a failed settings fetch resolves to neither loop, unlike an absent se
   // EffectiveLoop value — a failed fetch must not resolve to any loop.
   const loops: EffectiveLoop[] = ["legacy", "agents"];
   assert(!loops.includes(SETTINGS_FETCH_FAILED as unknown as EffectiveLoop), "the sentinel must not be a valid EffectiveLoop value");
+});
+
+// task-4 must-fix: pins the shape useEffectiveLoop.ts's catch/loading
+// branches are required to build via these two functions rather than
+// inline literals. This does NOT exercise the React effect (devx has no
+// RTL/vitest/jsdom) — a hook that stopped calling stateForSettingsFailure()
+// and wrote `{ status: "resolved", loop: "legacy" }` inline instead would
+// still pass this suite. It only guarantees the values these functions are
+// allowed to hand back are never a resolved loop.
+Deno.test("stateForSettingsFailure: yields 'error', never a resolved loop", () => {
+  const result = stateForSettingsFailure();
+  assertEquals(result, { status: "error" });
+  assert(result.status !== "resolved", "a failed fetch must not resolve to a loop");
+  assert(!("loop" in result), "the failure state must carry no loop field");
+});
+
+Deno.test("stateForLoading: yields 'loading', never a resolved loop", () => {
+  const result = stateForLoading();
+  assertEquals(result, { status: "loading" });
+  assert(result.status !== "resolved", "loading must not resolve to a loop");
+  assert(!("loop" in result), "the loading state must carry no loop field");
 });

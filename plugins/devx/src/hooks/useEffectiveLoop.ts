@@ -6,24 +6,34 @@
 // plugins/devx/agent/lib/effective_loop.test.ts.
 import { useCallback, useEffect, useState } from "react";
 import * as api from "@/lib/api";
-import { resolveEffectiveLoop, SETTINGS_FETCH_FAILED, type EffectiveLoop } from "./effectiveLoop";
+import {
+  resolveEffectiveLoop,
+  SETTINGS_FETCH_FAILED,
+  stateForLoading,
+  stateForSettingsFailure,
+  type EffectiveLoop,
+} from "./effectiveLoop";
 
 export type { EffectiveLoop };
 
 // Three states, not two: a failed settings/provider fetch is neither "still
 // loading" nor "resolved to a loop" — it must not guess a loop (see
 // SETTINGS_FETCH_FAILED). `retry` re-runs the fetch without a page reload.
+// The non-resolved variants are built via stateForLoading/
+// stateForSettingsFailure (effectiveLoop.ts) rather than inline, so a Deno
+// test pins their shape — see that file's comment for what this does and
+// does not cover.
 export type EffectiveLoopState =
-  | { status: "loading" }
-  | { status: "error"; retry: () => void }
+  | ReturnType<typeof stateForLoading>
+  | (ReturnType<typeof stateForSettingsFailure> & { retry: () => void; message: string })
   | { status: "resolved"; loop: EffectiveLoop };
 
 export function useEffectiveLoop(): EffectiveLoopState {
-  const [state, setState] = useState<EffectiveLoopState>({ status: "loading" });
+  const [state, setState] = useState<EffectiveLoopState>(stateForLoading());
   const [attempt, setAttempt] = useState(0);
 
   const retry = useCallback(() => {
-    setState({ status: "loading" });
+    setState(stateForLoading());
     setAttempt((n) => n + 1);
   }, []);
 
@@ -46,7 +56,10 @@ export function useEffectiveLoop(): EffectiveLoopState {
         // V17's column default); a user whose settings/provider we could not
         // read at all gets no guess at all — see SETTINGS_FETCH_FAILED.
         console.error(`useEffectiveLoop: failed to resolve settings/provider (${SETTINGS_FETCH_FAILED}):`, err);
-        if (!cancelled) setState({ status: "error", retry });
+        // Same extraction ChatPanel's sibling D2ESubAppPanel.tsx uses for its
+        // own retryable error state.
+        const message = err instanceof Error ? err.message : "Failed to load settings";
+        if (!cancelled) setState({ ...stateForSettingsFailure(), retry, message });
       });
     return () => {
       cancelled = true;

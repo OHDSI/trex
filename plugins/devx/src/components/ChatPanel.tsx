@@ -51,6 +51,8 @@ export function ChatPanel(props: ChatPanelProps) {
       <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center">
         <AlertCircle className="h-8 w-8 text-destructive" />
         <p className="text-sm text-muted-foreground">Couldn't load chat settings.</p>
+        {/* Same error-message surfacing D2ESubAppPanel.tsx uses for its retry state. */}
+        <p className="text-sm text-destructive">{loopState.message}</p>
         <Button variant="outline" size="sm" onClick={loopState.retry}>Retry</Button>
       </div>
     );
