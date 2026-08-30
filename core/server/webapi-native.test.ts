@@ -58,6 +58,41 @@ Deno.test("no wait when no discovery URL is configured", async () => {
   assertEquals([r.logs.length, r.errs.length], [0, 0]);
 });
 
+Deno.test("probes the internal base instead of an unreachable issuer", async () => {
+  const s = discoveryServer(0);
+  try {
+    const r = recorder();
+    // The issuer address is deliberately a black hole: if it were probed, the
+    // budget would run out and the gate would report a provider that is ready.
+    await waitForOidcDiscovery(r.log, r.err, {
+      SECURITY_AUTH_OIDC_ENABLED: "true",
+      SECURITY_AUTH_OIDC_URL: "http://127.0.0.1:1/.well-known/openid-configuration",
+      SECURITY_AUTH_OIDC_INTERNALURL: s.url.replace("/.well-known/openid-configuration", ""),
+      WEBAPI_OIDC_READY_STREAK: "1",
+    }, 5000);
+    assertEquals(s.hits(), 1);
+    assertEquals(r.errs.length, 0);
+  } finally {
+    await s.close();
+  }
+});
+
+Deno.test("accepts an internal base that already names the discovery document", async () => {
+  const s = discoveryServer(0);
+  try {
+    const r = recorder();
+    await waitForOidcDiscovery(r.log, r.err, {
+      SECURITY_AUTH_OIDC_ENABLED: "true",
+      SECURITY_AUTH_OIDC_INTERNALURL: s.url,
+      WEBAPI_OIDC_READY_STREAK: "1",
+    }, 5000);
+    assertEquals(s.hits(), 1);
+    assertEquals(r.errs.length, 0);
+  } finally {
+    await s.close();
+  }
+});
+
 Deno.test("returns immediately when discovery already serves", async () => {
   const s = discoveryServer(0);
   try {

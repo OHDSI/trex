@@ -38,6 +38,19 @@ const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
  */
 const DEFAULT_READY_STREAK = 3;
 
+const DISCOVERY_SUFFIX = "/.well-known/openid-configuration";
+
+function discoveryUrl(
+  env: Record<string, string | undefined>,
+): string | undefined {
+  const internal = env.SECURITY_AUTH_OIDC_INTERNALURL?.trim();
+  if (internal) {
+    const base = internal.replace(/\/+$/, "");
+    return base.endsWith(DISCOVERY_SUFFIX) ? base : base + DISCOVERY_SUFFIX;
+  }
+  return env.SECURITY_AUTH_OIDC_URL;
+}
+
 /**
  * Block until the OIDC discovery document is served, or the budget runs out.
  *
@@ -65,7 +78,10 @@ export async function waitForOidcDiscovery(
   budgetMs: number = OIDC_WAIT_MS,
 ): Promise<void> {
   if (env.SECURITY_AUTH_OIDC_ENABLED !== "true") return;
-  const url = env.SECURITY_AUTH_OIDC_URL;
+  // Probe whichever address WebAPI itself will read the metadata from. Where the
+  // issuer is a public address this process cannot resolve, probing it would
+  // burn the whole budget and then report a provider that is in fact ready.
+  const url = discoveryUrl(env);
   if (!url) return;
 
   const probeTimeoutMs = Number(
