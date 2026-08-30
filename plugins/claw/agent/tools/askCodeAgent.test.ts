@@ -2,6 +2,7 @@ import { assert, assertEquals, assertRejects, assertStringIncludes } from "jsr:@
 import askCodeAgentTool, { askCore, routeCodeTurn, type CodeTurnOutcome, type TransportDeps } from "./askCodeAgent.ts";
 import type { CodeTurnArgs } from "../lib/code-stream.ts";
 import type { TokioClient } from "../lib/code-session.ts";
+import type { MirrorDeps } from "../lib/chat-mirror.ts";
 
 function fakeSql() {
   const store = new Map<string, any>();
@@ -369,6 +370,120 @@ Deno.test("routeCodeTurn throws when eve is chosen but Trex.req is unavailable",
     getClient: () => null,
   };
   await assertRejects(() => routeCodeTurn(baseArgs(), 0, deps), Error, "Trex.req unavailable");
+});
+
+// --- devx-UI mirroring: eve turns only, never legacy ------------------------
+// (regression: PR #176's live devx-UI visibility was built on the legacy
+// transport's server-side /chats,/messages writes; the eve transport never
+// touches those tables on its own — see chat-mirror.ts.)
+
+// Like fakeSql above, but MERGES writes into a session's row instead of
+// overwriting it wholesale — askCore issues two distinct writes per eve turn
+// (the main orchestration upsert, and chat-mirror's dedicated devx_chat_id
+// write), which must coexist the same way they do against the real table.
+function fakeSqlMerging() {
+  const store = new Map<string, any>();
+  const fn = (sql: string, params: unknown[] = []) => {
+    if (sql.trim().startsWith("SELECT")) {
+      const r = store.get(String(params[0]));
+      return Promise.resolve({ rows: r ? [r] : [] });
+    }
+    const existing = store.get(String(params[0])) ?? { session_id: params[0] };
+    if (sql.includes("devx_chat_id = EXCLUDED.devx_chat_id")) {
+      store.set(String(params[0]), { ...existing, devx_chat_id: params[1] });
+    } else {
+      store.set(String(params[0]), {
+        ...existing,
+        code_session_id: params[1],
+        event_cursor: params[2],
+        app_id: params[3] ?? null,
+      });
+    }
+    return Promise.resolve({ rows: [] });
+  };
+  return { fn, store };
+}
+
+function stubEveTurnWithTransport(overrides: Partial<CodeTurnOutcome> = {}) {
+  return (_args: CodeTurnArgs): Promise<CodeTurnOutcome> =>
+    Promise.resolve({
+      chatId: "sess-1",
+      replyText: "done",
+      nextCursor: 1,
+      reason: "completed",
+      pending: [],
+      transport: "eve",
+      ...overrides,
+    });
+}
+
+Deno.test("askCore mirrors an eve turn into devx once and reuses the chat on the next turn", async () => {
+  const sql = fakeSqlMerging();
+  const ensureCalls: Array<string | null> = [];
+  const postedRoles: string[] = [];
+  const mirrorDeps: MirrorDeps = {
+    mintToken: () => Promise.resolve("tok"),
+    ensureChat: (_token, _appId, existingChatId) => {
+      ensureCalls.push(existingChatId);
+      return Promise.resolve("devx-chat-1");
+    },
+    fetch: ((_url: string, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      postedRoles.push(body.role);
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }) as typeof fetch,
+  };
+
+  await askCore(sql.fn, { sessionId: "s1", userId: "u1" }, { message: "go" }, stubEveTurnWithTransport(), mirrorDeps);
+  await askCore(sql.fn, { sessionId: "s1", userId: "u1" }, { message: "go again" }, stubEveTurnWithTransport(), mirrorDeps);
+
+  assertEquals(ensureCalls, [null, "devx-chat-1"]); // created once, reused on turn 2
+  assertEquals(postedRoles, ["user", "assistant", "user", "assistant"]);
+  assertEquals(sql.store.get("s1").devx_chat_id, "devx-chat-1");
+});
+
+Deno.test("askCore does not mirror a legacy-transport turn", async () => {
+  const sql = fakeSqlMerging();
+  let mintCalled = false;
+  const mirrorDeps: MirrorDeps = {
+    mintToken: () => {
+      mintCalled = true;
+      return Promise.resolve("tok");
+    },
+  };
+  const turn = stubTurn("ok", "chat-1"); // no `transport` field — legacy shape
+  await askCore(sql.fn, { sessionId: "s1", userId: "u1" }, { message: "go" }, turn.fn, mirrorDeps);
+  assertEquals(mintCalled, false);
+});
+
+Deno.test("askCore's turn result is intact even when eve mirroring fails outright (chat creation)", async () => {
+  const sql = fakeSqlMerging();
+  const mirrorDeps: MirrorDeps = { mintToken: () => Promise.reject(new Error("mint failed")) };
+  const out = await askCore(
+    sql.fn,
+    { sessionId: "s1", userId: "u1" },
+    { message: "go" },
+    stubEveTurnWithTransport({ replyText: "done" }),
+    mirrorDeps,
+  );
+  assertEquals(out.reply, "done");
+});
+
+Deno.test("askCore's turn result is intact even when eve mirroring's message POST fails", async () => {
+  const sql = fakeSqlMerging();
+  const mirrorDeps: MirrorDeps = {
+    mintToken: () => Promise.resolve("tok"),
+    ensureChat: () => Promise.resolve("devx-chat-1"),
+    fetch: (() => Promise.resolve(new Response("fail", { status: 500 }))) as typeof fetch,
+  };
+  const out = await askCore(
+    sql.fn,
+    { sessionId: "s1", userId: "u1" },
+    { message: "go" },
+    stubEveTurnWithTransport({ replyText: "done" }),
+    mirrorDeps,
+  );
+  assertEquals(out.reply, "done");
 });
 
 // --- Coder-voice contract: TEXT guard, not a behaviour guard -----------------

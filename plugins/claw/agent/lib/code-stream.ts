@@ -117,7 +117,10 @@ async function ensureCoderProvider(token: string): Promise<void> {
 // self-contained planner that sidelines those skills, producing a shallow one-shot
 // plan — so claw does NOT use it. Plan-vs-implement gating is enforced by the
 // facilitator (relay each step to the channel, wait for approval), not by mode.
-async function ensureChat(
+// Exported so chat-mirror.ts (the eve transport's devx-UI mirroring) can
+// reuse this exact chat-creation/mode-reassert logic instead of a second
+// path — behavior here is otherwise unchanged for the legacy transport.
+export async function ensureChat(
   token: string,
   appId: string | null,
   existingChatId: string | null,

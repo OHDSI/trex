@@ -6,6 +6,7 @@ import {
   appendDecision,
   readDecisions,
   renderDecisionLedger,
+  setDevxChatId,
   type Orchestration,
 } from "./state.ts";
 
@@ -30,7 +31,25 @@ Deno.test("readOrchestration maps a row", async () => {
   const f = fakeSql();
   f.setRows([{ session_id: "s1", code_session_id: "c1", event_cursor: 7 }]);
   const got = await readOrchestration(f.fn, "s1");
-  assertEquals(got, { sessionId: "s1", codeSessionId: "c1", eventCursor: 7, appId: null, decisions: [] });
+  assertEquals(got, { sessionId: "s1", codeSessionId: "c1", eventCursor: 7, appId: null, devxChatId: null, decisions: [] });
+});
+
+Deno.test("readOrchestration maps devx_chat_id when present", async () => {
+  const f = fakeSql();
+  f.setRows([{ session_id: "s1", code_session_id: "c1", event_cursor: 1, devx_chat_id: "devx-1" }]);
+  const got = await readOrchestration(f.fn, "s1");
+  assertEquals(got?.devxChatId, "devx-1");
+});
+
+Deno.test("setDevxChatId's ON CONFLICT branch touches only devx_chat_id and updated_at", async () => {
+  const f = fakeSql();
+  await setDevxChatId(f.fn, "s1", "devx-1");
+  assertEquals(f.calls[0].params, ["s1", "devx-1"]);
+  const updateBranch = f.calls[0].sql.slice(f.calls[0].sql.indexOf("DO UPDATE"));
+  assertStringIncludes(updateBranch, "devx_chat_id");
+  assertStringIncludes(updateBranch, "updated_at");
+  assertEquals(updateBranch.includes("code_session_id"), false);
+  assertEquals(updateBranch.includes("app_id"), false);
 });
 
 // readOrchestration carries the ledger too, so claw's own instructions

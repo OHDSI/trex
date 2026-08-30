@@ -20,6 +20,7 @@ import { tokioClientFromGlobal } from "../lib/tokio.ts";
 import { chooseCoderTransport } from "../lib/code-route.ts";
 import { parkedReply, postApprovalGates } from "../lib/coder-approval.ts";
 import { readOrchestration, upsertOrchestration, readDecisions, renderDecisionLedger, type QueryFn } from "../lib/state.ts";
+import { mirrorEveTurn, type MirrorDeps } from "../lib/chat-mirror.ts";
 import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
 import { postChannelMessage } from "../lib/discord-rest.ts";
 import { parseTrailer, type HandoffTrailer } from "../lib/handoff-trailer.ts";
@@ -34,6 +35,11 @@ export interface CodeTurnOutcome {
   nextCursor?: number;
   reason?: TurnEnd;
   pending?: PendingApproval[];
+  // Set only by routeCodeTurn's real branches (absent from existing test
+  // stubs by design). Eve turns need mirroring into devx.chats/devx.messages
+  // for UI visibility (chat-mirror.ts); the legacy transport already writes
+  // those server-side and must never be mirrored a second time.
+  transport?: "legacy" | "eve";
 }
 
 interface Input {
@@ -100,7 +106,7 @@ export async function routeCodeTurn(
     console.error("claw: coder provider fetch failed, defaulting to legacy transport:", e);
     transport = "legacy";
   }
-  if (transport === "legacy") return await runLegacy(args);
+  if (transport === "legacy") return { ...(await runLegacy(args)), transport: "legacy" };
 
   // devx's buildUserMessage (agent.ts:583) materializes attachments only when
   // userId AND appId AND attachments all hold — with no appId they vanish
@@ -129,6 +135,7 @@ export async function routeCodeTurn(
     nextCursor: result.nextCursor,
     reason: result.reason,
     pending: result.pending,
+    transport: "eve",
   };
 }
 
@@ -140,6 +147,9 @@ export async function askCore(
   // be exercised without a live coder. Omitted (production) routes for real
   // via routeCodeTurn, chosen by the account's provider.
   runTurn?: (args: CodeTurnArgs) => Promise<CodeTurnOutcome>,
+  // Injected for testability, same as runTurn — production omits it and
+  // chat-mirror.ts's real mintToken/ensureChat/fetch are used.
+  mirrorDeps?: MirrorDeps,
 ): Promise<{ reply: string; trailer: HandoffTrailer | null }> {
   const prior = await readOrchestration(sql, ctx.sessionId);
   // codeSessionId now holds the devx chat id; the stored app wins once the chat
@@ -187,6 +197,20 @@ export async function askCore(
     eventCursor: outcome.nextCursor ?? 0,
     appId,
   });
+  // Eve turns never touch devx.chats/devx.messages themselves (see
+  // chat-mirror.ts) — mirror this turn so the devx UI shows it, same as the
+  // legacy transport already does server-side. Never for legacy: that would
+  // double-write what /stream already persisted.
+  if (outcome.transport === "eve") {
+    await mirrorEveTurn(sql, {
+      sessionId: ctx.sessionId,
+      userId: ctx.userId,
+      appId,
+      existingDevxChatId: prior?.devxChatId ?? null,
+      userMessage: message,
+      replyText: outcome.replyText,
+    }, mirrorDeps);
+  }
   // Parked on a human: the coder's turn is still open, so the channel gets the
   // gate and claw gets the requestIds — NOT a reply to relay. Sending the coder
   // another message here would start a second turn on top of the parked one.
