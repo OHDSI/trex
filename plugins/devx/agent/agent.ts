@@ -26,7 +26,7 @@ import { DEFERRED_TOOLS } from "./lib/deferred_tools.ts";
 // Real runtime import (not type-only), same posture as dynamic-tools.ts's
 // core/server/agents/connections/mcp.ts import above it.
 import { capHookOutput } from "../../../core/server/agents/service/context/hook-output.ts";
-import { acceptDeclaredWorkspace, loadSessionScope, peekSessionScope } from "./lib/session_scope.ts";
+import { acceptDeclaredWorkspace, loadSessionScope, peekSessionScope, peekSessionScopeForCtx } from "./lib/session_scope.ts";
 
 // Port of functions/tools/registry.ts's buildToolSet PLAN_MODE_TOOLS
 // (registry.ts:197-205) — legacy names map 1:1 to the eve wrapper names
@@ -336,9 +336,13 @@ export function readMode(metadata: unknown): "ask" | "plan" | "build" | undefine
 // owns that decision.
 function filterTools(name: string, def: ToolDef, ctx: HookCtx): boolean {
   // The session-creation-time allowlist (V14), never ctx.metadata. This hook is
-  // synchronous, so it reads the snapshot buildInstructions primed; a cold one
-  // fails the turn rather than run a restricted session unrestricted.
-  const scope = peekSessionScope(ctx.sessionId);
+  // synchronous, so it reads the snapshot buildInstructions primed on THIS ctx
+  // object; a cold one fails the turn rather than run a restricted session
+  // unrestricted. Neither this allowlist nor the declared workspace reaches a
+  // CHILD session: a child turn carries the parent's metadata but its own
+  // sessionId, so its scope row is empty. Contained only because `agent`/
+  // `skill` are themselves dropped unless allowlisted.
+  const scope = peekSessionScopeForCtx(ctx, ctx.sessionId);
   if (!scope) {
     throw new Error(`devx filterTools: session ${ctx.sessionId} has no loaded scope — buildInstructions must prime it before the tool set is built`);
   }
@@ -440,7 +444,7 @@ export async function buildInstructions(base: string, ctx: HookCtx): Promise<str
   // Primes the snapshot the SYNCHRONOUS filterTools reads (lib/session_scope.ts).
   // This hook is core's last async point before it builds the tool set, on both
   // the session-runner path (runner.ts) and /chat (handler.ts).
-  await loadSessionScope(ctx.sessionId, ctx.sql);
+  await loadSessionScope(ctx.sessionId, ctx.sql, ctx);
 
   // User-level rules from devx.settings — same source functions/agent.ts:173
   // reads before the project-rules override. Falsy (null/empty) counts as
@@ -517,7 +521,7 @@ export async function resolveWorkspace(
   // A workspace declared at session creation (V14) wins — how an autonomous
   // run's isolated worktree survives, since appId alone derives the main app
   // tree. A rejected or unloaded one falls back instead of re-pointing consents.
-  const declared = acceptDeclaredWorkspace(peekSessionScope(info.sessionId)?.workspace, info.userId, appId);
+  const declared = acceptDeclaredWorkspace(peekSessionScope(info.sessionId)?.workspace, info.userId);
   if (declared) return declared;
   return appId ? await ensureAppWorkspace(info.userId, appId) : await ensureWorkspace(info.userId);
 }

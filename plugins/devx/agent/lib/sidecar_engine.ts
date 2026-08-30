@@ -12,6 +12,7 @@
 //      reason.
 import { ensureAppWorkspace, ensureWorkspace } from "../../functions/tools/workspace.ts";
 import { readMetadata } from "./context.ts";
+import { acceptDeclaredWorkspace, loadSessionScope } from "./session_scope.ts";
 // Type-only, erased at runtime — same posture as agent.ts's ToolDef import
 // (these types are not part of eve's public re-export surface).
 import type { AgentEngine, EngineTurn, HookCtx } from "../../../../core/server/agents/eve-shim/types.ts";
@@ -56,6 +57,7 @@ export type SidecarStream = (args: {
   userId: string;
   appId?: string;
   chatMode: string;
+  workspacePathOverride?: string;
   settings: Record<string, unknown>;
   history: Array<{ role: string; content: string }>;
   send: (e: SidecarEvent) => void;
@@ -191,16 +193,23 @@ async function* runSidecarTurn(
   if (!userId) throw new Error("devx sidecar engine requires an authenticated user");
   const { appId } = readMetadata(ctx.metadata);
   const store = createStore(ctx.sql);
-  const [{ plugin, agentName }, settings, unattended, channelBound, approverReachable] = await Promise.all([
+  const [{ plugin, agentName }, settings, unattended, channelBound, approverReachable, scope] = await Promise.all([
     gateContext(ctx.sql, turn.sessionId),
     readSettings(ctx.sql, userId),
     store.isUnattended(turn.sessionId),
     store.isChannelBound(turn.sessionId),
     store.isApproverReachable(turn.sessionId),
+    // Core's delegated path (handler.ts's runDelegatedTurn) calls NEITHER
+    // resolveInstructions nor buildSdkTools, so agent.ts's filterTools /
+    // resolveWorkspace never fire here — this engine reads the scope itself.
+    loadSessionScope(turn.sessionId, ctx.sql),
   ]);
   // The same workspace authoredTool keys a stored consent on (agent.ts's
-  // resolveWorkspace) — a grant for one app must not cover another.
-  const workspace = appId ? await ensureAppWorkspace(userId, appId) : await ensureWorkspace(userId);
+  // resolveWorkspace) — a grant for one app must not cover another. A session
+  // that declared an isolated run worktree gets that instead, through the SAME
+  // validator agent.ts uses; a rejected value falls back to the derived tree.
+  const workspace = acceptDeclaredWorkspace(scope.workspace, userId) ??
+    (appId ? await ensureAppWorkspace(userId, appId) : await ensureWorkspace(userId));
   const escalate = resolveEscalateFor(authoredEscalate, parseEscalateList(ctx.env("AGENTS_ESCALATE_TOOLS")), agentName);
   // handler.ts:978 does exactly this before handing `unattended` to the tool
   // set: a channel-bound session never writes the unattended column
@@ -216,6 +225,19 @@ async function* runSidecarTurn(
   ): Promise<PermissionDecision> => {
     // The SDK's argument names are not devx's, and deriveScopeKey reads
     // devx's — an unmapped shape yields an empty action half, which gates.
+    // The session's declared allowlist (V14), checked before the gate so no
+    // stored consent can override it. PARTIAL, and deliberately not faked:
+    // streamClaudeCodeChat takes no allowedTools and the sidecar's query()
+    // sets none, so canUseTool -> here is this path's ONLY hook. It covers
+    // every call the SDK routes to the `ask` outcome — Bash/Write/Edit/
+    // WebFetch/Task, i.e. all the mutating ones, since permission_policy.js's
+    // managed tier makes settings-file allow rules and PreToolUse hooks
+    // unreachable — but NOT the read-only built-ins the SDK auto-approves in
+    // `default` permission mode. Closing that gap needs allowedTools/
+    // disallowedTools wired into fn-claude-code/server.js's query() opts.
+    if (scope.allowedTools && !scope.allowedTools.includes(req.toolName)) {
+      return { behavior: "deny", message: `${req.toolName} is not in this session's tool allowlist` };
+    }
     const mapped = toDevxToolInput(req.toolName, req.input);
     const refusal = await runApprovalGate({
       toolName: mapped.tool,
@@ -252,6 +274,9 @@ async function* runSidecarTurn(
     userId,
     appId,
     chatMode: "agent",
+    // Without this the sidecar re-derives appId ? app tree : user tree, and an
+    // autonomous run mutates the main app tree instead of its own worktree.
+    workspacePathOverride: workspace,
     // auto_approve is deliberately NOT forwarded: eve's gate owns that
     // decision now (resolveApproval's unattended/escalate tiers), and a
     // forwarded `true` would short-circuit the gate before it ever ran.

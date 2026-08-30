@@ -4,7 +4,7 @@ import type { HookCtx } from "../../../../core/server/agents/eve-shim/types.ts";
 import { createSdkTranslator } from "../../../../core/server/agents/service/engine/events.ts";
 import { subscribe } from "../../../../core/server/agents/service/stream.ts";
 import { coarseScopeKey, deriveScopeKey } from "../../../../core/server/agents/service/scope-key.ts";
-import { getWorkspacePath } from "../../functions/tools/workspace.ts";
+import { ensureAppWorkspace, getRunWorktreePath, getWorkspacePath } from "../../functions/tools/workspace.ts";
 import type { AgentEvent } from "../../../../core/server/agents/service/events.ts";
 
 // The engine's contract is "produce what core's translator reads", so the
@@ -325,4 +325,109 @@ Deno.test("sidecar engine: an unattended session with a reachable approver is st
   );
   assertEquals(decision, { behavior: "deny", message: "denied by user" });
   assertEquals(gated, 1);
+});
+
+// ---------------------------------------------------------------------------
+// The session's declared scope (V14) on THIS path. core's runDelegatedTurn
+// calls neither resolveInstructions nor buildSdkTools, so agent.ts's
+// filterTools / resolveWorkspace never fire for a claude-code turn — without
+// the engine reading the scope itself both capabilities are inert here.
+// ---------------------------------------------------------------------------
+
+/** fakeSql, plus the V14 scope row (the only SELECT naming tool_allowlist). */
+function scopedSql(scopeRow: Record<string, unknown>, over: Record<string, unknown[]> = {}): HookCtx["sql"] {
+  const base = fakeSql(over);
+  return (sql: string, params: unknown[] = []) =>
+    sql.includes("tool_allowlist") ? Promise.resolve({ rows: [scopeRow] }) : base(sql, params);
+}
+
+async function runScoped(
+  session: string,
+  sql: HookCtx["sql"],
+  opts: {
+    metadata?: unknown;
+    permission?: { id: string; toolName: string; input: Record<string, unknown> };
+  } = {},
+) {
+  const decisions: PermissionDecision[] = [];
+  let workspacePathOverride: string | undefined;
+  const stream: SidecarStream = async (args) => {
+    workspacePathOverride = args.workspacePathOverride;
+    if (opts.permission && args.resolvePermission) decisions.push(await args.resolvePermission(opts.permission));
+    return { content: "", toolCalls: [] };
+  };
+  const ctx: HookCtx = { ...hookCtx(sql), sessionId: session, metadata: opts.metadata ?? {} };
+  const engine = createSidecarEngine(ctx, { stream, approvalPollMs: 1, approvalTimeoutMs: 150 });
+  for await (const _ of engine.run({ sessionId: session, turnId: TURN, prompt: "do it" })) { /* drains */ }
+  return { decisions, workspacePathOverride };
+}
+
+Deno.test("sidecar engine: a delegated turn enforces the session's declared tool allowlist", async () => {
+  const session = "s-eng-allowlist";
+  const seen: AgentEvent[] = [];
+  const unsubscribe = subscribe(session, (e) => seen.push(e));
+  try {
+    const { decisions } = await runScoped(
+      session,
+      scopedSql({ tool_allowlist: ["Read"], tool_allowlist_declared: true, workspace_path: "" }, { decision: [{ decision: "approve" }] }),
+      { permission: { id: "p-al", toolName: "Bash", input: { command: "rm -rf /tmp/x" } } },
+    );
+    assertEquals(decisions, [{ behavior: "deny", message: "Bash is not in this session's tool allowlist" }]);
+    // Refused by the allowlist, never turned into an approval a human could grant.
+    assertEquals(seen.filter((e) => e.type === "input.requested").length, 0);
+  } finally {
+    unsubscribe();
+  }
+});
+
+Deno.test("sidecar engine: an allowlisted tool still reaches eve's approval gate", async () => {
+  const { decisions } = await runScoped(
+    "s-eng-allowlist-hit",
+    scopedSql({ tool_allowlist: ["Bash"], tool_allowlist_declared: true, workspace_path: "" }, { decision: [{ decision: "approve" }] }),
+    { permission: { id: "p-al2", toolName: "Bash", input: { command: "rm -rf /tmp/x" } } },
+  );
+  assertEquals(decisions, [{ behavior: "allow", updatedInput: { command: "rm -rf /tmp/x" } }]);
+});
+
+// The inverted-default trap: an EMPTY allowlist declares "no tools", not "all".
+Deno.test("sidecar engine: a declared EMPTY allowlist denies every gated tool", async () => {
+  const { decisions } = await runScoped(
+    "s-eng-allowlist-empty",
+    scopedSql({ tool_allowlist: [], tool_allowlist_declared: true, workspace_path: "" }, { decision: [{ decision: "approve" }] }),
+    { permission: { id: "p-al3", toolName: "Read", input: { file_path: "/tmp/x" } } },
+  );
+  assertEquals(decisions, [{ behavior: "deny", message: "Read is not in this session's tool allowlist" }]);
+});
+
+Deno.test("sidecar engine: an undeclared allowlist leaves every tool available, exactly as today", async () => {
+  const { decisions } = await runScoped(
+    "s-eng-allowlist-none",
+    scopedSql({ workspace_path: "" }, { decision: [{ decision: "approve" }] }),
+    { permission: { id: "p-al4", toolName: "Bash", input: { command: "rm -rf /tmp/x" } } },
+  );
+  assertEquals(decisions, [{ behavior: "allow", updatedInput: { command: "rm -rf /tmp/x" } }]);
+});
+
+Deno.test("sidecar engine: a delegated turn runs in the declared worktree, not the app tree", async () => {
+  const declared = getRunWorktreePath("u-1", "app-eng", "run-9");
+  const { workspacePathOverride } = await runScoped("s-eng-ws", scopedSql({ workspace_path: declared }), {
+    metadata: { appId: "app-eng" },
+  });
+  assertEquals(workspacePathOverride, declared);
+});
+
+// Same acceptance rule as agent.ts's: independent of the turn's metadata.appId.
+Deno.test("sidecar engine: the declared worktree survives a turn whose metadata omits or changes appId", async () => {
+  const declared = getRunWorktreePath("u-1", "app-eng", "run-9");
+  for (const metadata of [{}, { appId: "app-other" }, undefined]) {
+    const { workspacePathOverride } = await runScoped("s-eng-ws-drift", scopedSql({ workspace_path: declared }), { metadata });
+    assertEquals(workspacePathOverride, declared);
+  }
+});
+
+Deno.test("sidecar engine: a rejected declared workspace falls back to the derived tree", async () => {
+  const { workspacePathOverride } = await runScoped("s-eng-ws-bad", scopedSql({ workspace_path: "/etc" }), {
+    metadata: { appId: "app-eng" },
+  });
+  assertEquals(workspacePathOverride, await ensureAppWorkspace("u-1", "app-eng"));
 });

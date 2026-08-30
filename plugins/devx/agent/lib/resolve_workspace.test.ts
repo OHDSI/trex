@@ -49,6 +49,18 @@ Deno.test("resolveWorkspace: a workspace declared at session creation wins over 
   assertEquals(await resolveWorkspace(info("u-rw-4", { appId: "a1" }, "s-rw-declared")), declared);
 });
 
+// Must-fix 2: the declaration is session-scoped, so a later turn that omits or
+// changes metadata.appId must not silently drop back to the derived tree.
+Deno.test("resolveWorkspace: the declared workspace holds whatever a turn's metadata says about appId", async () => {
+  const declared = getRunWorktreePath("u-rw-8", "a1", "run-7");
+  await loadSessionScope("s-rw-metadata-drift", scopeSql(declared));
+  for (const metadata of [{ appId: "a1" }, { appId: "a2" }, {}, undefined]) {
+    assertEquals(await resolveWorkspace(info("u-rw-8", metadata, "s-rw-metadata-drift")), declared);
+  }
+  // Still bound to the user the worktree was generated for.
+  assertEquals(await resolveWorkspace(info("u-rw-9", { appId: "a1" }, "s-rw-metadata-drift")), await ensureAppWorkspace("u-rw-9", "a1"));
+});
+
 Deno.test("resolveWorkspace: no declared workspace falls back to the appId-derived path", async () => {
   await loadSessionScope("s-rw-undeclared", scopeSql(""));
   assertEquals(

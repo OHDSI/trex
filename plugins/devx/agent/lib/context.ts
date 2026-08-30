@@ -162,7 +162,7 @@ export async function toDevxCtx(evectx: ToolContext & { sql: QueryFn }): Promise
   // Same session-declared workspace (V14), acceptance check and snapshot as
   // agent.ts's resolveWorkspace: that one keys the consents, this one decides
   // where the tools write, and a run worktree is isolated only if both agree.
-  const declared = acceptDeclaredWorkspace(peekSessionScope(evectx.sessionId)?.workspace, userId, appId);
+  const declared = acceptDeclaredWorkspace(peekSessionScope(evectx.sessionId)?.workspace, userId);
   const workspacePath = declared ?? (appId ? await ensureAppWorkspace(userId, appId) : await ensureWorkspace(userId));
   return {
     chatId,
