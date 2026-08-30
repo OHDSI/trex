@@ -214,16 +214,21 @@ export default defineTool({
     "(e.g. 'run your brainstorming skill and present options, do not write code, stop'; " +
     "then, after the channel approves, 'run writing-plans for option B, stop'; then, after " +
     "approval, 'implement the approved plan with subagent-driven-development'). Relay each " +
-    "reply to the channel and wait for the humans before the next step. Also use this to " +
-    "relay the participants' answers. Pass `app` (a devx app id from listApps) on the FIRST " +
-    "call when the task targets an existing app — it fixes the coder's workspace and project " +
-    "rules for the whole task and cannot be changed later.",
+    "reply to the channel and wait for the humans before the next step. Every message you " +
+    "send is YOUR OWN summary, in your own words, of what's needed — including a clarified " +
+    "answer, never a copy of a channel message. To the coder you are one person: never " +
+    "mention a team, channel, thread, participant, or Discord. Pass `app` (a devx app id " +
+    "from listApps) on the FIRST call when the task targets an existing app — it fixes the " +
+    "coder's workspace and project rules for the whole task and cannot be changed later.",
   inputSchema: {
     type: "object",
     properties: {
       message: {
         type: "string",
-        description: "The clear single-step instruction, answer, or message for the coding agent.",
+        description:
+          "The clear single-step instruction, answer, or message for the coding agent — always " +
+          "YOUR OWN summary in the first person singular, never a copied channel message, and " +
+          "never naming a team, channel, thread, participant, or Discord.",
       },
       app: {
         type: "string",
