@@ -595,3 +595,34 @@ Deno.test("attachCodeStream issues the stream GET before collect() is ever calle
   assertEquals(res.replyText, "done");
   assertEquals(res.nextCursor, 6);
 });
+
+// Claw WATCHES the coder session and relays its gates to the channel
+// (postApprovalGates posts them, resolveCoderApproval carries the answer
+// back), but the session is neither channel-bound nor unattended. Without this
+// flag eve's hard escalate tier reads it as unapprovable and the ship step's
+// `git push` is denied outright instead of being asked — see
+// core/server/agents/service/approval-policy.ts.
+Deno.test("runCodeTurn declares a reachable approver on create, and only on create", async () => {
+  const create = new Response(JSON.stringify({ sessionId: "code-1" }), {
+    headers: { "content-type": "application/json" },
+  });
+  const stream1 = ndjson(
+    { type: "message.completed", data: { text: "ok" } },
+    { type: "session.waiting", data: {} },
+  );
+  const { client, reqs } = fakeClient([create, stream1]);
+  await runCodeTurn(client, { codeSessionId: null, message: "ship it", startCursor: 0 });
+  assertEquals(JSON.parse(reqs[0].init.body).approverReachable, true);
+
+  // The continue POST must not carry it: handler.ts reads it once, at
+  // createSession, and a per-turn flag that looks like it widens a gate
+  // invites someone to start honouring it.
+  const cont = new Response(JSON.stringify({ accepted: true }), { status: 202 });
+  const stream2 = ndjson(
+    { type: "message.completed", data: { text: "ok" } },
+    { type: "session.waiting", data: {} },
+  );
+  const { client: client2, reqs: reqs2 } = fakeClient([cont, stream2]);
+  await runCodeTurn(client2, { codeSessionId: "code-1", message: "again", startCursor: 2 });
+  assertEquals(JSON.parse(reqs2[0].init.body).approverReachable, undefined);
+});

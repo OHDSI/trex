@@ -168,15 +168,24 @@ export async function runCodeTurn(
     ...(args.appId ? { appId: args.appId } : {}),
     ...(args.attachments?.length ? { attachments: args.attachments } : {}),
   };
-  const body = JSON.stringify({
+  const turnBody = {
     message: args.message,
     ...(Object.keys(metadata).length ? { metadata } : {}),
-  });
+  };
+  const body = JSON.stringify(turnBody);
+  // Session-create only (handler.ts reads it once, at createSession, and never
+  // from per-turn metadata): claw WATCHES this coder session and relays its
+  // gates to the channel — postApprovalGates posts them, resolveCoderApproval
+  // carries the answer back — so an approver really is reachable even though
+  // the session is neither channel-bound nor unattended. Without this the hard
+  // escalate tier reads it as unapprovable and the ship step's `git push` is
+  // denied outright instead of asked. See approval-policy.ts.
+  const createBody = JSON.stringify({ ...turnBody, approverReachable: true });
 
   // 1) Start (create) or continue the turn.
   let codeSessionId = args.codeSessionId;
   if (!codeSessionId) {
-    const res = await client.req(`${CODE_BASE}/eve/v1/session`, { method: "POST", headers: headers(args.userId), body });
+    const res = await client.req(`${CODE_BASE}/eve/v1/session`, { method: "POST", headers: headers(args.userId), body: createBody });
     if (!res.ok) throw new Error(`code create failed: ${res.status}`);
     const j = await res.json();
     codeSessionId = j.sessionId as string;

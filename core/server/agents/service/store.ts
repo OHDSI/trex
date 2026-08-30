@@ -94,10 +94,17 @@ export const RUNNING_TURN_INDEX = "idx_agents_turns_one_running_per_session";
 
 export function createStore(query: QueryFn) {
   return {
-    async createSession(plugin: string, agent: string, createdBy?: string, unattended?: boolean): Promise<string> {
+    async createSession(
+      plugin: string,
+      agent: string,
+      createdBy?: string,
+      unattended?: boolean,
+      approverReachable?: boolean,
+    ): Promise<string> {
       const r = await query(
-        `INSERT INTO agents.sessions (plugin, agent, created_by, unattended) VALUES ($1, $2, $3, $4) RETURNING id`,
-        [plugin, agent, createdBy ?? null, unattended === true],
+        `INSERT INTO agents.sessions (plugin, agent, created_by, unattended, approver_reachable)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        [plugin, agent, createdBy ?? null, unattended === true, approverReachable === true],
       );
       return r.rows[0].id;
     },
@@ -635,6 +642,16 @@ export function createStore(query: QueryFn) {
     async isUnattended(sessionId: string): Promise<boolean> {
       const r = await query(`SELECT unattended FROM agents.sessions WHERE id = $1`, [sessionId]);
       return r.rows[0]?.unattended === true;
+    },
+
+    // Whether SOMEONE can be shown this session's gates and click them (see
+    // approval-policy.ts's ApprovalPolicyInput.approverReachable). Like
+    // `unattended` it is set at session creation only, never from per-turn
+    // request metadata, and a missing session reads false — claiming an
+    // approver mid-session must never widen a gate.
+    async isApproverReachable(sessionId: string): Promise<boolean> {
+      const r = await query(`SELECT approver_reachable FROM agents.sessions WHERE id = $1`, [sessionId]);
+      return r.rows[0]?.approver_reachable === true;
     },
 
     async isChannelBound(sessionId: string): Promise<boolean> {

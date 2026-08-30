@@ -57,6 +57,33 @@ export interface ModelSpec {
   baseURL?: string;
 }
 
+// One message of an engine's stream. Only `type` is declared: this file stays
+// dependency-free, and service/engine/events.ts owns the SDK-shaped reading of
+// every other field (a wider shape here would also stop that translator, whose
+// fields are typed, from accepting these messages).
+export interface EngineMessage {
+  type: string;
+}
+
+// The turn handed over to an external engine. `prompt` is already through
+// buildUserMessage; `signal` cancels the engine's run the way abortSignal
+// cancels streamText.
+export interface EngineTurn {
+  sessionId: string;
+  turnId: string;
+  prompt: string;
+  metadata?: unknown;
+  signal?: AbortSignal;
+}
+
+// An external agentic loop that executes a whole turn — it runs its OWN tools
+// and streams back what it did, so it cannot be driven as a ModelSpec. Today:
+// the claude-code sidecar (plugins/devx/fn-claude-code).
+export interface AgentEngine {
+  name: string;
+  run: (turn: EngineTurn) => AsyncIterable<EngineMessage>;
+}
+
 export interface AgentConfig {
   model?: string; // eve/AI-Gateway format: "provider/model-id"
   maxSteps?: number;
@@ -95,6 +122,12 @@ export interface AgentConfig {
   // env-configured credentials (wrong-account risk) — see model.ts's
   // resolveModelForTurn and toolset.ts's resolveInstructions.
   resolveModel?: (ctx: HookCtx) => Promise<string | ModelSpec>;
+  // Resolving an engine hands THIS turn to it (service/engine/delegate.ts)
+  // instead of running runner.ts's model loop; resolving undefined runs the
+  // model loop as usual, which is what makes this a per-account switch.
+  // resolveModel is not consulted for a delegated turn — the engine holds its
+  // own credentials.
+  resolveEngine?: (ctx: HookCtx) => Promise<AgentEngine | undefined>;
   buildInstructions?: (base: string, ctx: HookCtx) => Promise<string>;
   // Applied to the MERGED tool set (authored + dynamic-tools.ts provider
   // output + built-in `skill`/`agent`) by toolset.ts's buildSdkTools —

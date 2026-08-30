@@ -1,5 +1,6 @@
 import { assert, assertEquals, assertNotEquals } from "jsr:@std/assert";
-import { bashExecutable, deriveScopeKey, normalizePath } from "./scope-key.ts";
+import { bashExecutable, coarseScopeKey, deriveScopeKey, normalizePath } from "./scope-key.ts";
+import { matchEscalate, parseEscalateList } from "./approval-policy.ts";
 
 Deno.test("bashExecutable strips the directory and lowercases", () => {
   assertEquals(bashExecutable("/usr/bin/npm test"), "npm");
@@ -147,4 +148,75 @@ Deno.test("deriveScopeKey's unresolved-workspace sentinel contains no control by
 Deno.test("the workspace component never corrupts an escalate-floor token", () => {
   const key = deriveScopeKey("Bash", { command: "sudo id" }, "/workspace/app-a");
   assert(key.split("+").includes("sudo"), key);
+});
+
+// A multiplexer's subcommand is part of the action, not decoration: the
+// escalate floor has to stop `git push` while leaving the read-only git
+// commands an unattended coder runs constantly completely alone. Nothing else
+// in the key can express that — matchEscalate compares whole `+` parts.
+Deno.test("bash scope key: git carries its subcommand so push is distinguishable from status", () => {
+  assertEquals(deriveScopeKey("Bash", { command: "git push --force origin main" }, WS), `${WS}+git:push`);
+  assertEquals(deriveScopeKey("Bash", { command: "git status" }, WS), `${WS}+git:status`);
+  assertEquals(deriveScopeKey("Bash", { command: "git log --oneline -5" }, WS), `${WS}+git:log`);
+  // A value-taking global flag's argument is not the subcommand.
+  assertEquals(deriveScopeKey("Bash", { command: "git -C /repo push" }, WS), `${WS}+git:push`);
+  assertEquals(deriveScopeKey("Bash", { command: "git -c user.name=x commit -m hi" }, WS), `${WS}+git:commit`);
+  // `--flag=value` consumes nothing extra.
+  assertEquals(deriveScopeKey("Bash", { command: "git --git-dir=/r/.git push" }, WS), `${WS}+git:push`);
+  // Bare `git` has no subcommand to carry.
+  assertEquals(deriveScopeKey("Bash", { command: "git" }, WS), `${WS}+git`);
+});
+
+Deno.test("bash scope key: the subcommand survives chaining and one level of shell wrapping", () => {
+  assertEquals(deriveScopeKey("Bash", { command: "cd /app && git push" }, WS), `${WS}+cd+git:push`);
+  assertEquals(deriveScopeKey("Bash", { command: `bash -lc "git push origin main"` }, WS), `${WS}+git:push`);
+});
+
+Deno.test("bash scope key: only listed multiplexers carry a subcommand", () => {
+  // npm/cargo/docker are NOT in SUBCOMMAND_TOOLS: adding one changes every
+  // stored consent key for it, so it must be a deliberate edit, not a default.
+  assertEquals(deriveScopeKey("Bash", { command: "cargo build --release" }, WS), `${WS}+cargo`);
+  assertEquals(deriveScopeKey("Bash", { command: "npm test" }, WS), `${WS}+npm`);
+});
+
+Deno.test("escalate floor: the shell equivalents of the hard devx tools are hard too", () => {
+  const list = parseEscalateList(undefined);
+  const hard = (command: string) =>
+    matchEscalate(list, "Bash", deriveScopeKey("Bash", { command }, WS));
+  // An external engine only ever presents Bash, so without these the hard tier
+  // (!GitPush/!ExecuteSQL/!CronCreate/!CronDelete) would exist only on the
+  // model loop and an unattended sidecar turn could force-push.
+  assertEquals(hard("git push --force origin main"), "hard");
+  assertEquals(hard("psql -c 'drop table users'"), "hard");
+  assertEquals(hard("crontab -r"), "hard");
+  // ...and the read-only/build commands claw depends on stay unmatched.
+  assertEquals(hard("git status"), null);
+  assertEquals(hard("git diff HEAD~1"), null);
+  assertEquals(hard("cargo build"), null);
+  assertEquals(hard("npm test"), null);
+});
+
+// coarseScopeKey exists so approval-gate.ts can rescue a `never` recorded
+// before the subcommand existed. It must never coarsen anything else: a
+// PATH_TOOLS action is a filesystem path, and `:` is legal in one.
+Deno.test("coarseScopeKey reproduces the pre-subcommand key, and only for listed multiplexers", () => {
+  assertEquals(coarseScopeKey("/w+git:push"), "/w+git");
+  assertEquals(coarseScopeKey("/w+cd+git:push"), "/w+cd+git");
+  // Nothing to coarsen — the caller skips the second query entirely.
+  assertEquals(coarseScopeKey("/w+npm"), undefined);
+  assertEquals(coarseScopeKey("/w+"), undefined);
+  // `docker:run` is not a listed multiplexer, so the `:` is somebody's data.
+  assertEquals(coarseScopeKey("/w+docker:run"), undefined);
+  // A path with a colon in it, and a workspace with one: neither is an action.
+  assertEquals(coarseScopeKey("/w+/src/a:b.txt"), undefined);
+  assertEquals(coarseScopeKey("/w:1+npm"), undefined);
+});
+
+Deno.test("escalate floor: `git subtree push` is a push and does not slip through on its subcommand", () => {
+  const list = parseEscalateList(undefined);
+  const tier = (command: string) => matchEscalate(list, "Bash", deriveScopeKey("Bash", { command }, WS));
+  assertEquals(deriveScopeKey("Bash", { command: "git subtree push --prefix=d origin main" }, WS), `${WS}+git:subtree`);
+  assertEquals(tier("git subtree push --prefix=d origin main"), "hard");
+  // The deliberate over-gate: the other subtree verbs escalate too.
+  assertEquals(tier("git subtree add --prefix=d https://x main"), "hard");
 });

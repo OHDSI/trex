@@ -22,11 +22,33 @@ export interface ApprovalPolicyInput {
   consent: "always" | "never" | null;
   unattended: boolean;
   channelBound: boolean;
+  // Is there SOMEONE who can be shown a gate and click it — not "does a
+  // channel exist". channelBound used to stand in for this and was wrong for
+  // claw, whose coder session is a plain native session that claw watches and
+  // relays gates for; the hard tier denied it as unapprovable. Defaults to
+  // false everywhere (absent === no approver), so a caller that has not
+  // thought about it keeps the safe answer, and a caller that claims an
+  // approver it does not have gets a turn that parks and denies on timeout.
+  approverReachable?: boolean;
   escalate: EscalateList;
 }
 
+// The `!Tool` entries name DEVX TOOLS. An external engine (the claude-code
+// sidecar) has no such tools — it does the same things through `Bash` — so
+// every hard devx entry that has a shell equivalent needs a Bash scope beside
+// it, or the floor exists only on the model loop: `git:push` for GitPush
+// (scope-key.ts's SUBCOMMAND_TOOLS is what makes that distinguishable from
+// `git status`), `psql` for ExecuteSQL, `crontab` for CronCreate/CronDelete.
+// RestartApp has no shell equivalent — it drives the process manager through
+// devx's own duckdb functions, which a sidecar shell cannot reach.
+// `git:subtree` is here because `git subtree push` IS a push and keys on the
+// subcommand `subtree`, not on `push`. Nesting a second subcommand level to
+// separate it from `subtree add/split/pull` would buy precision on a command an
+// unattended coder essentially never runs, so the whole subcommand is escalated
+// and the over-gate on the other three is deliberate.
 export const DEFAULT_ESCALATE =
-  "!GitPush,!ExecuteSQL,!CronCreate,!CronDelete,!RestartApp,!Bash:sudo|dd|ssh|scp," +
+  "!GitPush,!ExecuteSQL,!CronCreate,!CronDelete,!RestartApp," +
+  "!Bash:sudo|dd|ssh|scp|psql|crontab|git:push|git:subtree," +
   "DeleteFile,Bash:rm|curl|wget|chmod|chown";
 
 // Parsed once. toolset.ts falls back to this when a caller passes no list;
@@ -123,7 +145,10 @@ export function resolveApproval(input: ApprovalPolicyInput): ApprovalVerdict {
   // Both tiers sit above the sticky grant, so neither can be bought off with
   // one "always" click under a shared bot identity.
   if (tier === "hard") {
-    return input.channelBound ? { outcome: "gate" } : { outcome: "deny", reason: "no-approver" };
+    // channelBound implies it: a channel session has an approver by
+    // definition, and no caller should have to pass both.
+    const approver = input.approverReachable === true || input.channelBound;
+    return approver ? { outcome: "gate" } : { outcome: "deny", reason: "no-approver" };
   }
   if (tier === "soft") {
     // Yields to a bot so a coder can run rm/curl, still gates a human.

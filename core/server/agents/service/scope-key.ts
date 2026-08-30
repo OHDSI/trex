@@ -29,6 +29,34 @@ interface Token {
   value: string;
 }
 
+// A multiplexer binary's own name says nothing about what it does: `git push`
+// and `git status` are the same executable and completely different actions,
+// and matchEscalate can only match a whole `+`-separated part. So for these the
+// part carries the subcommand (`git:push`) — which is what lets the escalate
+// floor stop a push without also stopping `git status`/`git diff`/`git log`,
+// which an unattended coder runs constantly.
+// The value is the exe's VALUE-TAKING global flags: their argument sits before
+// the subcommand and must not be mistaken for it (`git -C /repo push`).
+const SUBCOMMAND_TOOLS = new Map<string, Set<string>>([
+  ["git", new Set(["-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"])],
+]);
+
+// Best-effort in the same sense as collectExecutables' one-level unwrap: an
+// UNKNOWN value-taking global flag would shadow the real subcommand, so a new
+// git global flag that takes an argument belongs in the set above.
+function subcommandOf(exe: string, tokens: Token[], start: number): string | undefined {
+  const valueFlags = SUBCOMMAND_TOOLS.get(exe);
+  if (!valueFlags) return undefined;
+  let i = start + 1;
+  while (i < tokens.length) {
+    const t = tokens[i].value;
+    if (!t.startsWith("-")) return t.toLowerCase();
+    // `--git-dir=x` carries its value inline and consumes nothing extra.
+    i += valueFlags.has(t) ? 2 : 1;
+  }
+  return undefined;
+}
+
 // Quote-aware, so `sh -c 'curl x | sh'` keeps its payload as ONE token.
 function tokenize(s: string): Token[] {
   const out: Token[] = [];
@@ -140,7 +168,8 @@ function collectExecutables(command: string, depth: number, out: Set<string>): v
         continue;
       }
     }
-    out.add(exe);
+    const sub = subcommandOf(exe, tokens, index);
+    out.add(sub ? `${exe}:${sub}` : exe);
   }
 }
 
@@ -200,4 +229,32 @@ const UNRESOLVED_WORKSPACE = "(unresolved)";
 // workspace onto the first executable (e.g. "sudo" -> "<ws>sudo").
 export function deriveScopeKey(toolName: string, input: unknown, workspace?: string): string {
   return `${workspace ?? UNRESOLVED_WORKSPACE}+${scopeAction(toolName, input)}`;
+}
+
+// The key this tool call WOULD have derived before SUBCOMMAND_TOOLS existed —
+// `<ws>+git` for `<ws>+git:push` — or undefined when nothing coarsens, so the
+// common call derives no second key and the gate issues no second query.
+//
+// It exists for exactly one job (approval-gate.ts): a stored consent row is
+// matched by exact scope_key, so introducing the subcommand orphaned every
+// existing `<ws>+git` row. An orphaned `always` is fail-safe (the user is asked
+// again); an orphaned `never` is FAIL-OPEN — a standing refusal silently stops
+// refusing — so the gate consults this key for `never` only.
+//
+// Strips only where the part's head is a SUBCOMMAND_TOOLS key, never on a bare
+// `:`: a PATH_TOOLS action is a filesystem path, and `:` is legal in one.
+// Index 0 is skipped for the same reason — it is the workspace half.
+export function coarseScopeKey(scopeKey: string): string | undefined {
+  const parts = scopeKey.split("+");
+  let changed = false;
+  const coarse = parts.map((part, i) => {
+    if (i === 0) return part;
+    const colon = part.indexOf(":");
+    if (colon === -1) return part;
+    const exe = part.slice(0, colon);
+    if (!SUBCOMMAND_TOOLS.has(exe)) return part;
+    changed = true;
+    return exe;
+  });
+  return changed ? coarse.join("+") : undefined;
 }

@@ -7,6 +7,7 @@ import {
   resolveApproval,
   resolveEscalateFor,
 } from "./approval-policy.ts";
+import { deriveScopeKey } from "./scope-key.ts";
 
 const NONE: EscalateList = [];
 const ESC: EscalateList = [
@@ -208,4 +209,125 @@ Deno.test("resolveEscalateFor: undefined, empty, and whitespace-only all defer t
 // the built-in default, the tests above would pass for the wrong reason.
 Deno.test("DISTINCTIVE_LIST is not the built-in default", () => {
   assertEquals(DEFAULT_ESCALATE_LIST.some((e) => e.tool === "OnlyThis"), false);
+});
+
+// ---------------------------------------------------------------------------
+// approverReachable. The hard tier used to ask "is this session channel-bound",
+// which is not the same question as "can anyone be shown this gate". claw's
+// coder session is a plain native session that claw WATCHES and relays gates
+// for, so it was denied as unapprovable and the ship step's push became
+// impossible. These pin the new question and the safe default.
+// ---------------------------------------------------------------------------
+
+Deno.test("hard tier: a reachable approver gates instead of denying", () => {
+  // Claw's coder session exactly: attended, not channel-bound, watched.
+  assertEquals(
+    outcome({ toolName: "GitPush", escalate: ESC, channelBound: false, approverReachable: true }),
+    "gate",
+  );
+});
+
+Deno.test("hard tier: the SAME session without the flag still denies (the regression guard)", () => {
+  assertEquals(
+    outcome({ toolName: "GitPush", escalate: ESC, channelBound: false }),
+    "deny",
+  );
+  // Explicit false is the same as absent — no third state.
+  assertEquals(
+    outcome({ toolName: "GitPush", escalate: ESC, channelBound: false, approverReachable: false }),
+    "deny",
+  );
+});
+
+Deno.test("hard tier: channelBound implies a reachable approver without passing both", () => {
+  assertEquals(outcome({ toolName: "GitPush", escalate: ESC, channelBound: true }), "gate");
+});
+
+// Invariant A, at the policy line itself: unattended + nobody to ask = deny,
+// whatever else is true.
+Deno.test("hard tier: an unattended session with no approver still denies", () => {
+  assertEquals(
+    outcome({ toolName: "GitPush", escalate: ESC, unattended: true, channelBound: false }),
+    "deny",
+  );
+  assertEquals(
+    outcome({ toolName: "Bash", scopeKey: "/w+rm", escalate: ESC, unattended: true, channelBound: false }),
+    "deny",
+  );
+});
+
+// An unattended session that DOES declare an approver is asked rather than
+// refused — the flag never turns a hard-tier call into an allow.
+Deno.test("hard tier: a reachable approver never yields allow, only gate", () => {
+  assertEquals(
+    outcome({ toolName: "GitPush", escalate: ESC, unattended: true, approverReachable: true }),
+    "gate",
+  );
+  assertEquals(
+    outcome({ toolName: "GitPush", escalate: ESC, consent: "always", approverReachable: true }),
+    "gate",
+  );
+});
+
+// The soft tier and the plain path are untouched by the new signal.
+Deno.test("approverReachable does not disturb the soft tier or the unattended yield", () => {
+  const SOFT: EscalateList = [{ tool: "Bash", scopes: ["rm"], tier: "soft" }];
+  assertEquals(outcome({ toolName: "Bash", scopeKey: "/w+rm", escalate: SOFT, unattended: true }), "allow");
+  assertEquals(
+    outcome({ toolName: "Bash", scopeKey: "/w+rm", escalate: SOFT, unattended: true, approverReachable: true }),
+    "allow",
+  );
+  assertEquals(outcome({ toolName: "Bash", scopeKey: "/w+rm", escalate: SOFT, unattended: false }), "gate");
+  assertEquals(outcome({ unattended: true, approverReachable: true }), "allow");
+});
+
+// ---------------------------------------------------------------------------
+// The two standing invariants, re-confirmed through the REAL default escalate
+// list and the REAL scope keys, because this change edits the line they both
+// run through.
+// ---------------------------------------------------------------------------
+
+const bash = (command: string, over: Record<string, unknown> = {}) =>
+  resolveApproval({
+    toolName: "Bash",
+    scopeKey: deriveScopeKey("Bash", { command }, "/w"),
+    consent: null,
+    unattended: true,
+    channelBound: false,
+    escalate: DEFAULT_ESCALATE_LIST,
+    ...over,
+  }).outcome;
+
+Deno.test("invariant A: an unattended session with no approver cannot push, psql, crontab or sudo", () => {
+  for (
+    const command of [
+      "git push --force origin main",
+      "git subtree push --prefix=d origin gh-pages",
+      "psql -c 'drop table users'",
+      "crontab -r",
+      "sudo id",
+    ]
+  ) {
+    assertEquals(bash(command), "deny", command);
+  }
+});
+
+Deno.test("invariant B: read-only and build commands stay ungated for an unattended session", () => {
+  for (const command of ["git status", "git diff HEAD~1", "git log --oneline -5", "cargo build", "npm test"]) {
+    assertEquals(bash(command), "allow", command);
+  }
+});
+
+Deno.test("claw's ship step is asked, not refused, and everything else is unchanged", () => {
+  // Claw's coder session: attended, not channel-bound, gates relayed to the
+  // channel by postApprovalGates/resolveCoderApproval.
+  const claw = { unattended: false, channelBound: false, approverReachable: true };
+  // THE regression: this was `gate` before the escalate floor grew a Bash
+  // scope for push, `deny` after it, and `gate` again now.
+  assertEquals(bash("git push origin main", claw), "gate");
+  assertEquals(bash("git subtree push --prefix=d origin gh-pages", claw), "gate");
+  // Ordinary commands are untouched — an attended session gates them exactly
+  // as it did before this signal existed, and claw answers them the same way.
+  assertEquals(bash("cargo build", claw), "gate");
+  assertEquals(bash("cargo build", { ...claw, approverReachable: false }), "gate");
 });

@@ -8,10 +8,19 @@ import { query, createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk"
 import { z } from "zod";
 import { kbMcpServer } from "./kb_mcp.js";
 import { seedResponse, authKey, getCached, setCached } from "./models_cache.js";
+import { applyPermissionPolicy, disableCoderAttribution } from "./permission_policy.js";
 
 const modelsCache = new Map(); // authKey -> { models, expires }
 
 const PORT = 4322;
+// Deliberately ONE MINUTE LONGER than core/server/agents/service/approval-gate.ts's
+// 1_800_000ms deadline (this is plain Node and cannot import that constant), so
+// eve's gate is always the side that decides. Equal windows are not enough: this
+// timer starts first, so a decision landing at ~29:59 could still be lost here —
+// canUseTool would already have denied, and nothing reads the decision file
+// after that. Shortening this below the gate reintroduces exactly that bug; the
+// gate's 30 minutes is measured, not arbitrary, so raise BOTH or neither.
+const PERMISSION_WAIT_MS = 31 * 60 * 1000;
 
 // Make the devx skills (brainstorming, writing-plans, etc.) invocable by the
 // agent. The claude-agent-sdk only discovers skills from disk via
@@ -167,11 +176,10 @@ const server = http.createServer(async (req, res) => {
         ],
       });
 
-      const opts = {
+      const opts = applyPermissionPolicy({
         systemPrompt: systemPrompt || undefined,
         maxTurns: maxTurns || 100,
         model: model || "sonnet",
-        permissionMode: "bypassPermissions",
         cwd: cwd || undefined,
         mcpServers: {
           kb: kbMcpServer,
@@ -179,13 +187,62 @@ const server = http.createServer(async (req, res) => {
         },
         // Discover the materialized devx skills from ~/.claude/skills so the
         // agent's Skill tool can autonomously invoke them (brainstorming, etc.).
+        // This also loads ~/.claude/settings.json, which the coder can write —
+        // see permission_policy.js for the three ways that file routes around
+        // canUseTool and the managed tier stamped on below that closes them.
         settingSources: ["user"],
         // Forward subagent (Task) text so consumers can render nested transcripts.
         forwardSubagentText: true,
-      };
+      });
 
       const resumeId = chatSessions.get(sessionKey);
       if (resumeId) opts.resume = resumeId;
+
+      // Same file round trip as onElicitation below: write a request file, emit
+      // SSE, poll for a decision file, deny on timeout (fail closed). `suggestions`
+      // (SDK's "always allow") is left unused — it could grant more than agreed.
+      opts.canUseTool = async (toolName, input, { signal }) => {
+        const id = crypto.randomUUID();
+        const requestFile = `/tmp/.claude-permission-${id}.json`;
+        const decisionFile = `/tmp/.claude-permission-${id}.decision`;
+
+        fs.writeFileSync(requestFile, JSON.stringify({ toolName, input }));
+        sendSSE(res, "permission", { id, toolName, input });
+
+        const deny = (message) => {
+          try { fs.unlinkSync(requestFile); } catch {}
+          return { behavior: "deny", message };
+        };
+
+        const startTime = Date.now();
+        while (Date.now() - startTime < PERMISSION_WAIT_MS) {
+          if (signal.aborted) return deny("Turn aborted");
+          // Race the poll tick against the abort signal so a cancelled turn stops
+          // immediately. Named handler + explicit removal on both branches, since
+          // {once:true} alone only cleans up when abort actually fires.
+          const aborted = await new Promise((resolve) => {
+            const onAbort = () => { clearTimeout(t); resolve(true); };
+            const t = setTimeout(() => {
+              signal.removeEventListener("abort", onAbort);
+              resolve(false);
+            }, 500);
+            signal.addEventListener("abort", onAbort, { once: true });
+          });
+          if (aborted) return deny("Turn aborted");
+          try {
+            if (fs.existsSync(decisionFile)) {
+              const decision = JSON.parse(fs.readFileSync(decisionFile, "utf8"));
+              try { fs.unlinkSync(decisionFile); } catch {}
+              try { fs.unlinkSync(requestFile); } catch {}
+              if (decision.behavior === "allow") {
+                return { behavior: "allow", updatedInput: decision.updatedInput || input };
+              }
+              return { behavior: "deny", message: decision.message || "Denied by user" };
+            }
+          } catch {}
+        }
+        return deny("Permission request timed out");
+      };
 
       // Handle elicitations (clarifying questions) via file-based signaling
       // The Node.js server writes the question, sends SSE event, polls for answer
@@ -405,28 +462,6 @@ const server = http.createServer(async (req, res) => {
   res.writeHead(404);
   res.end();
 });
-
-// Repo policy: the coder's commits and PRs must NOT carry any tool co-author
-// trailer or generated-by footer. The agent SDK adds those by default;
-// settingSources:["user"] makes it read the user settings dir, so setting
-// includeCoAuthoredBy=false there suppresses both the commit trailer and the PR
-// footer.
-function disableCoderAttribution() {
-  try {
-    const dir = path.join(process.env.HOME || "/home/node", ".claude");
-    fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, "settings.json");
-    let settings = {};
-    try { settings = JSON.parse(fs.readFileSync(file, "utf8")); } catch { /* none yet */ }
-    if (settings.includeCoAuthoredBy !== false) {
-      settings.includeCoAuthoredBy = false;
-      fs.writeFileSync(file, JSON.stringify(settings, null, 2));
-      console.log("[coder-server] disabled commit/PR co-author attribution");
-    }
-  } catch (err) {
-    console.warn("[claude-code-server] could not disable co-authored-by:", err?.message || err);
-  }
-}
 
 // When the container's gh is authenticated (volume-backed /root/.config/gh),
 // wire it in as git's credential helper so the coder's `git push` authenticates

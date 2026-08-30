@@ -61,9 +61,81 @@ export async function ensureClaudeCodeServer() {
   throw new Error("Claude Code Node.js server failed to start");
 }
 
+/**
+ * Answers a sidecar "permission" event by writing the decision file it polls for.
+ * WHO decides is now pluggable: a caller running the sidecar as an eve turn
+ * supplies `resolvePermission` (eve's approval gate, keyed to a real
+ * agents.turns row — see agent/lib/sidecar_engine.ts); the legacy /stream path
+ * supplies none and keeps devx's own tool_consents/pending_consents flow.
+ * Any decision failure denies rather than hangs.
+ */
+export async function answerPermissionRequest({ id, toolName, input, chatId, userId, sqlFn, send, autoApprove, resolvePermission }) {
+  let result;
+  try {
+    // A supplied resolver decides ALONE — autoApprove is a devx-settings
+    // shortcut around devx's flow, and eve's gate has its own (unattended,
+    // escalate tiers) that a pre-emptive allow here would bypass.
+    result = resolvePermission
+      ? await resolvePermission({ id, toolName, input: input || {} })
+      : await decidePermission({ id, toolName, input: input || {}, chatId, userId, sqlFn, send, autoApprove });
+  } catch {
+    result = { behavior: "deny", message: "Permission decision failed" };
+  }
+  try {
+    await Deno.writeTextFile(`/tmp/.claude-permission-${id}.decision`, JSON.stringify(result));
+  } catch {}
+  return result;
+}
+
+async function decidePermission({ id, toolName, input, chatId, userId, sqlFn, send, autoApprove }) {
+  if (autoApprove) return { behavior: "allow", updatedInput: input };
+
+  const pref = await sqlFn(
+    `SELECT consent FROM devx.tool_consents WHERE user_id = $1 AND tool_name = $2`,
+    [userId, toolName],
+  );
+  if (pref.rows[0]?.consent === "always") return { behavior: "allow", updatedInput: input };
+
+  await sqlFn(
+    `INSERT INTO devx.pending_consents (request_id, chat_id, user_id) VALUES ($1, $2, $3)`,
+    [id, chatId, userId],
+  );
+  // Reuses the existing consent_request UI/round trip (same event the ai-sdk
+  // agent loop in agent.ts sends) rather than inventing a second mechanism.
+  send({ type: "consent_request", requestId: id, toolName, inputPreview: JSON.stringify(input).slice(0, 200) });
+
+  const decision = await new Promise((resolve) => {
+    const startTime = Date.now();
+    const poll = async () => {
+      const result = await sqlFn(`SELECT decision FROM devx.pending_consents WHERE request_id = $1`, [id]);
+      const row = result.rows[0];
+      if (row?.decision) { resolve(row.decision); return; }
+      if (Date.now() - startTime > 5 * 60 * 1000) { resolve("deny"); return; }
+      setTimeout(poll, 500);
+    };
+    poll();
+  });
+  await sqlFn(`DELETE FROM devx.pending_consents WHERE request_id = $1`, [id]);
+
+  if (decision === "always") {
+    await sqlFn(
+      `INSERT INTO devx.tool_consents (user_id, tool_name, consent) VALUES ($1, $2, 'always')
+       ON CONFLICT (user_id, tool_name) DO UPDATE SET consent = 'always'`,
+      [userId, toolName],
+    );
+  }
+
+  return decision === "allow" || decision === "always"
+    ? { behavior: "allow", updatedInput: input }
+    : { behavior: "deny", message: "Denied by user" };
+}
+
 export async function streamClaudeCodeChat({
   chatId, userId, appId, chatMode, settings, history, send, sqlFn,
   skillContext, commandOverride, hasComponentSelection, workspacePathOverride, useWorktree, remoteChannel, attachments,
+  // Set only when this stream IS an eve turn (agent/lib/sidecar_engine.ts) —
+  // see answerPermissionRequest for what supplying it changes.
+  resolvePermission,
 }) {
   const mode = chatMode || "agent";
   const effectiveSettings = commandOverride?.model
@@ -217,6 +289,14 @@ export async function streamClaudeCodeChat({
                 break;
               case "token_usage":
                 send({ type: "token_usage", ...data });
+                break;
+              case "permission":
+                await answerPermissionRequest({
+                  id: data.id, toolName: data.toolName, input: data.input,
+                  chatId, userId, sqlFn, send,
+                  autoApprove: !!effectiveSettings.auto_approve,
+                  resolvePermission,
+                });
                 break;
               case "elicitation": {
                 // Use the existing questionnaire UI to ask the user

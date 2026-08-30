@@ -15,22 +15,16 @@ import type { AgentStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
 import { subscribe } from "./stream.ts";
 import { deriveScopeKey, touchedPaths } from "./scope-key.ts";
-import { DEFAULT_ESCALATE_LIST, type EscalateList, resolveApproval } from "./approval-policy.ts";
+import { type EscalateList } from "./approval-policy.ts";
+import { runApprovalGate } from "./approval-gate.ts";
 import { TRUNCATION_HEADER_OVERHEAD, truncateMiddle } from "./context/truncate.ts";
 import type { ContextConfig } from "./context/budget.ts";
 import { partitionTools } from "./context/toolsplit.ts";
 import { type SpawnCapabilities, WAIT_DEFAULT_MS, WAIT_MAX_MS } from "./spawn.ts";
 
-// Exported for tests. An explicit approvalPollMs stays flat (tests depend on a
-// deterministic cadence); the default doubles to a 5s ceiling, cutting a
-// 30-minute park from ~3600 round-trips to ~370.
-export const INITIAL_POLL_MS = 500;
-export function nextPollDelay(current: number, flat: number | undefined): number {
-  // A non-positive flat value (e.g. approvalPollMs: 0) is not a valid flat
-  // cadence — busy-looping getApprovalDecision for up to 30 minutes — so it
-  // falls back to the default backoff schedule instead.
-  return flat !== undefined && flat > 0 ? flat : Math.min(current * 2, 5_000);
-}
+// Re-exported: the gate itself now lives in approval-gate.ts (shared with the
+// external-engine path), and existing importers take these from here.
+export { INITIAL_POLL_MS, nextPollDelay } from "./approval-gate.ts";
 
 export interface ToolBuildCtx {
   agent: LoadedAgent;
@@ -106,6 +100,9 @@ export interface ToolBuildCtx {
   // default to the closed value when absent so an unwired caller gates.
   unattended?: boolean;
   channelBound?: boolean;
+  // See approval-policy.ts's ApprovalPolicyInput.approverReachable — the
+  // model loop's half of the same signal the delegated path reads directly.
+  approverReachable?: boolean;
   escalate?: EscalateList;
 }
 
@@ -163,65 +160,28 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boo
     inputSchema: schema,
     execute: async (input: unknown) => {
       if (def.needsApproval) {
-        const { store, turnId, emit, userId, plugin, agentName } = ctx;
         // `workspace` (resolved once per buildSdkTools call, below) keys the
         // STORED consent row — a grant for one app must not silently cover
         // the same path in another under a shared bot identity.
-        const scopeKey = deriveScopeKey(name, input, workspace);
-        // A sticky decision short-circuits the one-shot flow entirely.
-        // Only consulted when there's an identity to key it on — an
-        // anonymous session (no userId, e.g. no x-user-id header) has no
-        // consent to look up and always goes through the per-call approval
-        // flow below, same as when there is no sticky consent at all.
-        let consent: "always" | "never" | null = null;
-        if (store && userId && plugin && agentName) {
-          consent = await store.getToolConsent(userId, plugin, agentName, name, scopeKey);
-        }
-        const verdict = resolveApproval({
+        const refusal = await runApprovalGate({
           toolName: name,
-          scopeKey,
-          consent,
-          unattended: ctx.unattended === true,
-          channelBound: ctx.channelBound === true,
-          escalate: ctx.escalate ?? DEFAULT_ESCALATE_LIST,
+          input,
+          scopeKey: deriveScopeKey(name, input, workspace),
+          sessionId: ctx.sessionId,
+          store: ctx.store,
+          turnId: ctx.turnId,
+          emit: ctx.emit,
+          userId: ctx.userId,
+          plugin: ctx.plugin,
+          agentName: ctx.agentName,
+          unattended: ctx.unattended,
+          channelBound: ctx.channelBound,
+          approverReachable: ctx.approverReachable,
+          escalate: ctx.escalate,
+          approvalPollMs: ctx.approvalPollMs,
+          approvalTimeoutMs: ctx.approvalTimeoutMs,
         });
-        if (verdict.outcome === "deny") {
-          return verdict.reason === "consent-never"
-            ? { error: "denied by user" }
-            : { error: "requires approval but this session has no approver" };
-        }
-        if (verdict.outcome === "gate") {
-          if (!store || !turnId || !emit) {
-            return { error: "approval required — use the session API" };
-          }
-          const requestId = await store.createApproval(ctx.sessionId, turnId, name, input, scopeKey);
-          emit({
-            type: "input.requested",
-            data: { turnId, requests: [{ requestId, action: { kind: "tool-call", callId: requestId, toolName: name, input } }] },
-          });
-          // 7 of 43 real gates were clicked after the 5-minute poll window had
-          // already given up (median human response was ~15 minutes). Raised to
-          // 30 minutes; ctx override (tests, other callers) is unchanged.
-          const deadline = Date.now() + (ctx.approvalTimeoutMs ?? 1_800_000);
-          // An explicit approvalPollMs stays flat — tests depend on a
-          // deterministic cadence. The default backs off 500ms -> 5s, cutting
-          // a 30-minute park from ~3600 round-trips to ~370.
-          const flat = ctx.approvalPollMs;
-          // A non-positive flat (approvalPollMs: 0) must not seed the loop at
-          // 0ms either — see nextPollDelay's own guard below.
-          let wait = flat !== undefined && flat > 0 ? flat : INITIAL_POLL_MS;
-          let decision: string | null = null;
-          while (Date.now() < deadline) {
-            decision = await store.getApprovalDecision(requestId);
-            if (decision) break;
-            await new Promise((r) => setTimeout(r, wait));
-            wait = nextPollDelay(wait, flat);
-          }
-          if (decision !== "approve") {
-            return { error: decision === "deny" ? "denied by user" : "approval timed out" };
-          }
-        }
-        // verdict.outcome === "allow" falls through to execute.
+        if (refusal) return refusal;
       }
       // Hooks come from ctx.agent.config, so a subagent turn runs the
       // SUBAGENT's hooks — same posture as filterTools at depth 1.
