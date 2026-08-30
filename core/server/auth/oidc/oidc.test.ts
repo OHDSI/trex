@@ -25,6 +25,7 @@ const client: OidcClient = {
   postLogoutRedirectUris: ["https://example.test/atlas/"],
   allowedScopes: ["openid", "profile", "email"],
   requirePkce: true,
+  clientRoles: [],
 };
 
 Deno.test("the provider is off unless explicitly enabled", () => {
@@ -254,6 +255,24 @@ Deno.test("a seeded client reads its uris as a list, however they are separated"
   assertEquals(spec?.name, "WebAPI");
   assertEquals(spec?.redirectUris, ["https://a.test/cb/openid", "https://b.test/cb/openid"]);
   assertEquals(spec?.postLogoutRedirectUris, ["https://a.test/atlas/"]);
+});
+
+Deno.test("a seeded client carries the roles it is configured with", () => {
+  const spec = parseSeedClient({
+    TREX_OIDC_CLIENT_ID: "d2e-webapi",
+    TREX_OIDC_CLIENT_SECRET: "s3cret",
+    TREX_OIDC_CLIENT_REDIRECT_URIS: "https://a.test/cb/openid",
+    TREX_OIDC_CLIENT_ROLES: "ALP_USER_ADMIN, ALP_SYSTEM_ADMIN",
+  });
+  assertEquals(spec?.clientRoles, ["ALP_USER_ADMIN", "ALP_SYSTEM_ADMIN"]);
+});
+
+Deno.test("a seeded client with no roles configured carries none", () => {
+  const spec = parseSeedClient({
+    TREX_OIDC_CLIENT_ID: "d2e-webapi",
+    TREX_OIDC_CLIENT_REDIRECT_URIS: "https://a.test/cb/openid",
+  });
+  assertEquals(spec?.clientRoles, []);
 });
 
 Deno.test("a seeded client without a secret is public and falls back to its id for a name", () => {

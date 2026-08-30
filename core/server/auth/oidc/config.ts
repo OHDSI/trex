@@ -49,6 +49,8 @@ export interface SeedClientSpec {
   name: string;
   redirectUris: string[];
   postLogoutRedirectUris: string[];
+  /** Roles the client itself carries, for the client credentials grant. */
+  clientRoles: string[];
 }
 
 const splitList = (raw: string | undefined): string[] =>
@@ -75,5 +77,6 @@ export function parseSeedClient(
     name: env.TREX_OIDC_CLIENT_NAME?.trim() || clientId,
     redirectUris,
     postLogoutRedirectUris: splitList(env.TREX_OIDC_CLIENT_POST_LOGOUT_URIS),
+    clientRoles: splitList(env.TREX_OIDC_CLIENT_ROLES),
   };
 }

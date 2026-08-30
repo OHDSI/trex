@@ -24,6 +24,7 @@ interface ClientRow {
   post_logout_redirect_uris: string[];
   allowed_scopes: string[];
   require_pkce: boolean;
+  client_roles: string[];
 }
 
 const toClient = (r: ClientRow): OidcClient => ({
@@ -34,13 +35,14 @@ const toClient = (r: ClientRow): OidcClient => ({
   postLogoutRedirectUris: r.post_logout_redirect_uris ?? [],
   allowedScopes: r.allowed_scopes ?? [],
   requirePkce: r.require_pkce,
+  clientRoles: r.client_roles ?? [],
 });
 
 export async function getClient(clientId: string): Promise<OidcClient | null> {
   if (!clientId) return null;
   const result = await pool.query<ClientRow>(
     `SELECT client_id, client_secret_hash, name, redirect_uris,
-            post_logout_redirect_uris, allowed_scopes, require_pkce
+            post_logout_redirect_uris, allowed_scopes, require_pkce, client_roles
        FROM trexdb.oidc_client WHERE client_id = $1`,
     [clientId],
   );

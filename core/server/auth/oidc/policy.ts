@@ -12,6 +12,8 @@ export interface OidcClient {
   postLogoutRedirectUris: string[];
   allowedScopes: string[];
   requirePkce: boolean;
+  /** Roles the client itself carries, for the client credentials grant. */
+  clientRoles: string[];
 }
 
 /**
