@@ -1,6 +1,6 @@
 import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert";
 import { resolveCore } from "./resolveCoderApproval.ts";
-import type { PendingApproval, TokioClient, TurnResult } from "../lib/code-session.ts";
+import type { AttachedStream, PendingApproval, TokioClient, TurnResult } from "../lib/code-session.ts";
 
 function fakeSql(row?: Record<string, unknown>) {
   const store = new Map<string, Record<string, unknown>>();
@@ -43,18 +43,34 @@ function deps(over: {
   const resolves: Array<{ codeSessionId: string; requestId: string; decision: string }> = [];
   const attaches: Array<{ codeSessionId: string; startCursor: number }> = [];
   const gates: PendingApproval[][] = [];
+  // Order matters more than content here: "attach" must precede "resolve".
+  const timeline: string[] = [];
+  const cancels = { count: 0 };
   return {
     resolves,
     attaches,
     gates,
+    timeline,
+    cancels,
     d: {
       resolve: (_c: TokioClient, a: { codeSessionId: string; requestId: string; decision: "approve" | "deny" }) => {
+        timeline.push("resolve");
         resolves.push(a);
         return Promise.resolve(over.resolved ?? { resolved: true });
       },
-      reattach: (_c: TokioClient, a: { codeSessionId: string; startCursor: number }) => {
+      attach: (_c: TokioClient, a: { codeSessionId: string; startCursor: number }): Promise<AttachedStream> => {
+        timeline.push("attach");
         attaches.push(a);
-        return Promise.resolve(over.result ?? turn({ replyText: "did it", nextCursor: a.startCursor + 3 }));
+        return Promise.resolve({
+          collect: () => {
+            timeline.push("collect");
+            return Promise.resolve(over.result ?? turn({ replyText: "did it", nextCursor: a.startCursor + 3 }));
+          },
+          cancel: () => {
+            cancels.count++;
+            return Promise.resolve();
+          },
+        });
       },
       postGates: (_f: typeof fetch, o: { pending: PendingApproval[] }) => {
         gates.push(o.pending);
@@ -80,6 +96,8 @@ Deno.test("resolveCore relays the decision, RE-ATTACHES at the stored cursor, an
   assertEquals(t.resolves, [{ codeSessionId: "code-1", requestId: "req-1", decision: "approve", userId: "u1" }]);
   // Re-attach, not a new message: the parked turn continues where it stopped.
   assertEquals(t.attaches, [{ codeSessionId: "code-1", startCursor: 7, userId: "u1" }]);
+  // Subscribed BEFORE the decision could publish anything — see the next test.
+  assertEquals(t.timeline, ["attach", "resolve", "collect"]);
   assertEquals(out, { resolved: true, parked: false, reply: "did it", trailer: null });
   // The advanced cursor is persisted, so a later re-attach never replays it.
   const row = sql.store.get("s1");
@@ -114,7 +132,12 @@ Deno.test("resolveCore reports a refused approval and does NOT re-attach", async
   );
   assertEquals(out.resolved, false);
   assertStringIncludes(String(out.error), "already-decided");
-  assertEquals(t.attaches.length, 0);
+  // A second pick on a gate that already landed is not a failure to report as one.
+  assertStringIncludes(String(out.error), "already recorded");
+  // The stream was opened first, so it must be released rather than left open.
+  assertEquals(t.attaches.length, 1);
+  assertEquals(t.timeline, ["attach", "resolve"]);
+  assertEquals(t.cancels.count, 1);
 });
 
 Deno.test("resolveCore reports a thread with no coder session instead of calling the transport", async () => {
@@ -129,6 +152,7 @@ Deno.test("resolveCore reports a thread with no coder session instead of calling
   );
   assertEquals(out.resolved, false);
   assertEquals(t.resolves.length, 0);
+  assertEquals(t.attaches.length, 0);
 });
 
 Deno.test("a re-attach that parks on a NEW gate posts it and returns — one round-trip, no spinning", async () => {
@@ -166,4 +190,62 @@ Deno.test("a re-attach still parked on the SAME request does not re-post that ga
   assertEquals(out.parked, true);
   assertEquals(t.gates, [[]]);
   assertStringIncludes(String(out.reply), "req-1");
+});
+
+// Fix round 1's regression test. The real race is a timing one — the coder's
+// poll wakes ~500ms after the decision lands (toolset.ts:213) and publishes
+// what follows — and a fake client cannot make wall-clock time race. What it
+// CAN pin is the invariant that makes the race harmless: the subscription must
+// exist before the decision is sent. This transport enforces exactly that
+// consequence — events published with no subscriber are gone, and the stream
+// that missed them would block until the 90-minute turn timeout, which is what
+// the rejection below stands in for. Reordering resolveCore back to
+// POST-then-GET turns this test red.
+Deno.test("a decision whose events publish immediately is still collected — the stream is subscribed before the decision is sent", async () => {
+  const sql = fakeSql(ROW);
+  const nextGate: PendingApproval = { requestId: "req-2", toolName: "writeFile", input: { path: "a" } };
+  const timeline: string[] = [];
+  let subscribed = false;
+  let missed = false;
+
+  const attach = (_c: TokioClient, a: { codeSessionId: string; startCursor: number }): Promise<AttachedStream> => {
+    timeline.push("attach");
+    subscribed = true;
+    return Promise.resolve({
+      collect: () =>
+        missed
+          // The coder's follow-up gate is live-only (events.ts:80-88): nothing
+          // replays it, so a stream opened after it was published waits forever.
+          ? Promise.reject(new Error("attached too late — the decision's events were already published and are unreplayable"))
+          : Promise.resolve({
+            codeSessionId: "code-1",
+            replyText: "",
+            nextCursor: a.startCursor + 2,
+            reason: "input-requested" as const,
+            pending: [nextGate],
+          }),
+      cancel: () => Promise.resolve(),
+    });
+  };
+  const resolve = () => {
+    timeline.push("resolve");
+    // The publish happens here, in the same tick the decision lands.
+    if (!subscribed) missed = true;
+    return Promise.resolve({ resolved: true });
+  };
+
+  const out = await resolveCore(
+    sql.fn,
+    NO_CLIENT,
+    { sessionId: "s1", userId: "u1", channelId: "chan-1" },
+    { requestId: "req-1", decision: "deny" },
+    { resolve, attach, postGates: () => Promise.resolve(true) },
+  );
+
+  assertEquals(timeline, ["attach", "resolve"]);
+  assertEquals(missed, false);
+  assertEquals(out.resolved, true);
+  assertEquals(out.parked, true);
+  assertStringIncludes(String(out.reply), "req-2");
+  assert(Number(sql.store.get("s1")?.event_cursor) > 7);
 });

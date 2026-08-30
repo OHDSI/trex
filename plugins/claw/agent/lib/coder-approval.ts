@@ -29,7 +29,14 @@ export type ApprovalDecision = "approve" | "deny";
 // resumes claw with this literal string, and claw reads the requestId back out
 // of it to call resolveCoderApproval.
 export function approvalChoiceValue(decision: ApprovalDecision, requestId: string): string {
-  return `${decision} ${requestId}`.slice(0, VALUE_MAX);
+  const value = `${decision} ${requestId}`;
+  // Never truncate: a clipped id posts a gate whose every decision 404s as
+  // "unknown or already-decided" with nothing to explain why. Fail here, where
+  // the cause is still visible, and let the caller fall back to asking in text.
+  if (value.length > VALUE_MAX) {
+    throw new Error(`approval requestId too long for a Discord select value (${value.length} > ${VALUE_MAX})`);
+  }
+  return value;
 }
 
 /** One-line human summary of the tool call being gated. */

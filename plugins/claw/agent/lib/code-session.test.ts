@@ -1,7 +1,7 @@
 // plugins/claw/agent/lib/code-session.test.ts
 import { assert, assertEquals } from "jsr:@std/assert";
 import { FakeTime } from "jsr:@std/testing/time";
-import { CODE_BASE, reattachCodeTurn, resolveCodeApproval, runCodeTurn, type TokioClient } from "./code-session.ts";
+import { attachCodeStream, CODE_BASE, reattachCodeTurn, resolveCodeApproval, runCodeTurn, type TokioClient } from "./code-session.ts";
 
 function ndjson(...events: unknown[]): Response {
   const body = events.map((e) => JSON.stringify(e)).join("\n") + "\n";
@@ -72,7 +72,9 @@ Deno.test("runCodeTurn creates a session then streams the reply (no mode = full 
 
   assertEquals(res.codeSessionId, "code-1");
   assertEquals(res.replyText, "PLAN: do the thing");
-  assertEquals(res.nextCursor, 3);
+  // Only message.completed is replayable; turn.started/session.waiting are
+  // live-only and must not move the cursor (see REPLAYABLE).
+  assertEquals(res.nextCursor, 1);
   // create POST
   assertEquals(reqs[0].url, `${CODE_BASE}/eve/v1/session`);
   assertEquals(reqs[0].init.method, "POST");
@@ -168,7 +170,7 @@ Deno.test("runCodeTurn continues an existing session with startCursor", async ()
 
   assertEquals(res.codeSessionId, "code-1");
   assertEquals(res.replyText, "done: 0 checks failing");
-  assertEquals(res.nextCursor, 7);
+  assertEquals(res.nextCursor, 6); // 5 + the one replayable event (message.completed)
   assertEquals(reqs[0].url, `${CODE_BASE}/eve/v1/session/code-1`);
   assertEquals(reqs[1].url, `${CODE_BASE}/eve/v1/session/code-1/stream?startIndex=5`);
 });
@@ -204,21 +206,21 @@ Deno.test("runCodeTurn parses a JSON event line split across two stream chunks",
 
   assertEquals(res.codeSessionId, "code-3");
   assertEquals(res.replyText, "HELLO");
-  assertEquals(res.nextCursor, 2);
+  assertEquals(res.nextCursor, 1);
 });
 
 Deno.test("runCodeTurn stops reading at the terminal event and ignores trailing events", async () => {
   const create = new Response(JSON.stringify({ sessionId: "code-4" }), {
     headers: { "content-type": "application/json" },
   });
-  // session.waiting is the terminal event; turn.started arrives after it in
-  // the same stream (simulating a keep-alive tail that stays open). If the
-  // reader kept draining instead of stopping at the terminal event, nextCursor
-  // would count 3 events instead of 2.
+  // session.waiting is the terminal event; a replayable action.result arrives
+  // after it in the same stream (simulating a keep-alive tail that stays open).
+  // If the reader kept draining instead of stopping at the terminal event,
+  // nextCursor would count that second event too.
   const stream = ndjsonChunks([
     '{"type":"message.completed","data":{"text":"DONE"}}\n' +
       '{"type":"session.waiting","data":{}}\n' +
-      '{"type":"turn.started","data":{"turnId":"t2","sequence":99}}\n',
+      '{"type":"action.result","data":{"turnId":"t2"}}\n',
   ]);
   const { client } = fakeClient([create, stream]);
 
@@ -228,7 +230,7 @@ Deno.test("runCodeTurn stops reading at the terminal event and ignores trailing 
 
   assertEquals(res.codeSessionId, "code-4");
   assertEquals(res.replyText, "DONE");
-  assertEquals(res.nextCursor, 12);
+  assertEquals(res.nextCursor, 11);
 });
 
 Deno.test("runCodeTurn throws on session.failed", async () => {
@@ -349,7 +351,9 @@ Deno.test("runCodeTurn surfaces an input.requested gate instead of waiting on it
 
   assertEquals(res.reason, "input-requested");
   assertEquals(res.pending, [{ requestId: "req-1", toolName: "runCommand", input: { cmd: "rm -rf build" } }]);
-  assertEquals(res.nextCursor, 2);
+  // Neither turn.started nor input.requested is persisted, so neither advances
+  // the cursor — the re-attach must resume at the same index.
+  assertEquals(res.nextCursor, 0);
 });
 
 Deno.test("runCodeTurn reports which terminal state it hit — completed vs waiting vs parked", async () => {
@@ -400,7 +404,8 @@ Deno.test("a parked turn's cursor carries into the re-attach: monotonic, and onl
   const { client, reqs } = fakeClient([create, parkStream]);
   const parked = await runCodeTurn(client, { codeSessionId: null, message: "go", startCursor: 0 });
   assertEquals(parked.reason, "input-requested");
-  assertEquals(parked.nextCursor, 3);
+  // One replayable event before the gate (message.completed).
+  assertEquals(parked.nextCursor, 1);
 
   // The remainder of the SAME turn, from the cursor the park reported.
   const restStream = ndjson(
@@ -411,13 +416,13 @@ Deno.test("a parked turn's cursor carries into the re-attach: monotonic, and onl
   const { client: c2, reqs: reqs2 } = fakeClient([restStream]);
   const rest = await reattachCodeTurn(c2, { codeSessionId: parked.codeSessionId, startCursor: parked.nextCursor });
 
-  assertEquals(reqs2[0].url, `${CODE_BASE}/eve/v1/session/code-10/stream?startIndex=3`);
+  assertEquals(reqs2[0].url, `${CODE_BASE}/eve/v1/session/code-10/stream?startIndex=1`);
   assertEquals(reqs2[0].init.method, "GET");
   // No fresh message: a re-attach must never start a second turn.
   assertEquals(reqs2.length, 1);
   assertEquals(rest.reason, "completed");
   assertEquals(rest.replyText, "done");
-  // Monotonic, and counting ONLY the three events not already seen.
+  // Monotonic, and counting ONLY the three replayable events not already seen.
   assert(rest.nextCursor > parked.nextCursor, `${rest.nextCursor} must exceed ${parked.nextCursor}`);
   assertEquals(rest.nextCursor, parked.nextCursor + 3);
   // The first attach really did start at 0, so the re-attach skipped it rather
@@ -434,7 +439,7 @@ Deno.test("a re-attach that finds the turn still parked returns rather than spin
   const res = await reattachCodeTurn(client, { codeSessionId: "code-11", startCursor: 4 });
   assertEquals(res.reason, "input-requested");
   assertEquals(res.pending.map((p) => p.requestId), ["req-2"]);
-  assertEquals(res.nextCursor, 5);
+  assertEquals(res.nextCursor, 4); // input.requested is live-only: the cursor stands still
 });
 
 Deno.test("resolveCodeApproval posts the decision to the approval route and reports success", async () => {
@@ -463,4 +468,74 @@ Deno.test("resolveCodeApproval reports a refused/expired request instead of thro
   assertEquals(out.resolved, false);
   assert(out.error?.includes("404"), out.error);
   assert(out.error?.includes("already-decided"), out.error);
+});
+
+// The bug this pins: message.appended is emitted PER TOKEN DELTA
+// (runner.ts:395) and has no stepToEvent mapping, so counting it made the
+// cursor run hundreds ahead of the server's index and slice(startIndex)
+// returned nothing on every re-attach — replay was not "skipping what was seen",
+// it was off entirely.
+Deno.test("nextCursor counts only replayable events — a turn of token deltas advances it by two, not by hundreds", async () => {
+  const create = new Response(JSON.stringify({ sessionId: "code-14" }), {
+    headers: { "content-type": "application/json" },
+  });
+  const deltas = Array.from({ length: 200 }, (_, i) => ({
+    type: "message.appended",
+    data: { turnId: "t1", messageDelta: "x", messageSoFar: "x".repeat(i + 1) },
+  }));
+  const stream = ndjson(
+    { type: "turn.started", data: { turnId: "t1", sequence: 0 } },
+    ...deltas,
+    { type: "message.completed", data: { text: "done" } },
+    { type: "turn.completed", data: { turnId: "t1" } },
+  );
+  const { client } = fakeClient([create, stream]);
+
+  const res = await runCodeTurn(client, { codeSessionId: null, message: "x", startCursor: 0 });
+
+  // text -> message.completed and finish -> turn.completed are the only two
+  // persisted steps this turn produced.
+  assertEquals(res.nextCursor, 2);
+  assertEquals(res.replyText, "done");
+});
+
+Deno.test("every replayable kind advances the cursor, and no live-only kind does", async () => {
+  const replayable = ndjson(
+    { type: "actions.requested", data: { turnId: "t1", actions: [] } },
+    { type: "action.result", data: { turnId: "t1" } },
+    { type: "tool.event", data: { name: "n", payload: {} } },
+    { type: "message.completed", data: { text: "done" } },
+    { type: "turn.completed", data: { turnId: "t1" } },
+  );
+  const counted = await reattachCodeTurn(fakeClient([replayable]).client, { codeSessionId: "c", startCursor: 0 });
+  assertEquals(counted.nextCursor, 5);
+
+  const liveOnly = ndjson(
+    { type: "turn.started", data: { turnId: "t1", sequence: 0 } },
+    { type: "message.appended", data: { turnId: "t1", messageDelta: "a" } },
+    { type: "message.queued", data: {} },
+    { type: "session.waiting", data: {} },
+  );
+  const ignored = await reattachCodeTurn(fakeClient([liveOnly]).client, { codeSessionId: "c", startCursor: 9 });
+  assertEquals(ignored.nextCursor, 9);
+});
+
+// attachCodeStream is split out precisely so a caller can subscribe before it
+// causes the events it needs; the GET must have happened by the time it returns.
+Deno.test("attachCodeStream issues the stream GET before collect() is ever called", async () => {
+  const stream = ndjson(
+    { type: "message.completed", data: { text: "done" } },
+    { type: "turn.completed", data: { turnId: "t1" } },
+  );
+  const { client, reqs } = fakeClient([stream]);
+
+  const attached = await attachCodeStream(client, { codeSessionId: "code-15", startCursor: 4 });
+  // Subscribed already — nothing has been read yet.
+  assertEquals(reqs.length, 1);
+  assertEquals(reqs[0].url, `${CODE_BASE}/eve/v1/session/code-15/stream?startIndex=4`);
+  assertEquals(reqs[0].init.method, "GET");
+
+  const res = await attached.collect();
+  assertEquals(res.replyText, "done");
+  assertEquals(res.nextCursor, 6);
 });

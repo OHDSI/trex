@@ -41,6 +41,26 @@ const DEFAULT_TIMEOUT_MS = 90 * 60_000;
 
 interface Event { type: string; data?: Record<string, unknown> }
 
+// Event kinds the server can REPLAY, i.e. the ones `startIndex` counts. Derived
+// from handler.ts's stepToEvent, which is the only mapping from a persisted
+// `agents.steps` row back onto the wire vocabulary: tool-call/client-tool-call →
+// actions.requested, tool-result → action.result, text → message.completed,
+// finish → turn.completed, error → turn.failed, custom → tool.event. Each is
+// emitted live 1:1 with the step it persists (runner.ts emits one action per
+// actions.requested and persists exactly one row), so counting these — and only
+// these — keeps our cursor equal to the server's index.
+// Everything else on the wire is live-only and MUST NOT be counted:
+// turn.started, message.appended, input.requested, session.waiting,
+// session.failed, message.queued.
+const REPLAYABLE = new Set([
+  "actions.requested",
+  "action.result",
+  "message.completed",
+  "turn.completed",
+  "turn.failed",
+  "tool.event",
+]);
+
 // One tool call the coder has parked on, waiting for a human. Mirrors
 // core/server/agents/service/events.ts's InputRequestItem, flattened: the wire
 // shape is { requestId, action: { kind, callId, toolName, input } } and only
@@ -135,7 +155,10 @@ export async function runCodeTurn(
     if (!res.ok) throw new Error(`code continue failed: ${res.status}`);
   }
 
-  // 2) Stream the turn's events from startCursor until the turn ends.
+  // 2) Stream the turn's events from startCursor until the turn ends. Safe to
+  // attach AFTER the message here: everything a turn does before we attach is
+  // persisted, so the replay carries it (an approval gate is the one thing that
+  // is not — see resolveCoderApproval.ts, which attaches first).
   return await streamTurn(client, {
     codeSessionId,
     startCursor: args.startCursor,
@@ -171,21 +194,45 @@ export async function resolveCodeApproval(
   return { resolved: false, error: `${res.status}: ${typeof message === "string" ? message : "approval not resolved"}` };
 }
 
-async function streamTurn(client: TokioClient, args: StreamArgs): Promise<TurnResult> {
-  const codeSessionId = args.codeSessionId;
-  // startIndex counts the session's PERSISTED events, while nextCursor counts
-  // every line read (live-only kinds — turn.started, input.requested,
-  // session.waiting — included), so the cursor can run AHEAD of the server's
-  // index. That direction is the safe one: a re-attach skips replaying what was
-  // already seen, and a still-running turn's remainder arrives on the live tail
-  // whatever startIndex says.
+// A stream that is already SUBSCRIBED but not yet consumed. The split exists so
+// a caller can subscribe BEFORE doing the thing that produces the events it
+// needs — handler.ts's stream route subscribes to the live tail before it
+// replays (handler.ts:1678-1723), so an attach that has returned cannot miss
+// what happens next.
+export interface AttachedStream {
+  /** Read until the turn ends or parks on a human. */
+  collect(): Promise<TurnResult>;
+  cancel(): Promise<void>;
+}
+
+export async function attachCodeStream(client: TokioClient, args: StreamArgs): Promise<AttachedStream> {
+  // startIndex counts the session's persisted events and so does nextCursor
+  // (see REPLAYABLE) — a re-attach resumes exactly where the last one stopped,
+  // replaying nothing it has already seen and skipping nothing it has not.
   const res = await client.req(
-    `${CODE_BASE}/eve/v1/session/${codeSessionId}/stream?startIndex=${args.startCursor}`,
+    `${CODE_BASE}/eve/v1/session/${args.codeSessionId}/stream?startIndex=${args.startCursor}`,
     { method: "GET", headers: headers(args.userId) },
   );
   if (!res.ok || !res.body) throw new Error(`code stream failed: ${res.status}`);
-
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  return {
+    collect: () => consumeStream(reader, args),
+    cancel: async () => {
+      try { await reader.cancel(); } catch { /* already closed */ }
+    },
+  };
+}
+
+async function streamTurn(client: TokioClient, args: StreamArgs): Promise<TurnResult> {
+  const attached = await attachCodeStream(client, args);
+  return await attached.collect();
+}
+
+async function consumeStream(
+  reader: ReadableStreamDefaultReader<string>,
+  args: StreamArgs,
+): Promise<TurnResult> {
+  const codeSessionId = args.codeSessionId;
   let buf = "";
   let read = 0;
   let replyText = "";
@@ -214,9 +261,11 @@ async function streamTurn(client: TokioClient, args: StreamArgs): Promise<TurnRe
         const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
         if (!line) continue;
-        read++;
         const ev = JSON.parse(line) as Event;
         const d = (ev.data ?? {}) as Record<string, unknown>;
+        // Counted BEFORE the terminal branches so the cursor includes the event
+        // that ended the read, and only for kinds the server can replay.
+        if (REPLAYABLE.has(ev.type)) read++;
         if (ev.type === "message.completed") {
           // Step-1 pre-read (runner.ts:182-184): the assistant text field on
           // message.completed is `message` (data: { turnId, message: text,

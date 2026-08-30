@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert";
+import { assert, assertEquals, assertStringIncludes, assertThrows } from "jsr:@std/assert";
 import { approvalChoiceValue, parkedReply, postApprovalGates, postApprovalRequest } from "./coder-approval.ts";
 
 function fakeFetch(status = 200) {
@@ -33,9 +33,27 @@ Deno.test("postApprovalRequest posts an eve_choice select whose values carry the
   assertStringIncludes(String((posts[0].body.embeds as Array<{ description: string }>)[0].description), "rm -rf build");
 });
 
-Deno.test("approvalChoiceValue stays inside Discord's 100-char select value cap", () => {
-  const value = approvalChoiceValue("approve", "r".repeat(200));
-  assertEquals(value.length, 100);
+// Truncating would post a corrupted id, and every decision made on that card
+// would 404 as "unknown or already-decided" with nothing to explain why.
+Deno.test("approvalChoiceValue refuses to truncate an id past Discord's 100-char select value cap", () => {
+  assertEquals(approvalChoiceValue("approve", "r".repeat(50)).length, 58);
+  assertThrows(
+    () => approvalChoiceValue("approve", "r".repeat(200)),
+    Error,
+    "too long",
+  );
+});
+
+Deno.test("an unpostable id degrades to 'no gate rendered', not to a broken card or a failed hand-off", async () => {
+  const { fn, posts } = fakeFetch();
+  const ok = await postApprovalGates(fn, {
+    botToken: "tok",
+    channelId: "chan-1",
+    pending: [{ requestId: "r".repeat(200), toolName: "runCommand", input: {} }],
+  });
+  // claw then asks the humans in plain text — parkedReply's no-channel variant.
+  assertEquals(ok, false);
+  assertEquals(posts.length, 0);
 });
 
 Deno.test("postApprovalGates posts one card per pending request and reports success", async () => {
