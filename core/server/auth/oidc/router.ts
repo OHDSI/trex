@@ -117,7 +117,7 @@ export function registerOidcRoutes(basePath: string) {
       jwks_uri: `${issuer}/.well-known/jwks.json`,
       end_session_endpoint: `${issuer}/session/end`,
       response_types_supported: ["code"],
-      grant_types_supported: ["authorization_code"],
+      grant_types_supported: ["authorization_code", "client_credentials"],
       subject_types_supported: ["public"],
       id_token_signing_alg_values_supported: ["RS256"],
       scopes_supported: ["openid", "profile", "email"],
@@ -217,7 +217,8 @@ export function registerOidcRoutes(basePath: string) {
   router.post("/token", authLimiter, express.urlencoded({ extended: false }), async (req, res) => {
     try {
       const body = req.body ?? {};
-      if (body.grant_type !== "authorization_code") {
+      const grantType = body.grant_type;
+      if (grantType !== "authorization_code" && grantType !== "client_credentials") {
         res.status(400).json({ error: "unsupported_grant_type" });
         return;
       }
@@ -240,6 +241,36 @@ export function registerOidcRoutes(basePath: string) {
       }
       if (!isPublicClient(client) && !(await verifyClientSecret(client, clientSecret))) {
         res.status(401).json({ error: "invalid_client" });
+        return;
+      }
+
+      // A service calling on its own behalf. There is no user, no code and no
+      // redirect: the client's own credentials are the whole authorization, so
+      // the token names the client as its subject. A public client has no
+      // secret to prove anything with, so it cannot use this grant.
+      if (grantType === "client_credentials") {
+        if (isPublicClient(client)) {
+          res.status(401).json({
+            error: "invalid_client",
+            error_description: "client_credentials requires a confidential client",
+          });
+          return;
+        }
+        const token = await signIdToken(
+          {
+            id: client.clientId,
+            email: "",
+            name: client.name ?? client.clientId,
+            role: "service",
+            appRoles: [],
+          },
+          { issuer, audience: client.clientId, scopes: [] },
+        );
+        res.json({
+          access_token: token,
+          token_type: "Bearer",
+          expires_in: DEFAULT_ID_TOKEN_TTL_SECONDS,
+        });
         return;
       }
 
