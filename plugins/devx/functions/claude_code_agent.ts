@@ -61,6 +61,72 @@ export async function ensureClaudeCodeServer() {
   throw new Error("Claude Code Node.js server failed to start");
 }
 
+/**
+ * Answers a sidecar "permission" event (canUseTool in fn-claude-code/server.js)
+ * by writing the decision file it polls for. Decides via devx's own consent
+ * path (devx.tool_consents/pending_consents — the same DB flow agent.ts's
+ * requireConsent uses), NOT eve's approval gate: eve keys approvals to
+ * agents.turns, which a legacy devx chat has none of. Staged landing — Task 6
+ * re-points this at eve's gate once sidecar turns run as real eve turns.
+ * Any failure to decide denies, matching the sidecar's own deny-on-timeout —
+ * writing nothing would instead hang the tool call for the full 5 minutes.
+ */
+export async function answerPermissionRequest({ id, toolName, input, chatId, userId, sqlFn, send, autoApprove }) {
+  let result;
+  try {
+    result = await decidePermission({ id, toolName, input: input || {}, chatId, userId, sqlFn, send, autoApprove });
+  } catch {
+    result = { behavior: "deny", message: "Permission decision failed" };
+  }
+  try {
+    await Deno.writeTextFile(`/tmp/.claude-permission-${id}.decision`, JSON.stringify(result));
+  } catch {}
+  return result;
+}
+
+async function decidePermission({ id, toolName, input, chatId, userId, sqlFn, send, autoApprove }) {
+  if (autoApprove) return { behavior: "allow", updatedInput: input };
+
+  const pref = await sqlFn(
+    `SELECT consent FROM devx.tool_consents WHERE user_id = $1 AND tool_name = $2`,
+    [userId, toolName],
+  );
+  if (pref.rows[0]?.consent === "always") return { behavior: "allow", updatedInput: input };
+
+  await sqlFn(
+    `INSERT INTO devx.pending_consents (request_id, chat_id, user_id) VALUES ($1, $2, $3)`,
+    [id, chatId, userId],
+  );
+  // Reuses the existing consent_request UI/round trip (same event the ai-sdk
+  // agent loop in agent.ts sends) rather than inventing a second mechanism.
+  send({ type: "consent_request", requestId: id, toolName, inputPreview: JSON.stringify(input).slice(0, 200) });
+
+  const decision = await new Promise((resolve) => {
+    const startTime = Date.now();
+    const poll = async () => {
+      const result = await sqlFn(`SELECT decision FROM devx.pending_consents WHERE request_id = $1`, [id]);
+      const row = result.rows[0];
+      if (row?.decision) { resolve(row.decision); return; }
+      if (Date.now() - startTime > 5 * 60 * 1000) { resolve("deny"); return; }
+      setTimeout(poll, 500);
+    };
+    poll();
+  });
+  await sqlFn(`DELETE FROM devx.pending_consents WHERE request_id = $1`, [id]);
+
+  if (decision === "always") {
+    await sqlFn(
+      `INSERT INTO devx.tool_consents (user_id, tool_name, consent) VALUES ($1, $2, 'always')
+       ON CONFLICT (user_id, tool_name) DO UPDATE SET consent = 'always'`,
+      [userId, toolName],
+    );
+  }
+
+  return decision === "allow" || decision === "always"
+    ? { behavior: "allow", updatedInput: input }
+    : { behavior: "deny", message: "Denied by user" };
+}
+
 export async function streamClaudeCodeChat({
   chatId, userId, appId, chatMode, settings, history, send, sqlFn,
   skillContext, commandOverride, hasComponentSelection, workspacePathOverride, useWorktree, remoteChannel, attachments,
@@ -217,6 +283,13 @@ export async function streamClaudeCodeChat({
                 break;
               case "token_usage":
                 send({ type: "token_usage", ...data });
+                break;
+              case "permission":
+                await answerPermissionRequest({
+                  id: data.id, toolName: data.toolName, input: data.input,
+                  chatId, userId, sqlFn, send,
+                  autoApprove: !!effectiveSettings.auto_approve,
+                });
                 break;
               case "elicitation": {
                 // Use the existing questionnaire UI to ask the user
