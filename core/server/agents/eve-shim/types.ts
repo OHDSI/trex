@@ -38,6 +38,12 @@ export interface HookCtx {
   principal?: { principalType: string; principalId: string };
   env: (k: string) => string | undefined;
   sql: QueryFn;
+  // Same shape/posture as ToolContext.emit below (fire-and-forget, safe to
+  // omit): lets a lifecycle hook (onToolCall/onToolResult/onTurnEnd/
+  // buildUserMessage) surface something onto the session stream, e.g.
+  // devx's onFailure->"hook.failed". handler.ts's buildHookCtx wires this to
+  // the same publish()->tool.event channel toolEmit uses.
+  emit?: (name: string, data: unknown) => void;
 }
 
 // A resolved model + credentials, returned by `resolveModel` in place of an
@@ -79,6 +85,10 @@ export interface AgentConfig {
   // guard already covers that case just because the field already exists.
   reasoningEffort?: string;
   skills?: string[];
+  // Replaces the deployment escalate list for THIS agent only, same grammar as
+  // AGENTS_ESCALATE_TOOLS. Deployment-authored code, never request input — a
+  // request-supplied list would let a caller disarm its own floor.
+  escalate?: string;
   // Additive hooks (eve ignores unknown defineAgent fields): called on EVERY
   // turn/chat request, never cached at agent-load time. A thrown/rejected
   // hook must fail the request rather than silently falling back to
@@ -151,6 +161,30 @@ export interface AgentConfig {
   // Fails the turn on throw, same posture as buildInstructions: a turn built
   // on a half-resolved prompt is worse than no turn.
   buildUserMessage?: (base: string, ctx: HookCtx) => Promise<string>;
+  // pre fires before the summary is built and may return text preserved
+  // verbatim into the summary input; post fires after it lands. Both are
+  // swallowed on throw — compaction runs to relieve context pressure and
+  // must not be blocked by a hook.
+  onCompact?: (
+    phase: "pre" | "post",
+    info: { messageCount: number; tokenEstimate: number },
+    ctx: HookCtx,
+  ) => Promise<string | undefined>;
+  // Task 11's turn-diff route. Resolves the git worktree a session's file
+  // tools write into, for `git diff`ing exactly the paths a turn touched.
+  // Core has no workspace concept of its own — this is deployment-authored,
+  // like resolveModel/buildInstructions. Not per-request HookCtx-shaped: the
+  // diff route is a bare GET with no live request context, so it hands over
+  // what IT can read from the store instead (the session's created_by as
+  // userId, and the TURN's own metadata, not the current request's). Absent,
+  // or resolving to undefined, means the route reports unavailable rather
+  // than guessing at a cwd — never call this as a substitute for HookCtx.
+  resolveWorkspace?: (info: {
+    sessionId: string;
+    turnId: string;
+    userId?: string;
+    metadata?: unknown;
+  }) => Promise<string | undefined>;
 }
 
 // Resolved agent config: guaranteed to have all fields fully populated.

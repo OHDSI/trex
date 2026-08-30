@@ -30,6 +30,14 @@ export function safeJoin(basePath: string, ...paths: string[]): string {
     throw new Error(`Path traversal detected: "${paths.join("/")}"`);
   }
 
+  // .git holds executable configuration (hooks run on git operations; config
+  // can set diff.external), so a model write there is code execution, not
+  // data. git_identity.ts writes .git/devx.gitconfig via plain join(), not
+  // safeJoin, so it is unaffected.
+  if (rel.split(/[/\\]/).some((segment) => segment === ".git")) {
+    throw new Error(`Refusing to write inside .git: "${paths.join("/")}"`);
+  }
+
   return joined;
 }
 

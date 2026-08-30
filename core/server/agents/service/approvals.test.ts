@@ -3,6 +3,7 @@
 // directly so channel resume can rely on the same semantics.
 import { assert, assertEquals } from "jsr:@std/assert";
 import { resolveApprovalDecision } from "./approvals.ts";
+import type { EscalateList } from "./approval-policy.ts";
 import type { AgentStore } from "./store.ts";
 
 // Minimal in-memory approvals store matching the columns the resolver touches.
@@ -150,7 +151,7 @@ Deno.test("always is refused for an escalate-list tool and the request stays pen
   const { store, approvals, consents } = fakeStore();
   approvals.set("r1", { decision: null, sessionId: "s1", tool: "GitPush" });
   const res = await resolveApprovalDecision(store, "s1", { requestId: "r1", decision: "always" }, {
-    plugin: "p", agentName: "a", userId: "u1", escalate: [{ tool: "GitPush", scopes: [] }],
+    plugin: "p", agentName: "a", userId: "u1", escalate: [{ tool: "GitPush", scopes: [], tier: "hard" }],
   });
   assertEquals(res.ok, false);
   assert(res.error?.includes("GitPush"));
@@ -163,7 +164,7 @@ Deno.test("always still sticks for a tool that is not escalated", async () => {
   const { store, approvals, consents } = fakeStore();
   approvals.set("r1", { decision: null, sessionId: "s1", tool: "Write", scopeKey: "a.ts" });
   const res = await resolveApprovalDecision(store, "s1", { requestId: "r1", decision: "always" }, {
-    plugin: "p", agentName: "a", userId: "u1", escalate: [{ tool: "GitPush", scopes: [] }],
+    plugin: "p", agentName: "a", userId: "u1", escalate: [{ tool: "GitPush", scopes: [], tier: "hard" }],
   });
   assertEquals(res, { ok: true });
   assertEquals(consents, [
@@ -175,7 +176,7 @@ Deno.test("a plain approve on an escalated tool is unaffected", async () => {
   const { store, approvals } = fakeStore();
   approvals.set("r1", { decision: null, sessionId: "s1", tool: "GitPush" });
   const res = await resolveApprovalDecision(store, "s1", { requestId: "r1", decision: "approve" }, {
-    plugin: "p", agentName: "a", userId: "u1", escalate: [{ tool: "GitPush", scopes: [] }],
+    plugin: "p", agentName: "a", userId: "u1", escalate: [{ tool: "GitPush", scopes: [], tier: "hard" }],
   });
   assertEquals(res, { ok: true });
   assertEquals(approvals.get("r1")!.decision, "approve");
@@ -183,7 +184,7 @@ Deno.test("a plain approve on an escalated tool is unaffected", async () => {
 
 // A scoped entry must refuse only its own scope, not the whole tool.
 Deno.test("a scoped escalate entry refuses always only for that scope", async () => {
-  const esc = [{ tool: "Bash", scopes: ["rm"] }];
+  const esc: EscalateList = [{ tool: "Bash", scopes: ["rm"], tier: "hard" }];
 
   const dangerous = fakeStore();
   dangerous.approvals.set("r1", { decision: null, sessionId: "s1", tool: "Bash", scopeKey: "rm" });
@@ -202,6 +203,20 @@ Deno.test("a scoped escalate entry refuses always only for that scope", async ()
   assertEquals(benign.consents.length, 1);
 });
 
+// Task 2 (2026-08-29-claw-safe-approvals): a soft tier never becomes a sticky
+// grant either — only unattended execution yields, not the "always" refusal.
+Deno.test("always is refused for a SOFT tool too, not just hard", async () => {
+  const { store, approvals, consents } = fakeStore();
+  approvals.set("r1", { decision: null, sessionId: "s1", tool: "Bash", scopeKey: "rm" });
+  const res = await resolveApprovalDecision(store, "s1", { requestId: "r1", decision: "always" }, {
+    plugin: "p", agentName: "a", userId: "u1",
+    escalate: [{ tool: "Bash", scopes: ["rm"], tier: "soft" }],
+  });
+  assertEquals(res.ok, false);
+  assertEquals(approvals.get("r1")!.decision, null);
+  assertEquals(consents.length, 0);
+});
+
 // A refused batch must leave EVERY request pending, not resolve the ones it
 // already walked past.
 Deno.test("one escalated tool in a batch refuses the whole batch", async () => {
@@ -213,7 +228,7 @@ Deno.test("one escalated tool in a batch refuses the whole batch", async () => {
       { requestId: "r1", optionId: "always" },
       { requestId: "r2", optionId: "always" },
     ],
-  }, { plugin: "p", agentName: "a", userId: "u1", escalate: [{ tool: "GitPush", scopes: [] }] });
+  }, { plugin: "p", agentName: "a", userId: "u1", escalate: [{ tool: "GitPush", scopes: [], tier: "hard" }] });
   assertEquals(res.ok, false);
   assertEquals(approvals.get("r1")!.decision, null);
   assertEquals(approvals.get("r2")!.decision, null);

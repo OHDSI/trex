@@ -9,8 +9,12 @@ export interface ApprovalVerdict {
   reason?: "consent-never" | "no-approver";
 }
 
-// One parsed escalate rule. Empty `scopes` matches every invocation of the tool.
-export type EscalateList = Array<{ tool: string; scopes: string[] }>;
+export type EscalateTier = "hard" | "soft";
+
+// `tier` distinguishes "a human must see this, always" from "prefer a human,
+// but do not permanently grant it". Both refuse a sticky always; only hard
+// blocks an unattended session.
+export type EscalateList = Array<{ tool: string; scopes: string[]; tier: EscalateTier }>;
 
 export interface ApprovalPolicyInput {
   toolName: string;
@@ -22,8 +26,8 @@ export interface ApprovalPolicyInput {
 }
 
 export const DEFAULT_ESCALATE =
-  "GitPush,ExecuteSQL,DeleteFile,CronCreate,CronDelete,RestartApp," +
-  "Bash:rm|sudo|curl|wget|ssh|scp|dd|chmod|chown";
+  "!GitPush,!ExecuteSQL,!CronCreate,!CronDelete,!RestartApp,!Bash:sudo|dd|ssh|scp," +
+  "DeleteFile,Bash:rm|curl|wget|chmod|chown";
 
 // Parsed once. toolset.ts falls back to this when a caller passes no list;
 // the environment override is read by handler.ts, not here.
@@ -34,9 +38,15 @@ function parseEntries(raw: string): EscalateList {
   for (const entry of raw.split(",")) {
     const trimmed = entry.trim();
     if (!trimmed) continue;
-    const colon = trimmed.indexOf(":");
-    const tool = (colon === -1 ? trimmed : trimmed.slice(0, colon)).trim();
-    const scopeRaw = colon === -1 ? "" : trimmed.slice(colon + 1).trim();
+    const hard = trimmed.startsWith("!");
+    const rest = hard ? trimmed.slice(1).trim() : trimmed;
+    if (!rest) {
+      console.warn(`agents: skipping malformed AGENTS_ESCALATE_TOOLS entry '${entry}'`);
+      continue;
+    }
+    const colon = rest.indexOf(":");
+    const tool = (colon === -1 ? rest : rest.slice(0, colon)).trim();
+    const scopeRaw = colon === -1 ? "" : rest.slice(colon + 1).trim();
     if (!tool || (colon !== -1 && !scopeRaw)) {
       console.warn(`agents: skipping malformed AGENTS_ESCALATE_TOOLS entry '${entry}'`);
       continue;
@@ -44,7 +54,7 @@ function parseEntries(raw: string): EscalateList {
     const scopes = scopeRaw === ""
       ? []
       : scopeRaw.split("|").map((s) => s.trim().toLowerCase()).filter(Boolean);
-    out.push({ tool, scopes });
+    out.push({ tool, scopes, tier: hard ? "hard" : "soft" });
   }
   return out;
 }
@@ -62,24 +72,62 @@ export function parseEscalateList(raw: string | undefined): EscalateList {
   return parsed;
 }
 
-// A scope key is a `+`-separated SET (Bash keys on every executable a command
-// runs), and ANY part matching escalates. A path key holding a literal `+` (a
-// file named `a+b.ts`) can therefore over-match — that errs toward MORE
-// escalation, the safe direction.
-export function matchesEscalate(list: EscalateList, toolName: string, scopeKey: string): boolean {
-  const parts = scopeKey.toLowerCase().split("+");
-  return list.some((e) =>
-    e.tool === toolName && (e.scopes.length === 0 || parts.some((p) => e.scopes.includes(p)))
-  );
+// Returns null when `raw` yields no usable entries, so a caller can tell
+// "unparseable" from "deliberately the default". parseEscalateList cannot:
+// it substitutes the default internally.
+export function parseEscalateStrict(raw: string): EscalateList | null {
+  const parsed = parseEntries(raw);
+  return parsed.length > 0 ? parsed : null;
+}
+
+// Pure so a test can supply a deployment list that differs from the built-in
+// default; a module-level env-derived const is not something a test can vary.
+export function resolveEscalateFor(
+  authored: string | undefined,
+  deployment: EscalateList,
+  agentName?: string,
+): EscalateList {
+  if (typeof authored === "string" && authored.trim() !== "") {
+    const parsed = parseEscalateStrict(authored);
+    if (parsed) return parsed;
+    console.warn(`agents: agent '${agentName ?? "?"}' has an unparseable escalate list — using the deployment list`);
+  }
+  return deployment;
+}
+
+// Returns the matched tier, or null. A boolean cannot express the hard/soft
+// distinction, so callers that only need "matched at all" test `!== null`.
+export function matchEscalate(
+  list: EscalateList,
+  toolName: string,
+  scopeKey: string,
+): EscalateTier | null {
+  const scope = scopeKey.toLowerCase();
+  // A `+`-joined Bash key is a SET of executables; matching ANY part is
+  // correct, and over-matching a path containing a literal `+` errs toward
+  // MORE escalation, which is the safe direction.
+  const parts = scope.split("+");
+  let soft: EscalateTier | null = null;
+  for (const e of list) {
+    if (e.tool !== toolName) continue;
+    if (e.scopes.length !== 0 && !e.scopes.some((s) => parts.includes(s))) continue;
+    if (e.tier === "hard") return "hard"; // hard wins outright
+    soft = "soft";
+  }
+  return soft;
 }
 
 export function resolveApproval(input: ApprovalPolicyInput): ApprovalVerdict {
   if (input.consent === "never") return { outcome: "deny", reason: "consent-never" };
-  // Above `always` and `unattended` deliberately: the escalate list is the
-  // deployment's floor, and under a shared bot identity one click would
-  // otherwise disarm it for everyone. No channel to ask means deny, not park.
-  if (matchesEscalate(input.escalate, input.toolName, input.scopeKey)) {
+  const tier = matchEscalate(input.escalate, input.toolName, input.scopeKey);
+  // Both tiers sit above the sticky grant, so neither can be bought off with
+  // one "always" click under a shared bot identity.
+  if (tier === "hard") {
     return input.channelBound ? { outcome: "gate" } : { outcome: "deny", reason: "no-approver" };
+  }
+  if (tier === "soft") {
+    // Yields to a bot so a coder can run rm/curl, still gates a human.
+    return input.unattended ? { outcome: "allow" } : { outcome: "gate" };
   }
   if (input.consent === "always") return { outcome: "allow" };
   if (input.unattended) return { outcome: "allow" };

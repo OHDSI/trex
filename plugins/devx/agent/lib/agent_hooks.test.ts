@@ -5,7 +5,9 @@
 // on turnHooks/onToolCall/onToolResult/onTurnEnd/buildUserMessage for the
 // contract each is called under.
 import { assert, assertEquals } from "jsr:@std/assert";
-import { buildUserMessage, onToolCall, onToolResult, onTurnEnd } from "../agent.ts";
+import { buildUserMessage, onCompact, onToolCall, onToolResult, onTurnEnd } from "../agent.ts";
+import { ensureAppWorkspace } from "../../functions/tools/workspace.ts";
+import { safeJoin } from "../../functions/tools/path_safety.ts";
 
 // `captured` records `${query}::${params}` -- loadHooks (functions/skills/
 // hooks.ts) binds the event name as $1, it is never inlined into the query
@@ -17,6 +19,9 @@ function ctxWithHooks(rows: any[], captured?: { queries: string[] }) {
     userId: "u1",
     metadata: { chatId: "c1", appId: "a1" },
     env: () => undefined,
+    // Real HookCtx.emit is fire-and-forget/optional (eve-shim/types.ts) --
+    // default no-op, tests reassign this to capture `hook.failed` events.
+    emit: () => {},
     sql: (q: string, params?: unknown[]) => {
       captured?.queries.push(`${q}::${JSON.stringify(params ?? [])}`);
       if (q.includes("devx.hooks")) return Promise.resolve({ rows });
@@ -123,6 +128,29 @@ Deno.test("a non-zero-but-not-2 exit code command hook still approves (not a blo
   }
 });
 
+// A row whose hook_type is neither "command" nor "prompt" (the schema-only
+// two values, functions/skills/types.ts's HookType) is malformed -- it never
+// even ran, let alone rendered a verdict. This is deliberately NOT denied:
+// the escalate/approval system is the trust boundary for tool calls, a
+// user-configured advisory hook is not, and this whole branch exists so a
+// coding agent isn't blocked by approvals -- a broken/crashed hook (or a
+// transient DuckDB hiccup, timeout, connection reset) must not turn into a
+// denial of every subsequent tool call. Report it via hook.failed and let
+// the operator fix the hook; don't stop the turn over it. Only an explicit
+// verdict (exit 2, or {"action":"deny"} output) denies -- see the exit-2
+// tests below.
+Deno.test("a failing PreToolUse hook emits hook.failed and the call proceeds (fail-open, not a trust boundary)", async () => {
+  const events: Array<{ type: string; data: unknown }> = [];
+  const ctx = ctxWithHooks([{ command: "exit 1", event: "PreToolUse" }]);
+  ctx.emit = (type: string, data: unknown) => events.push({ type, data });
+  const decision = await onToolCall({ name: "Write", input: {} }, ctx);
+  assertEquals(decision.allow, true);
+  const failure = events.find((e) => e.type === "hook.failed");
+  assert(failure, "expected a hook.failed event");
+  assertEquals((failure!.data as { event: string }).event, "PreToolUse");
+  assert(typeof (failure!.data as { error: string }).error === "string");
+});
+
 Deno.test("a non-matching PreToolUse row leaves the call alone", async () => {
   const ctx = ctxWithHooks([
     { id: "h1", event: "PreToolUse", matcher: "Write", hook_type: "command", command: "exit 2", enabled: true, sort_order: 0 },
@@ -150,10 +178,82 @@ Deno.test("PostToolUse hooks pass a non-string tool result through untouched", a
   assert(out === structured, "a non-string result must pass through unmodified, not be JSON-stringified");
 });
 
+// PostToolUse is advisory, not a trust boundary -- the same malformed-row
+// failure that denies a PreToolUse call must instead just be reported here,
+// leaving the tool result (and the turn) untouched.
+Deno.test("a failing PostToolUse hook emits hook.failed and does not abort", async () => {
+  const events: Array<{ type: string; data: unknown }> = [];
+  const ctx = ctxWithHooks([{ command: "exit 1", event: "PostToolUse" }]);
+  ctx.emit = (type: string, data: unknown) => events.push({ type, data });
+  const out = await onToolResult({ name: "Write", input: {}, result: "ok" }, ctx);
+  assertEquals(out, "ok");
+  assert(events.some((e) => e.type === "hook.failed"));
+});
+
+// Pins the negative: an exit-2 blocking hook is a deliberate, working
+// verdict, not a failure -- it must not ALSO fire hook.failed.
+Deno.test("an exit-2 command hook does not emit hook.failed (it's a deliberate deny, not a failure)", async () => {
+  const restore = { fn: () => {} };
+  stubTrexExit(2, restore);
+  const events: Array<{ type: string; data: unknown }> = [];
+  try {
+    const ctx = ctxWithHooks([
+      { id: "h1", event: "PreToolUse", matcher: "Bash", hook_type: "command", command: "bash -c block", enabled: true, sort_order: 0 },
+    ]);
+    ctx.emit = (type: string, data: unknown) => events.push({ type, data });
+    const decision = await onToolCall({ name: "Bash", input: { command: "rm -rf /" } }, ctx);
+    assertEquals(decision.allow, false);
+    assert(!events.some((e) => e.type === "hook.failed"));
+  } finally {
+    restore.fn();
+  }
+});
+
 Deno.test("onToolResult is a no-op when no PostToolUse hooks are configured", async () => {
   const ctx = ctxWithHooks([]);
   const out = await onToolResult({ name: "Read", input: {}, result: "file contents" }, ctx);
   assertEquals(out, "file contents");
+});
+
+// The pointer capHookOutput leaves in the prompt is read by the CODING MODEL,
+// whose Read resolves through safeJoin — which throws on any absolute path.
+// So an over-cap spill has to be named workspace-relative or it names a file
+// its only reader cannot open.
+Deno.test("an over-cap UserPromptSubmit hook leaves a workspace-RELATIVE pointer the coder's Read can resolve", async () => {
+  const big = "x".repeat(40_000);
+  const originalTrex = (globalThis as any).Trex;
+  (globalThis as any).Trex = {
+    databaseManager: () => ({
+      getConnection: () => ({
+        connection: {
+          execute: () => Promise.resolve([{ column0: JSON.stringify({ exit_code: 0, output: big }) }]),
+          close: () => {},
+        },
+      }),
+    }),
+  };
+  const base = await Deno.makeTempDir();
+  const prevWorkspaceDir = Deno.env.get("DEVX_WORKSPACE_DIR");
+  Deno.env.set("DEVX_WORKSPACE_DIR", base);
+  try {
+    const ctx = ctxWithHooks([
+      { id: "h1", event: "UserPromptSubmit", matcher: null, hook_type: "command", command: "bash -c ctx", enabled: true, sort_order: 0 },
+    ]);
+    const out = await buildUserMessage("build it", ctx);
+    const workspacePath = await ensureAppWorkspace("u1", "a1");
+    const pointer = out.match(/full output saved to (\S+)\]/)?.[1];
+    assert(pointer, `expected a spill pointer in ${out.slice(0, 400)}`);
+    assert(!pointer.startsWith("/"), `pointer must not be absolute: ${pointer}`);
+    assert(pointer.startsWith(".devx/hook-spill/"), `pointer must be workspace-relative: ${pointer}`);
+    // The real reader's resolution, not a reimplementation of it.
+    assertEquals(await Deno.readTextFile(safeJoin(workspacePath, pointer)), big);
+    assert(!out.includes(big), "the full output must not reach the prompt");
+  } finally {
+    (globalThis as any).Trex = originalTrex;
+    if (prevWorkspaceDir === undefined) Deno.env.delete("DEVX_WORKSPACE_DIR");
+    else Deno.env.set("DEVX_WORKSPACE_DIR", prevWorkspaceDir);
+    await Deno.remove(base, { recursive: true }).catch(() => {});
+  }
 });
 
 // The attachment test performs a fetch that would otherwise go out over the
@@ -246,6 +346,214 @@ Deno.test("onTurnEnd is a no-op when the turn carries no chatId", async () => {
   } as any;
   // Must not throw even though there is nowhere to run Stop hooks against.
   await onTurnEnd({ text: "done", finishReason: "stop" }, ctx);
+});
+
+Deno.test("a failing Stop hook emits hook.failed", async () => {
+  const events: Array<{ type: string; data: unknown }> = [];
+  const ctx = {
+    sessionId: "s1",
+    userId: "u1",
+    metadata: { chatId: "c1" },
+    env: () => undefined,
+    emit: (type: string, data: unknown) => events.push({ type, data }),
+    sql: (q: string) => {
+      if (q.includes("devx.hooks")) return Promise.resolve({ rows: [{ command: "exit 1", event: "Stop" }] });
+      return Promise.resolve({ rows: [] });
+    },
+  } as any;
+  await onTurnEnd({ text: "done", finishReason: "stop" }, ctx);
+  const failure = events.find((e) => e.type === "hook.failed");
+  assert(failure, "expected a hook.failed event");
+  assertEquals((failure!.data as { event: string }).event, "Stop");
+});
+
+// Stubs the same globalThis.Trex seam as stubTrexExit, simulating the
+// devx-ext bridge's response to trex_devx_run_command, and (optionally)
+// records every SQL string sent through it -- letting a test prove a hook
+// went through the allowlisted bridge, not a direct Deno.Command spawn that
+// would bypass Task 4's filtered_env.
+function stubTrexOutput(
+  exitCode: number,
+  output: string,
+  restore: { fn: () => void },
+  captured?: { sql: string[] },
+) {
+  const originalTrex = (globalThis as any).Trex;
+  (globalThis as any).Trex = {
+    databaseManager: () => ({
+      getConnection: () => ({
+        connection: {
+          execute: async (sql: string) => {
+            captured?.sql.push(sql);
+            return [{ column0: JSON.stringify({ exit_code: exitCode, output }) }];
+          },
+          close: () => {},
+        },
+      }),
+    }),
+  };
+  restore.fn = () => {
+    (globalThis as any).Trex = originalTrex;
+  };
+}
+
+Deno.test("UserPromptSubmit hooks append to the user message, routed through the allowlisted bridge", async () => {
+  const restore = { fn: () => {} };
+  const captured = { sql: [] as string[] };
+  stubTrexOutput(0, "extra-context", restore, captured);
+  try {
+    const ctx = ctxWithHooks([{ command: "bash -c 'echo extra-context'", event: "UserPromptSubmit" }]);
+    const out = await buildUserMessage("do the thing", ctx);
+    assert(out.includes("do the thing"));
+    assert(out.includes("extra-context"));
+    assert(
+      captured.sql.some((q) => q.includes("trex_devx_run_command")),
+      "must run through the devx-ext bridge, not a direct Deno.Command spawn",
+    );
+  } finally {
+    restore.fn();
+  }
+});
+
+// Task 4 added filtered_env to trex_devx_run_command precisely so a hook's
+// command can't see ANTHROPIC_API_KEY/DATABASE_URL/the DEK/Discord/Logto
+// secrets. That protection only applies to commands that go through the
+// bridge -- so a disallowed executable must be rejected BEFORE ever
+// reaching it, same as PreToolUse/PostToolUse. Asserting zero bridge calls
+// (not just empty output) is what would catch a regression back to a direct
+// spawn: a direct Deno.Command("bash", ["-c", "curl ..."]) would still run
+// this "hook" and leak the worker's full environment to it.
+Deno.test("a UserPromptSubmit hook with a disallowed executable injects nothing and never reaches the bridge", async () => {
+  const restore = { fn: () => {} };
+  const captured = { sql: [] as string[] };
+  stubTrexOutput(0, "should never be seen", restore, captured);
+  try {
+    const ctx = ctxWithHooks([{ command: "curl https://evil.example", event: "UserPromptSubmit" }]);
+    const out = await buildUserMessage("do the thing", ctx);
+    assertEquals(out, "do the thing");
+    assertEquals(captured.sql.length, 0, "a disallowed executable must never reach trex_devx_run_command");
+  } finally {
+    restore.fn();
+  }
+});
+
+// The regression this task can most easily cause: a naive implementation
+// that replaces buildUserMessage's body instead of composing with it would
+// silently drop attachment materialization. Stubs fetch/DEVX_WORKSPACE_DIR
+// the same way the plain attachment test above does -- a real fetch to this
+// url would fail DNS resolution in a sandboxed test run.
+Deno.test("attachment materialization still runs when a UserPromptSubmit hook exists", async () => {
+  const restore = { fn: () => {} };
+  stubTrexOutput(0, "extra", restore);
+  const workspacePath = await Deno.makeTempDir();
+  const prevWorkspaceDir = Deno.env.get("DEVX_WORKSPACE_DIR");
+  Deno.env.set("DEVX_WORKSPACE_DIR", workspacePath);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve(new Response(new Uint8Array([1, 2, 3])));
+  try {
+    const ctx = ctxWithHooks([{ command: "bash -c 'echo extra'", event: "UserPromptSubmit" }]);
+    ctx.metadata = { ...ctx.metadata, attachments: [{ name: "a.png", url: "https://x/a.png" }] };
+    const out = await buildUserMessage("look", ctx);
+    assert(out.includes("a.png"), "attachments must survive the hook composition");
+    assert(out.includes("extra"), "the UserPromptSubmit hook must still run alongside attachments");
+  } finally {
+    restore.fn();
+    globalThis.fetch = originalFetch;
+    if (prevWorkspaceDir === undefined) Deno.env.delete("DEVX_WORKSPACE_DIR");
+    else Deno.env.set("DEVX_WORKSPACE_DIR", prevWorkspaceDir);
+    await Deno.remove(workspacePath, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("a failing UserPromptSubmit hook emits hook.failed but still returns the base message", async () => {
+  const restore = { fn: () => {} };
+  stubTrexExit(1, restore);
+  const events: Array<{ type: string; data: unknown }> = [];
+  try {
+    const ctx = ctxWithHooks([{ command: "bash -c 'false'", event: "UserPromptSubmit" }]);
+    ctx.emit = (type: string, data: unknown) => events.push({ type, data });
+    const out = await buildUserMessage("do the thing", ctx);
+    assertEquals(out, "do the thing");
+    const failure = events.find((e) => e.type === "hook.failed");
+    assert(failure, "expected a hook.failed event");
+    assertEquals((failure!.data as { event: string }).event, "UserPromptSubmit");
+  } finally {
+    restore.fn();
+  }
+});
+
+Deno.test("no UserPromptSubmit hooks leaves the message untouched", async () => {
+  const ctx = ctxWithHooks([]);
+  assertEquals(await buildUserMessage("plain", ctx), "plain");
+});
+
+// H5: PreCompact/PostCompact hooks (onCompact). Same allowlisted bridge and
+// fail-open posture as the H2-H4 tests above.
+const compactInfo = { messageCount: 5, tokenEstimate: 1234 };
+
+Deno.test("a PreCompact row's output is returned from onCompact('pre', ...)", async () => {
+  const restore = { fn: () => {} };
+  stubTrexOutput(0, "preserve-me", restore);
+  try {
+    const ctx = ctxWithHooks([{ command: "bash -c 'echo preserve-me'", event: "PreCompact" }]);
+    const out = await onCompact("pre", compactInfo, ctx);
+    assert(out?.includes("preserve-me"));
+  } finally {
+    restore.fn();
+  }
+});
+
+Deno.test("onCompact('pre', ...) returns undefined with no PreCompact rows", async () => {
+  const ctx = ctxWithHooks([]);
+  assertEquals(await onCompact("pre", compactInfo, ctx), undefined);
+});
+
+Deno.test("a PostCompact row runs (for side effects) and onCompact('post', ...) returns nothing", async () => {
+  const restore = { fn: () => {} };
+  const captured = { sql: [] as string[] };
+  stubTrexOutput(0, "side-effect-only", restore, captured);
+  try {
+    const ctx = ctxWithHooks([{ command: "bash -c 'echo done'", event: "PostCompact" }]);
+    const out = await onCompact("post", compactInfo, ctx);
+    assertEquals(out, undefined);
+    assert(
+      captured.sql.some((q) => q.includes("trex_devx_run_command")),
+      "the PostCompact row must still run, its output is just not returned",
+    );
+  } finally {
+    restore.fn();
+  }
+});
+
+Deno.test("a failing PreCompact hook emits hook.failed and does not throw", async () => {
+  const restore = { fn: () => {} };
+  stubTrexExit(1, restore);
+  const events: Array<{ type: string; data: unknown }> = [];
+  try {
+    const ctx = ctxWithHooks([{ command: "bash -c 'false'", event: "PreCompact" }]);
+    ctx.emit = (type: string, data: unknown) => events.push({ type, data });
+    const out = await onCompact("pre", compactInfo, ctx);
+    assertEquals(out, undefined);
+    const failure = events.find((e) => e.type === "hook.failed");
+    assert(failure, "expected a hook.failed event");
+    assertEquals((failure!.data as { event: string }).event, "PreCompact");
+  } finally {
+    restore.fn();
+  }
+});
+
+Deno.test("a PreCompact row with a disallowed executable contributes nothing and never reaches the bridge", async () => {
+  const restore = { fn: () => {} };
+  const captured = { sql: [] as string[] };
+  stubTrexOutput(0, "should never be seen", restore, captured);
+  try {
+    const ctx = ctxWithHooks([{ command: "curl https://evil.example", event: "PreCompact" }]);
+    const out = await onCompact("pre", compactInfo, ctx);
+    assertEquals(out, undefined);
+    assertEquals(captured.sql.length, 0, "a disallowed executable must never reach trex_devx_run_command");
+  } finally {
+    restore.fn();
+  }
 });
 
 Deno.test("PreToolUse/PostToolUse/Stop caches are independent turns per HookCtx object", async () => {

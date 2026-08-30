@@ -5,9 +5,11 @@
 // directly; this module deliberately re-exports neither.
 import { assembleHistory, type ModelMessage, type TurnRow } from "./history.ts";
 import { type ContextConfig, estimateTokens, resolveContextWindow, shouldCompact } from "./budget.ts";
+import { capHookOutput } from "./hook-output.ts";
 import { SUMMARIZATION_PROMPT } from "./prompts.ts";
 import { TRUNCATION_HEADER_OVERHEAD, truncateMiddle } from "./truncate.ts";
 import type { AgentEvent } from "../events.ts";
+import type { AgentConfig, HookCtx } from "../../eve-shim/types.ts";
 
 /**
  * Renders assembled messages as a plain-text transcript for the summarizer.
@@ -78,6 +80,31 @@ export type CompactOutcome =
   | { compacted: false }
   | { compacted: true; via: "summary" | "drop"; summary?: string; replacedTurnSeqTo: number };
 
+// Runs one onCompact phase, swallowing any throw — compaction runs to
+// relieve context pressure and must not be blocked by a hook. Mirrors
+// runner.ts's onTurnEnd posture: a hookCtx-less config is a caller wiring
+// bug, not a hook failure, so it warns rather than throwing or silently
+// skipping.
+async function runOnCompact(
+  onCompact: AgentConfig["onCompact"] | undefined,
+  hookCtx: HookCtx | undefined,
+  phase: "pre" | "post",
+  info: { messageCount: number; tokenEstimate: number },
+): Promise<string | undefined> {
+  if (!onCompact) return undefined;
+  if (!hookCtx) {
+    console.warn(`agents: onCompact(${phase}) hook configured but no request context (hookCtx) available — skipping`);
+    return undefined;
+  }
+  try {
+    const result = await onCompact(phase, info, hookCtx);
+    return typeof result === "string" ? result : undefined;
+  } catch (err) {
+    console.error(`agents: onCompact(${phase}) hook failed:`, err);
+    return undefined;
+  }
+}
+
 // Pre-turn only (see the design note in task-12-brief.md): this is called
 // once, before a turn starts, never mid-stream. A mid-turn summary would
 // have to be injected above the last user message or the model misreads it —
@@ -99,8 +126,16 @@ export async function maybeCompact(opts: {
   // session sees it, and the user is the only party who can supply again what
   // the drop fallback just discarded.
   emit?: (e: AgentEvent) => void;
+  // Task 6: observes compaction and may preserve something the summarizer
+  // would otherwise drop. Mirrors runner.ts's onTurnEnd posture: a hookCtx is
+  // required to run it, since it is the hook's only route to the caller's
+  // world (sql, env, principal) — configured-but-unrunnable warns rather than
+  // throwing or silently no-op'ing.
+  onCompact?: AgentConfig["onCompact"];
+  hookCtx?: HookCtx;
 }): Promise<CompactOutcome> {
-  const { turns, msgs, config, modelId, observedInputTokens, prefixTokens, callModel, emit } = opts;
+  const { turns, msgs, config, modelId, observedInputTokens, prefixTokens, callModel, emit, onCompact, hookCtx } =
+    opts;
   const window = resolveContextWindow(modelId, config.contextWindow);
   // Prefer server-observed usage (runner.ts persists it on every turn's
   // "finish" step) over estimateTokens: the estimate is a char/4 heuristic
@@ -136,6 +171,25 @@ export async function maybeCompact(opts: {
   const keep = config.verbatimTurnsAfterCompaction;
   const cutoff = Math.max(1, turns.length - keep);
   const replacedTurnSeqTo = turns[cutoff - 1].seq;
+  const hookInfo = { messageCount: msgs.length, tokenEstimate: inputTokens };
+  // pre runs before the summary input is assembled (both the summary and
+  // drop-fallback branches below are "before" it in that sense) — its return
+  // value, if any, is spliced into that input verbatim, below.
+  const preserved = await runOnCompact(onCompact, hookCtx, "pre", hookInfo);
+  // Cap what the pre hook preserved before it enters the summarizer's own
+  // input — an unbounded onCompact hook would blow the very budget this
+  // compaction is running to relieve. capHookOutput never throws; the outer
+  // catch is defense-in-depth matching this function's fail-open posture.
+  // No spillPath: the summarizer has no file access, so a pointer here would
+  // be inert — truncation is the only honest degradation.
+  let cappedPreserved: string | undefined;
+  if (preserved !== undefined) {
+    try {
+      cappedPreserved = (await capHookOutput(preserved)).text;
+    } catch (err) {
+      console.error("[agents] failed to cap preserved compaction context:", err);
+    }
+  }
   try {
     // Summarize ONLY the turns being compacted away. Passing the whole
     // history also summarized the `keep` most recent turns, which survive
@@ -151,7 +205,11 @@ export async function maybeCompact(opts: {
     // satisfy a provider's tool_use/tool_result pairing rule, and
     // flattenForSummary emits no tool blocks for a provider to reject.
     const transcript = flattenForSummary(assembleHistory(turns.slice(0, cutoff), config));
-    const raw = await summarize(transcript, config, callModel);
+    // The pre hook's whole point: keep something the summarizer would
+    // otherwise drop. Appended, not prepended — the transcript's own chronology
+    // stays intact for the summarizer to read top to bottom.
+    const summaryInput = cappedPreserved !== undefined ? `${transcript}\n${cappedPreserved}` : transcript;
+    const raw = await summarize(summaryInput, config, callModel);
     // A summary that itself exceeds the window defeats the purpose. Allow it
     // a quarter of the window and truncate the rest away. truncateMiddle's
     // maxChars bounds RETAINED content only — its warning header and
@@ -169,6 +227,7 @@ export async function maybeCompact(opts: {
     } catch (e) {
       console.error("[agents] failed to publish the compaction event:", e);
     }
+    await runOnCompact(onCompact, hookCtx, "post", hookInfo);
     return { compacted: true, via: "summary", summary, replacedTurnSeqTo };
   } catch (err) {
     // Never fail the turn because the summarizer did. Drop oldest whole
@@ -185,6 +244,7 @@ export async function maybeCompact(opts: {
     } catch (e) {
       console.error("[agents] failed to publish the compaction warning event:", e);
     }
+    await runOnCompact(onCompact, hookCtx, "post", hookInfo);
     return { compacted: true, via: "drop", replacedTurnSeqTo };
   }
 }

@@ -20,7 +20,7 @@ import type { HookCtx, QueryFn } from "../eve-shim/types.ts";
 import { createChannelHandler, type ChannelSessionStarted } from "../channels/layer.ts";
 import type { ChannelStore } from "../channels/store.ts";
 import { resolveApprovalDecision } from "./approvals.ts";
-import { parseEscalateList } from "./approval-policy.ts";
+import { parseEscalateList, resolveEscalateFor, type EscalateList } from "./approval-policy.ts";
 import { handleOAuthCallback, handleOAuthStart } from "../connections/oauth/routes.ts";
 import type { OAuthProviderDeps } from "../connections/provider.ts";
 import { looksLikeGateResponse, matchGateText } from "../channels/gate-text.ts";
@@ -46,11 +46,24 @@ export interface OAuthBrokerDeps extends OAuthProviderDeps {
   basePath: string;
 }
 
-// The escalate floor is deployment configuration, so it is read ONCE here, at
-// module load — not per turn and not per tool call. handler.ts is the only
-// reader of AGENTS_ESCALATE_TOOLS; toolset.ts/approvals.ts take the parsed
-// list as a parameter and fall back to the same default when nobody passes one.
-const ESCALATE_LIST = parseEscalateList(Deno.env.get("AGENTS_ESCALATE_TOOLS"));
+// The deployment escalate floor is deployment configuration, so it is read
+// ONCE here, at module load — not per turn and not per tool call. handler.ts
+// is the only reader of AGENTS_ESCALATE_TOOLS; toolset.ts/approvals.ts take
+// the parsed list as a parameter and fall back to the same default when
+// nobody passes one.
+const ENV_ESCALATE_LIST = parseEscalateList(Deno.env.get("AGENTS_ESCALATE_TOOLS"));
+
+// Agent override beats the deployment env, which beats the built-in default.
+// Thin wrapper: the actual precedence logic (resolveEscalateFor) is pure and
+// unit-tested directly against a caller-supplied deployment list, since
+// ENV_ESCALATE_LIST is a module const a test cannot vary.
+function resolveEscalate(deps: Deps): EscalateList {
+  const list = resolveEscalateFor(deps.agent.config.escalate, ENV_ESCALATE_LIST, deps.agentName);
+  // Copy so a capturing test hook can only observe, never mutate, the list a
+  // real caller goes on to use.
+  deps.captureEscalate?.([...list]);
+  return list;
+}
 
 // Exported so index.ts can build a real, wake-capable DeliverDeps (via
 // buildDeliverDeps, below) for the periodic sweep — see that function's own
@@ -86,6 +99,9 @@ export interface Deps {
   // runTurn's own retrySleep, the turn loop. Undefined in production, where
   // retry.ts uses a real timer.
   retrySleep?: ModelRetryOpts["sleep"];
+  // Test seam: called with the per-turn resolved escalate list every time
+  // resolveEscalate runs. Undefined in production.
+  captureEscalate?: (list: EscalateList) => void;
 }
 
 const defaultEnv: EnvFn = (k) => Deno.env.get(k);
@@ -94,6 +110,151 @@ const unconfiguredSql: QueryFn = () =>
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
+
+// Task 11's diff mechanism. core/server/agents has no workspace/filesystem
+// concept of its own (scope-key.ts's touchedPaths is deliberately pure —
+// computed from tool inputs, never the disk); devx's GitDiff tool goes
+// through a DuckDB table function (trex_devx_git_diff) only the plugin
+// runtime has loaded, which core has no business reaching into. Shelling out
+// to `git diff` scoped to exactly the recorded paths, in a cwd the AGENT
+// resolves (agent.config.resolveWorkspace — never guessed), is the narrowest
+// thing reachable from this layer. `--` is load-bearing: it stops a model-authored
+// path like "--output=x" from being read as a git flag (args-array form
+// already rules out shell injection). Distinguishes "nothing to show" from
+// "couldn't look" — fix round 1: a swallowed failure is indistinguishable
+// from a clean turn, which is worse than surfacing it.
+//
+// SECURITY (final review, finding 1): `git diff` is SCRIPTABLE by the repo it
+// runs in — `diff.external` and a `diff.<driver>.textconv` reachable through
+// .gitattributes both execute arbitrary commands — and the coder writing into
+// that workspace can author .git/config. So this child is (a) given a cleared,
+// explicitly rebuilt environment, so a driver that does run never sees
+// ANTHROPIC_API_KEY/DATABASE_URL/the DEK/Discord/Logto secrets, (b) told not
+// to run drivers at all, and (c) time-bounded so a slow one cannot wedge the
+// request.
+const GIT_DIFF_TIMEOUT_MS = 15_000;
+
+// Mirrors plugins/devx-ext/src/subprocess.rs's run_git (GIT_TERMINAL_PROMPT
+// plus the safe.directory GIT_CONFIG_* triple, on an otherwise cleared
+// environment) — the two are the same non-interactive-git contract and must
+// not drift. Only PATH/HOME are carried over from the worker.
+function gitChildEnv(): Record<string, string> {
+  return {
+    PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin",
+    HOME: Deno.env.get("HOME") ?? "/tmp",
+    GIT_TERMINAL_PROMPT: "0",
+    // Containers run git as a different uid than the workspace's owner.
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "safe.directory",
+    GIT_CONFIG_VALUE_0: "*",
+  };
+}
+
+// `-c` pairs must precede the subcommand. These neutralize the CONFIGURED
+// drivers; the per-command --no-ext-diff/--no-textconv below neutralize the
+// invocation. Both, deliberately: either alone is one forgotten flag away
+// from executing a repo-authored command.
+const GIT_SAFE_CONFIG = ["-c", "diff.external=", "-c", "core.attributesFile=/dev/null"];
+const GIT_DIFF_FLAGS = ["--no-ext-diff", "--no-textconv"];
+
+// One environment-stripped, time-bounded git child. `okCodes` is a parameter
+// because `diff --no-index` reports "the files differ" as exit 1 — the
+// SUCCESS case for an untracked file.
+async function runGit(
+  cwd: string,
+  args: string[],
+  okCodes: number[] = [0],
+): Promise<{ ok: true; out: string } | { ok: false; error: string }> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), GIT_DIFF_TIMEOUT_MS);
+  try {
+    const { code, stdout, stderr } = await new Deno.Command("git", {
+      args: [...GIT_SAFE_CONFIG, ...args],
+      cwd,
+      clearEnv: true,
+      env: gitChildEnv(),
+      signal: ac.signal,
+      stdin: "null",
+    }).output();
+    if (!okCodes.includes(code)) {
+      const error = ac.signal.aborted
+        ? `git ${args[0]} timed out after ${GIT_DIFF_TIMEOUT_MS}ms`
+        : new TextDecoder().decode(stderr).trim() || `git ${args[0]} exited ${code}`;
+      return { ok: false, error };
+    }
+    return { ok: true, out: new TextDecoder().decode(stdout) };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function pathExists(cwd: string, p: string): Promise<boolean> {
+  try {
+    await Deno.lstat(p.startsWith("/") ? p : `${cwd}/${p}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function gitDiffForPaths(cwd: string, paths: string[]): Promise<{ ok: true; diff: string } | { ok: false; error: string }> {
+  // Which recorded paths git already knows about. One child, and its failure
+  // doubles as the "is this even a repo" probe.
+  const listed = await runGit(cwd, ["ls-files", "-z", "--", ...paths]);
+  if (!listed.ok) {
+    console.error(`agents: git ls-files failed in ${cwd}: ${listed.error}`);
+    return { ok: false, error: listed.error };
+  }
+  const tracked = new Set(listed.out.split("\0").filter((p) => p.length > 0));
+  const trackedPaths = paths.filter((p) => tracked.has(p));
+  const untracked: string[] = [];
+  for (const p of paths) {
+    // A path neither tracked nor on disk (deleted outright, or a workspace
+    // that never held it) contributes nothing — `--no-index` errors on it.
+    if (!tracked.has(p) && await pathExists(cwd, p)) untracked.push(p);
+  }
+  // Every recorded path is invisible here: almost always a workspace/root
+  // mismatch, never "the turn changed nothing". Reported as "couldn't look"
+  // so it cannot be read as a clean turn (see the route's three shapes).
+  if (trackedPaths.length === 0 && untracked.length === 0) {
+    return {
+      ok: false,
+      error: `none of this turn's ${paths.length} touched path(s) are tracked by, or present in, ${cwd}`,
+    };
+  }
+
+  const parts: string[] = [];
+  if (trackedPaths.length > 0) {
+    // `diff HEAD`, not bare `diff`: staged changes are as much this turn's
+    // work as unstaged ones, and bare `diff` shows neither for a file the
+    // coder created and added. Strictly read-only — no `git add -N`.
+    const hasHead = (await runGit(cwd, ["rev-parse", "--verify", "--quiet", "HEAD"])).ok;
+    // A repo with no commits has no HEAD to diff against: compare index and
+    // worktree separately instead, the same pair devx's git.rs joins.
+    const forms = hasHead ? [["diff", ...GIT_DIFF_FLAGS, "HEAD"]] : [["diff", ...GIT_DIFF_FLAGS, "--cached"], ["diff", ...GIT_DIFF_FLAGS]];
+    for (const form of forms) {
+      const r = await runGit(cwd, [...form, "--", ...trackedPaths]);
+      if (!r.ok) {
+        console.error(`agents: git diff failed in ${cwd}: ${r.error}`);
+        return { ok: false, error: r.error };
+      }
+      if (r.out) parts.push(r.out);
+    }
+  }
+  for (const p of untracked) {
+    // The read-only stand-in for `git add -N` + diff: /dev/null against the
+    // file produces a real new-file diff without touching the index.
+    const r = await runGit(cwd, ["diff", ...GIT_DIFF_FLAGS, "--no-index", "--", "/dev/null", p], [0, 1]);
+    if (!r.ok) {
+      console.error(`agents: git diff --no-index failed for ${p} in ${cwd}: ${r.error}`);
+      return { ok: false, error: r.error };
+    }
+    if (r.out) parts.push(r.out);
+  }
+  return { ok: true, diff: parts.join("") };
+}
 
 // Rebuilds prior turns into the ai@6 ModelMessage[] shape streamText
 // consumes. Fixes the defect where the model never saw what its own tool
@@ -160,6 +321,9 @@ function buildHookCtx(deps: Deps, sessionId: string, metadata: unknown, bearerTo
     principal: userId ? { principalType: "user", principalId: userId } : undefined,
     env: deps.env ?? defaultEnv,
     sql: deps.sql ?? unconfiguredSql,
+    // Same `tool.event` wire shape as toolEmit (see runner.ts) so a hook
+    // failure rides the same channel a subscriber already listens on.
+    emit: (name, data) => publish(sessionId, { type: "tool.event", data: { name, payload: data } }),
   };
 }
 
@@ -367,7 +531,7 @@ function startTurn(
             deps.store,
             sessionId,
             { requestId: pending.requestId, decision: "deny" },
-            { plugin: deps.plugin, agentName: deps.agentName, userId, escalate: ESCALATE_LIST },
+            { plugin: deps.plugin, agentName: deps.agentName, userId, escalate: resolveEscalate(deps) },
           );
           deniedPendingGate = resolved.ok;
         }
@@ -656,6 +820,8 @@ function startTurn(
           // stream even though no turn exists yet (compaction is pre-turn) —
           // context.compacted is turn-agnostic for exactly this reason.
           emit: (e) => publish(sessionId, e),
+          onCompact: deps.agent.config.onCompact,
+          hookCtx,
         });
         if (outcome.compacted) {
           compacted = true;
@@ -818,7 +984,7 @@ function startTurn(
         depth,
         unattended,
         channelBound,
-        escalate: ESCALATE_LIST,
+        escalate: resolveEscalate(deps),
         retrySleep: deps.retrySleep,
         ...(abort ? { abortSignal: abort.signal } : {}),
       });
@@ -1451,7 +1617,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
             store,
             sessionId,
             { requestId: r.requestId, decision: r.optionId },
-            { plugin: deps.plugin, agentName: deps.agentName, userId: createdBy, escalate: ESCALATE_LIST },
+            { plugin: deps.plugin, agentName: deps.agentName, userId: createdBy, escalate: resolveEscalate(deps) },
           );
           // Only a refused decision 400s (same rule as the /approval route).
           // Any other failure must fall through, or an `{inputResponses,
@@ -1491,7 +1657,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
         store,
         sessionId,
         { requestId: body.requestId, decision: body.decision },
-        { plugin: deps.plugin, agentName: deps.agentName, userId: createdBy, escalate: ESCALATE_LIST },
+        { plugin: deps.plugin, agentName: deps.agentName, userId: createdBy, escalate: resolveEscalate(deps) },
       );
       if (ok) return json({ resolved: true });
       // A refused decision is a bad request, not a missing resource. Every
@@ -1562,6 +1728,41 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       return new Response(body, {
         headers: { "content-type": "application/x-ndjson", "cache-control": "no-cache", connection: "keep-alive" },
       });
+    }
+
+    // Task 11: read-only diff of exactly what this turn's file tools touched
+    // (Task 10's touched_paths). Only Write/Edit/DeleteFile/CopyFile/RenameFile
+    // are tracked (scope-key.ts's touchedPaths) — a turn whose changes came
+    // from a Bash command reports an empty diff here, not an error. Fix
+    // round 1: "no paths" (empty diff) and "couldn't produce a diff" (error,
+    // no diff key) are kept distinguishable in the body — a caller must never
+    // be told "nothing changed" when the truth is "we could not look".
+    const diffRoute = path.match(/^\/eve\/v1\/session\/([^/]+)\/turn\/([^/]+)\/diff$/);
+    if (diffRoute && req.method === "GET") {
+      const [, sessionId, turnId] = diffRoute;
+      // Session-scoped in the store query itself (see turnBelongsToSession) —
+      // a turn from another session 404s exactly like an unknown one.
+      if (!(await store.turnBelongsToSession(turnId, sessionId))) return json({ error: "turn not found" }, 404);
+      const paths = await store.getTouchedPaths(turnId);
+      if (paths.length === 0) return json({ paths, diff: "" });
+      // Fix round 2: agent.config.resolveWorkspace (deployment-authored, like
+      // resolveModel/buildInstructions), not Deps — there is exactly one
+      // generic Deps-construction site (service/index.ts) shared by every
+      // agent, so nothing plugin-specific can hook it there. This route has
+      // no live request/HookCtx (a bare GET), so it hands over what the
+      // store can tell it instead: the session's own created_by as userId,
+      // and the TURN's OWN metadata (not this request's, which has none).
+      const cwd = agent.config.resolveWorkspace
+        ? await agent.config.resolveWorkspace({
+          sessionId,
+          turnId,
+          userId: (await store.getSession(sessionId))?.created_by ?? undefined,
+          metadata: await store.getTurnMetadata(turnId),
+        })
+        : undefined;
+      if (!cwd) return json({ paths, error: "no workspace available to diff against" });
+      const result = await gitDiffForPaths(cwd, paths);
+      return result.ok ? json({ paths, diff: result.diff }) : json({ paths, error: result.error });
     }
 
     if (req.method === "POST" && path === "/chat") {
@@ -1655,7 +1856,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
         // the value just written, and a /chat session is never channel-bound.
         unattended,
         channelBound: false,
-        escalate: ESCALATE_LIST,
+        escalate: resolveEscalate(deps),
       });
       // Switched from the bare `result.toUIMessageStreamResponse()` to
       // createUIMessageStream + writer.merge so ToolContext.emit has somewhere

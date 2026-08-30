@@ -339,3 +339,15 @@ Deno.test("the EDN-spelled role keys are still stripped from a TS-authored confi
   // index signature, and asserting absence needs no cast at all.
   assertEquals(Object.hasOwn(a.config, "reasoning-effort"), false);
 });
+
+// The config.skills defect (above) was exactly this shape: assigned, then
+// deleted two lines later by the ROLE_EDN_KEYS cleanup loop. escalate is a
+// plain string field with no EDN spelling, so it must never be added to that
+// map — this proves it survives a real loadAgent.
+Deno.test("loadAgent preserves config.escalate", async () => {
+  const tmp = await Deno.makeTempDir();
+  await Deno.writeTextFile(`${tmp}/instructions.md`, "hi");
+  await Deno.writeTextFile(`${tmp}/agent.ts`, 'export default { escalate: "!GitPush" };\n');
+  const a = await loadAgent(tmp);
+  assertEquals(a.config.escalate, "!GitPush");
+});

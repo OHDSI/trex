@@ -145,12 +145,29 @@ function collectExecutables(command: string, depth: number, out: Set<string>): v
 }
 
 // The SET of executables a command runs, sorted and `+`-joined — one key that
-// serves both consent scoping and the escalate floor (matchesEscalate splits on
+// serves both consent scoping and the escalate floor (matchEscalate splits on
 // `+`). `cd /app && rm -rf .` keys as `cd+rm`, so the floor still sees `rm`.
 export function bashScopeKey(command: string): string {
   const out = new Set<string>();
   collectExecutables(command, 0, out);
   return [...out].sort().join("+");
+}
+
+// The workspace path(s) a successful call to `toolName` actually touched, for
+// Task 10's touched_paths recording. Uses the same PATH_TOOLS/PAIR_TOOLS sets
+// and normalizePath as deriveScopeKey above so the two cannot drift; unlike
+// deriveScopeKey (one opaque string, JSON-joined for a pair), this returns
+// each endpoint separately so both sides of a copy/rename get recorded.
+export function touchedPaths(toolName: string, input: unknown): string[] {
+  const obj = input && typeof input === "object" ? input as Record<string, unknown> : {};
+  if (PATH_TOOLS.has(toolName)) {
+    return typeof obj.path === "string" ? [normalizePath(obj.path)] : [];
+  }
+  if (PAIR_TOOLS.has(toolName)) {
+    if (typeof obj.source !== "string" || typeof obj.destination !== "string") return [];
+    return [normalizePath(obj.source), normalizePath(obj.destination)];
+  }
+  return [];
 }
 
 export function deriveScopeKey(toolName: string, input: unknown): string {

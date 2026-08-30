@@ -10,7 +10,7 @@
 // investigate-hitl-turns.md). agents.approvals.decision's CHECK stays
 // approve/deny; the sticky verbs are folded to approve/deny before they hit it.
 import type { AgentStore } from "./store.ts";
-import { DEFAULT_ESCALATE_LIST, matchesEscalate } from "./approval-policy.ts";
+import { DEFAULT_ESCALATE_LIST, matchEscalate } from "./approval-policy.ts";
 import type { EscalateList } from "./approval-policy.ts";
 
 export type ApprovalDecision = "approve" | "deny" | "always" | "never";
@@ -116,7 +116,8 @@ export async function resolveApprovalDecision(
   for (const d of decisions) {
     if (d.decision !== "always") continue;
     const scope = await store.getApprovalScope(d.requestId!);
-    if (scope && matchesEscalate(escalate, scope.tool, scope.scopeKey)) {
+    // Both tiers refuse a sticky always — only unattended execution tells them apart.
+    if (scope && matchEscalate(escalate, scope.tool, scope.scopeKey) !== null) {
       return {
         ok: false,
         refused: true,

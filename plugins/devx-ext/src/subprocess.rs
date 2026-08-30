@@ -2,11 +2,63 @@ use crate::validation::strip_credentials;
 use std::error::Error;
 use std::process::Command;
 
+// SSH_AUTH_SOCK deliberately excluded: it forwards live signing authority
+// (auth as the host to every trusting SSH endpoint), not a static secret.
+// This repo's GitHub auth is HTTPS-token based and commit signing uses a
+// materialized key file, so no consumer needs it; DEVX_CHILD_ENV_EXTRA is
+// the way back for a deployment with a real SSH-remote workflow.
+//
+// PIP_INDEX_URL/PIP_EXTRA_INDEX_URL/GOPROXY and CARGO_REGISTRY_TOKEN are also
+// deliberately excluded: the first three routinely embed credentials in the
+// URL itself, and the last is a token outright. Use DEVX_CHILD_ENV_EXTRA.
+const ALLOWED_EXACT: &[&str] = &[
+    "PATH", "HOME", "SHELL", "USER", "LOGNAME", "TERM", "TZ", "TMPDIR", "LANG",
+    "PWD", "DENO_DIR", "CARGO_HOME", "RUSTUP_HOME",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+    "JAVA_HOME", "GOPATH", "GOCACHE", "GOMODCACHE", "GRADLE_USER_HOME", "MAVEN_OPTS",
+];
+const ALLOWED_PREFIX: &[&str] = &["LC_", "NODE_", "npm_config_", "NPM_CONFIG_", "YARN_", "PNPM_"];
+
+// A prefix admits names nobody vetted one by one, so anything that reads as
+// a credential is refused even when its prefix is allowed. Over-refusing is
+// recoverable via DEVX_CHILD_ENV_EXTRA; under-refusing leaks a secret.
+const SECRET_MARKERS: &[&str] = &["AUTH", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL"];
+
+fn looks_secret(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    SECRET_MARKERS.iter().any(|m| upper.contains(m))
+}
+
+/// Filter a parent environment down to what a workspace command legitimately
+/// needs. Allowlist, not denylist: a newly added secret must not become
+/// reachable by default just because nobody remembered to deny it.
+pub fn filtered_env<I>(parent: I, extra: Option<&str>) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let extras: Vec<&str> = extra
+        .map(|s| s.split(',').map(str::trim).filter(|s| !s.is_empty()).collect())
+        .unwrap_or_default();
+    parent
+        .into_iter()
+        .filter(|(k, _)| {
+            ALLOWED_EXACT.contains(&k.as_str())
+                || (ALLOWED_PREFIX.iter().any(|p| k.starts_with(p)) && !looks_secret(k))
+                || extras.contains(&k.as_str())
+        })
+        .collect()
+}
+
 /// Run a git command in the given working directory.
 pub fn run_git(args: &[&str], cwd: &str) -> Result<String, Box<dyn Error>> {
+    let extra = std::env::var("DEVX_CHILD_ENV_EXTRA").ok();
     let output = Command::new("git")
         .args(args)
         .current_dir(cwd)
+        // env_clear THEN allowlist THEN the explicit GIT_* below — reversing
+        // this order wipes the GIT_CONFIG_* set just below it too.
+        .env_clear()
+        .envs(filtered_env(std::env::vars(), extra.as_deref()))
         .env("GIT_TERMINAL_PROMPT", "0")
         // Mark all directories as safe to avoid "dubious ownership" errors
         // in container environments where git may run as a different user.
@@ -50,9 +102,12 @@ pub fn run_git(args: &[&str], cwd: &str) -> Result<String, Box<dyn Error>> {
 /// Run an allowlisted command in the given working directory.
 /// Returns (success, exit_code, stdout, stderr).
 pub fn run_command(cmd: &str, args: &[&str], cwd: &str) -> Result<(bool, i32, String, String), Box<dyn Error>> {
+    let extra = std::env::var("DEVX_CHILD_ENV_EXTRA").ok();
     let output = Command::new(cmd)
         .args(args)
         .current_dir(cwd)
+        .env_clear()
+        .envs(filtered_env(std::env::vars(), extra.as_deref()))
         .output()
         .map_err(|e| format!("{cmd} spawn failed: {e}"))?;
 
@@ -61,4 +116,88 @@ pub fn run_command(cmd: &str, args: &[&str], cwd: &str) -> Result<(bool, i32, St
     let code = output.status.code().unwrap_or(-1);
 
     Ok((output.status.success(), code, stdout, stderr))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::filtered_env;
+
+    fn env_of(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    fn names(out: &[(String, String)]) -> Vec<&str> {
+        out.iter().map(|(k, _)| k.as_str()).collect()
+    }
+
+    #[test]
+    fn keeps_what_a_build_needs() {
+        let out = filtered_env(env_of(&[
+            ("PATH", "/usr/bin"), ("HOME", "/root"), ("NODE_ENV", "production"),
+            ("npm_config_registry", "https://r.example"), ("LC_ALL", "C"),
+            ("HTTPS_PROXY", "http://p:8080"), ("SSH_AUTH_SOCK", "/tmp/agent"),
+        ]), None);
+        let mut got = names(&out); got.sort();
+        assert_eq!(got, vec!["HOME", "HTTPS_PROXY", "LC_ALL", "NODE_ENV", "PATH",
+                             "npm_config_registry"]);
+    }
+
+    // SSH_AUTH_SOCK forwards live signing authority, not a static secret;
+    // DEVX_CHILD_ENV_EXTRA is the deliberate way back for a real SSH-remote workflow.
+    #[test]
+    fn ssh_auth_sock_is_dropped() {
+        let out = filtered_env(env_of(&[("PATH", "/usr/bin"), ("SSH_AUTH_SOCK", "/tmp/agent")]), None);
+        assert_eq!(names(&out), vec!["PATH"]);
+    }
+
+    #[test]
+    fn prefix_match_refuses_credential_shaped_names() {
+        let out = filtered_env(env_of(&[
+            ("PATH", "/usr/bin"),
+            ("NODE_AUTH_TOKEN", "t"), ("npm_config__authToken", "t"), ("npm_config__auth", "t"),
+            ("YARN_NPM_AUTH_TOKEN", "t"),
+            ("NODE_ENV", "production"), ("NODE_PATH", "/x"),
+            ("npm_config_registry", "https://r.example"), ("npm_config_cache", "/c"),
+        ]), None);
+        let mut got = names(&out); got.sort();
+        assert_eq!(got, vec!["NODE_ENV", "NODE_PATH", "PATH", "npm_config_cache", "npm_config_registry"]);
+    }
+
+    #[test]
+    fn extra_reinstates_a_refused_credential_shaped_prefix_name() {
+        let out = filtered_env(env_of(&[("PATH", "/usr/bin"), ("NODE_AUTH_TOKEN", "t")]), Some("NODE_AUTH_TOKEN"));
+        let mut got = names(&out); got.sort();
+        assert_eq!(got, vec!["NODE_AUTH_TOKEN", "PATH"]);
+    }
+
+    #[test]
+    fn drops_every_secret() {
+        let out = filtered_env(env_of(&[
+            ("PATH", "/usr/bin"),
+            ("ANTHROPIC_API_KEY", "sk-x"), ("DATABASE_URL", "postgres://x"),
+            ("LOGTO__CLIENT_SECRET", "s"), ("DISCORD_TOKEN", "t"),
+            ("CLAW_CODE_USER_ID", "u"), ("AWS_SECRET_ACCESS_KEY", "k"),
+        ]), None);
+        assert_eq!(names(&out), vec!["PATH"]);
+    }
+
+    #[test]
+    fn extra_admits_exactly_what_it_names() {
+        let out = filtered_env(env_of(&[
+            ("PATH", "/usr/bin"), ("FOO", "1"), ("BAR", "2"), ("BAZ", "3"),
+        ]), Some("FOO,BAR"));
+        let mut got = names(&out); got.sort();
+        assert_eq!(got, vec!["BAR", "FOO", "PATH"]);
+    }
+
+    // GIT_* is deliberately NOT allowlisted: GIT_CONFIG_* outranks .git/config
+    // and would override the per-user identity and SSH signing that
+    // git_identity.ts installs there.
+    #[test]
+    fn git_config_env_is_not_inherited() {
+        let out = filtered_env(env_of(&[
+            ("PATH", "/usr/bin"), ("GIT_CONFIG_COUNT", "1"), ("GIT_AUTHOR_NAME", "x"),
+        ]), None);
+        assert_eq!(names(&out), vec!["PATH"]);
+    }
 }

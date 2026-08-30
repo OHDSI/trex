@@ -920,3 +920,32 @@ Deno.test("failTurnsForSession returns 0 and denies nothing when the session has
   assertEquals(n, 0);
   assertEquals(calls.some((c) => c.q.includes("UPDATE agents.approvals")), false);
 });
+
+Deno.test("recordTouchedPaths appends without duplicating", async () => {
+  let sql = "";
+  const store = createStore((s, _p) => {
+    sql = s;
+    return Promise.resolve({ rows: [] });
+  });
+  await store.recordTouchedPaths("t1", ["src/a.ts", "src/a.ts", "src/b.ts"]);
+  assertStringIncludes(sql, "array_cat");
+  assertStringIncludes(sql, "DISTINCT");
+});
+
+Deno.test("recordTouchedPaths on an empty list issues no query", async () => {
+  let calls = 0;
+  const store = createStore(() => {
+    calls++;
+    return Promise.resolve({ rows: [] });
+  });
+  await store.recordTouchedPaths("t1", []);
+  assertEquals(calls, 0);
+});
+
+Deno.test("getTouchedPaths returns the stored set, empty for an unknown turn", async () => {
+  assertEquals(
+    await createStore(() => Promise.resolve({ rows: [{ touched_paths: ["a"] }] })).getTouchedPaths("t1"),
+    ["a"],
+  );
+  assertEquals(await createStore(() => Promise.resolve({ rows: [] })).getTouchedPaths("t1"), []);
+});

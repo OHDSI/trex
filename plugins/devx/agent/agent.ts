@@ -13,15 +13,18 @@ import type { HookCtx, ModelSpec } from "eve";
 import type { ToolDef } from "../../../core/server/agents/eve-shim/types.ts";
 import { readMetadata } from "./lib/context.ts";
 import { loadSkillsForPrompt } from "../functions/skills/resolver.ts";
-import { ensureAppWorkspace, readProjectRules } from "../functions/tools/workspace.ts";
+import { ensureAppWorkspace, ensureWorkspace, readProjectRules } from "../functions/tools/workspace.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey } from "../functions/provider_key.ts";
 import { assertProviderSupported } from "../functions/provider_support.ts";
 import { classifyCoderError } from "../functions/error_codes.ts";
 import { buildCoderContext, DEFAULT_MAX_STEPS } from "../functions/coder_context.ts";
-import { loadHooks, runPostToolHooks, runPreToolHooks, runStopHooks } from "../functions/skills/hooks.ts";
+import { loadHooks, runContextHook, runPostToolHooks, runPreToolHooks, runStopHooks } from "../functions/skills/hooks.ts";
 import type { Hook } from "../functions/skills/types.ts";
 import { materializeAttachments, renderAttachmentBlock } from "../functions/attachments.ts";
 import { DEFERRED_TOOLS } from "./lib/deferred_tools.ts";
+// Real runtime import (not type-only), same posture as dynamic-tools.ts's
+// core/server/agents/connections/mcp.ts import above it.
+import { capHookOutput } from "../../../core/server/agents/service/context/hook-output.ts";
 
 // Port of functions/tools/registry.ts's buildToolSet PLAN_MODE_TOOLS
 // (registry.ts:197-205) — legacy names map 1:1 to the eve wrapper names
@@ -432,6 +435,22 @@ export async function buildInstructions(base: string, ctx: HookCtx): Promise<str
   return `${systemPrompt}\n\n${DEFERRED_TOOLS_NOTE}`;
 }
 
+// Task 11 (fix round 2): core's turn-diff route has no live request, so it
+// hands over what it read from the store instead of a HookCtx — the
+// session's created_by as userId, and the DIFF'D TURN's own metadata (not
+// necessarily the latest turn's). Mirrors lib/context.ts's toDevxCtx exactly
+// — appId ? ensureAppWorkspace : ensureWorkspace — because that is where the
+// turn's file tools actually wrote; returning undefined for a user-scoped
+// turn reported "no workspace" for one that plainly has one. Only a turn with
+// no userId at all is genuinely unresolvable.
+export async function resolveWorkspace(
+  info: { sessionId: string; turnId: string; userId?: string; metadata?: unknown },
+): Promise<string | undefined> {
+  const { appId } = readMetadata(info.metadata);
+  if (!info.userId) return undefined;
+  return appId ? await ensureAppWorkspace(info.userId, appId) : await ensureWorkspace(info.userId);
+}
+
 // devx.hooks (PreToolUse/PostToolUse/Stop) rows are loaded ONCE PER TURN, not
 // once per tool call — legacy loads them once at functions/agent.ts:235, and
 // a per-call load would issue one query per tool. Cached on a WeakMap keyed
@@ -473,7 +492,14 @@ export async function onToolCall(
 ): Promise<{ allow: boolean; input?: unknown; reason?: string }> {
   const hooks = await turnHooks(ctx, "PreToolUse");
   if (hooks.length === 0) return { allow: true };
-  const result = await runPreToolHooks(call.name, (call.input ?? {}) as Record<string, unknown>, hooks);
+  // onFailure is additive only -- runPreToolHooks' own deny/fail-closed
+  // decision below is unchanged by whether ctx.emit exists.
+  const result = await runPreToolHooks(
+    call.name,
+    (call.input ?? {}) as Record<string, unknown>,
+    hooks,
+    (info) => ctx.emit?.("hook.failed", info),
+  );
   if (!result.allow) return { allow: false, reason: "blocked by a PreToolUse hook" };
   return result.modifiedArgs ? { allow: true, input: result.modifiedArgs } : { allow: true };
 }
@@ -490,7 +516,13 @@ export async function onToolResult(
   // than being JSON-stringified into a shape the model has never seen from
   // that tool before.
   if (typeof call.result !== "string") return call.result;
-  return await runPostToolHooks(call.name, (call.input ?? {}) as Record<string, unknown>, call.result, hooks);
+  return await runPostToolHooks(
+    call.name,
+    (call.input ?? {}) as Record<string, unknown>,
+    call.result,
+    hooks,
+    (info) => ctx.emit?.("hook.failed", info),
+  );
 }
 
 // H3: Stop hooks. Only reached after a successful turn (core never calls
@@ -500,7 +532,45 @@ export async function onTurnEnd(turn: { text: string; finishReason: string }, ct
   const hooks = await turnHooks(ctx, "Stop");
   const { chatId } = readMetadata(ctx.metadata);
   if (!chatId) return;
-  await runStopHooks(hooks, { chatId, content: turn.text });
+  await runStopHooks(hooks, { chatId, content: turn.text }, (info) => ctx.emit?.("hook.failed", info));
+}
+
+// H4: UserPromptSubmit hooks inject extra context ahead of the model seeing
+// the prompt. Routed through hooks.ts's runContextHook -- the same
+// allowlisted devx-ext bridge (trex_devx_run_command) PreToolUse/PostToolUse/
+// Stop use -- so the hook's command gets Task 4's filtered_env (no
+// ANTHROPIC_API_KEY/DATABASE_URL/DEK/Discord/Logto secrets reaching the
+// child) and the same ALLOWED_EXECUTABLES gate; a direct Deno.Command from
+// this worker would bypass both. Not a trust-boundary control like
+// onToolCall's fail-closed contract: a disallowed/failing/timed-out hook
+// just contributes no text, it never fails the turn (runContextHook itself
+// never throws, the try/catch here is defense-in-depth).
+async function runUserPromptSubmitHooks(
+  hooks: Hook[],
+  prompt: string,
+  workspacePath?: string,
+  emit?: (name: string, data: unknown) => void,
+): Promise<string[]> {
+  const outputs: string[] = [];
+  // Dot-prefixed so an over-cap spill doesn't litter the project root the
+  // model browses. No workspace means no reachable place to point to --
+  // capHookOutput truncates instead in that case.
+  const spillPath = workspacePath ? `${workspacePath}/.devx/hook-spill` : undefined;
+  for (const hook of hooks) {
+    try {
+      const text = await runContextHook(hook, { event: "UserPromptSubmit", prompt }, (info) => emit?.("hook.failed", info));
+      // Cap and spill BEFORE this hook's output reaches the prompt — an
+      // unbounded hook can undo the compaction that just ran to make room.
+      // spillRoot is the workspace, so the pointer comes out workspace-
+      // RELATIVE: the reader is the coding model, whose Read goes through
+      // safeJoin, which rejects every absolute path.
+      if (text) outputs.push((await capHookOutput(text, { spillPath, spillRoot: workspacePath })).text);
+    } catch (err) {
+      console.error("[devx] UserPromptSubmit hook failed:", err instanceof Error ? err.message : err);
+      emit?.("hook.failed", { event: "UserPromptSubmit", error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return outputs;
 }
 
 // H3: attachment materialization, folded into buildUserMessage (per-turn
@@ -509,18 +579,67 @@ export async function onTurnEnd(turn: { text: string; finishReason: string }, ct
 // channel-only (ChatInput.tsx), so ordinary browser turns need this too.
 export async function buildUserMessage(base: string, ctx: HookCtx): Promise<string> {
   const { appId, attachments } = readMetadata(ctx.metadata);
-  if (!ctx.userId || !appId || !attachments?.length) return base;
-  // Same defensive shape filter and cap-of-10 the legacy path applies at
-  // functions/index.ts:405-408 -- these urls are remote/untrusted input.
-  const safe = attachments
-    .filter((a) => a && typeof a.url === "string" && typeof a.name === "string")
-    .slice(0, 10);
-  if (safe.length === 0) return base;
-  const workspacePath = await ensureAppWorkspace(ctx.userId, appId);
-  const saved = await materializeAttachments(workspacePath, safe);
-  // Only paths ever enter the prompt, never file content -- the coder Reads
-  // them itself (images render multimodally through Read).
-  return base + renderAttachmentBlock(saved);
+  let message = base;
+  if (ctx.userId && appId && attachments?.length) {
+    // Same defensive shape filter and cap-of-10 the legacy path applies at
+    // functions/index.ts:405-408 -- these urls are remote/untrusted input.
+    const safe = attachments
+      .filter((a) => a && typeof a.url === "string" && typeof a.name === "string")
+      .slice(0, 10);
+    if (safe.length > 0) {
+      const workspacePath = await ensureAppWorkspace(ctx.userId, appId);
+      const saved = await materializeAttachments(workspacePath, safe);
+      // Only paths ever enter the prompt, never file content -- the coder
+      // Reads them itself (images render multimodally through Read).
+      message += renderAttachmentBlock(saved);
+    }
+  }
+
+  // Appended AFTER attachments, never replacing them -- see this function's
+  // header comment for why that ordering is load-bearing.
+  const hooks = await turnHooks(ctx, "UserPromptSubmit");
+  if (hooks.length > 0) {
+    const workspacePath = ctx.userId && appId ? await ensureAppWorkspace(ctx.userId, appId) : undefined;
+    const injected = await runUserPromptSubmitHooks(hooks, base, workspacePath, ctx.emit);
+    for (const text of injected) message += `\n${text}`;
+  }
+  return message;
+}
+
+// H5: PreCompact/PostCompact hooks. Same allowlisted bridge/env-filter/
+// ALLOWED_EXECUTABLES posture as H4 above -- runContextHook never throws,
+// the try/catch here is defense-in-depth, matching compact.ts's own
+// fail-open contract for onCompact (a throw here must never block
+// compaction, which runs because context pressure is already a problem).
+// pre's return value is spliced verbatim into compact.ts's summary input;
+// post is side-effect only, compaction has already happened by the time it
+// runs, so its return value is discarded.
+export async function onCompact(
+  phase: "pre" | "post",
+  info: { messageCount: number; tokenEstimate: number },
+  ctx: HookCtx,
+): Promise<string | undefined> {
+  const event = phase === "pre" ? "PreCompact" : "PostCompact";
+  const hooks = await turnHooks(ctx, event);
+  if (hooks.length === 0) return undefined;
+
+  const outputs: string[] = [];
+  for (const hook of hooks) {
+    try {
+      const text = await runContextHook(
+        hook,
+        { event, messageCount: info.messageCount, tokenEstimate: info.tokenEstimate },
+        (failure) => ctx.emit?.("hook.failed", failure),
+      );
+      // post's output is never read -- only pre's feeds the summarizer.
+      if (phase === "pre" && text) outputs.push((await capHookOutput(text)).text);
+    } catch (err) {
+      console.error(`[devx] ${event} hook failed:`, err instanceof Error ? err.message : err);
+      ctx.emit?.("hook.failed", { event, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  if (phase !== "pre" || outputs.length === 0) return undefined;
+  return outputs.join("\n");
 }
 
 // CLOSED: a self-delegated subagent turn now gets the shared contract
@@ -585,10 +704,12 @@ export default defineAgent({
   resolveModel,
   filterTools,
   buildInstructions,
+  resolveWorkspace,
   onToolCall,
   onToolResult,
   onTurnEnd,
   buildUserMessage,
+  onCompact,
   // Task 16: the long tail of less-common tools (KB, cron, Figma, browser
   // automation, DB inspection, image gen, AddDependency — see
   // lib/deferred_tools.ts's own comment for the full list and the

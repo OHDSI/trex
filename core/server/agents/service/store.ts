@@ -796,6 +796,39 @@ export function createStore(query: QueryFn) {
       }
       return r.rows.length;
     },
+
+    // Deduplicated in SQL rather than in memory: two tool calls in the same
+    // turn can touch one path, and the turn row is the only shared state.
+    async recordTouchedPaths(turnId: string, paths: string[]): Promise<void> {
+      if (paths.length === 0) return;
+      await query(
+        `UPDATE agents.turns SET touched_paths = (
+           SELECT array_agg(DISTINCT p) FROM unnest(array_cat(touched_paths, $2::text[])) AS p
+         ) WHERE id = $1`,
+        [turnId, paths],
+      );
+    },
+
+    async getTouchedPaths(turnId: string): Promise<string[]> {
+      const r = await query(`SELECT touched_paths FROM agents.turns WHERE id = $1`, [turnId]);
+      return (r.rows[0]?.touched_paths as string[] | undefined) ?? [];
+    },
+
+    // Turn-diff route (task 11) ownership check, session-scoped in the query
+    // itself like resolveApproval above — a turn from another session 404s
+    // the same as an unknown one, never leaking which case it was.
+    async turnBelongsToSession(turnId: string, sessionId: string): Promise<boolean> {
+      const r = await query(`SELECT 1 FROM agents.turns WHERE id = $1 AND session_id = $2`, [turnId, sessionId]);
+      return r.rows.length > 0;
+    },
+
+    // Turn-diff route (task 11, fix round 2): the metadata THIS turn was
+    // started with (e.g. devx's appId), handed to agent.config.resolveWorkspace
+    // — a narrow single-column reader rather than widening getTouchedPaths.
+    async getTurnMetadata(turnId: string): Promise<unknown> {
+      const r = await query(`SELECT metadata FROM agents.turns WHERE id = $1`, [turnId]);
+      return r.rows[0]?.metadata ?? undefined;
+    },
   };
 }
 
