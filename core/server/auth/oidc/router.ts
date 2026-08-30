@@ -74,6 +74,14 @@ async function fetchUser(id: string): Promise<IdTokenUser | null> {
 }
 
 /** The session the native IdP sets in sync-cookie; no second session concept. */
+async function isBanned(id: string): Promise<boolean> {
+  const result = await pool.query<{ banned: boolean }>(
+    `SELECT banned FROM trexdb."user" WHERE id = $1 AND "deletedAt" IS NULL`,
+    [id],
+  );
+  return result.rows[0]?.banned === true;
+}
+
 async function userIdFromSession(req: express.Request): Promise<string | null> {
   const token = readCookie(req.headers.cookie, "sb-access-token");
   if (!token) return null;
@@ -182,6 +190,14 @@ export function registerOidcRoutes(basePath: string) {
       }
 
       const userId = await userIdFromSession(req);
+      // The session cookie is a self-contained token verified by signature, so
+      // nothing server-side invalidates it before it expires. Without this a
+      // banned user keeps exchanging their existing cookie for fresh codes, and
+      // the ban only takes effect whenever that cookie happens to run out.
+      if (userId && await isBanned(userId)) {
+        redirectError(res, redirect_uri, "access_denied", state, "account is deactivated");
+        return;
+      }
       if (!userId) {
         const login = loginUrl();
         if (!login) {

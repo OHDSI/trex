@@ -917,14 +917,22 @@ router.put("/admin/users/:id", apiLimiter, async (req, res) => {
       return;
     }
 
-    const { password } = req.body ?? {};
-    if (!password) {
-      res.status(422).json({ error: "validation_failed", error_description: "Password is required" });
+    const { password, banned } = req.body ?? {};
+    if (password === undefined && banned === undefined) {
+      res.status(422).json({
+        error: "validation_failed",
+        error_description: "One of 'password' or 'banned' is required",
+      });
       return;
     }
 
-    if (password.length < 8) {
+    if (password !== undefined && password.length < 8) {
       res.status(422).json({ error: "Password must be at least 8 characters" });
+      return;
+    }
+
+    if (banned !== undefined && typeof banned !== "boolean") {
+      res.status(422).json({ error: "validation_failed", error_description: "'banned' must be a boolean" });
       return;
     }
 
@@ -934,32 +942,81 @@ router.put("/admin/users/:id", apiLimiter, async (req, res) => {
       return;
     }
 
-    const newHash = await hashPassword(password);
-    await pool.query(
-      `UPDATE trexdb."user" SET password_hash = $1, "updatedAt" = NOW() WHERE id = $2`,
-      [newHash, user.id],
-    );
+    if (password !== undefined) {
+      const newHash = await hashPassword(password);
+      await pool.query(
+        `UPDATE trexdb."user" SET password_hash = $1, "updatedAt" = NOW() WHERE id = $2`,
+        [newHash, user.id],
+      );
 
-    // Also update account table
-    await pool.query(
-      `UPDATE trexdb.account SET password = $1, "updatedAt" = NOW()
-       WHERE "userId" = $2 AND "providerId" = 'credential'`,
-      [newHash, user.id],
-    );
+      // Also update account table
+      await pool.query(
+        `UPDATE trexdb.account SET password = $1, "updatedAt" = NOW()
+         WHERE "userId" = $2 AND "providerId" = 'credential'`,
+        [newHash, user.id],
+      );
+    }
 
-    // Revoke all outstanding refresh tokens, as a password change does: a reset
-    // is what an administrator does when an account may be compromised, so the
-    // sessions opened with the old password must not survive it.
-    await pool.query(
-      `UPDATE trexdb.refresh_token SET revoked = true, "updatedAt" = NOW()
-       WHERE "userId" = $1 AND revoked = false`,
-      [user.id],
-    );
+    if (banned !== undefined) {
+      await pool.query(
+        `UPDATE trexdb."user" SET banned = $1, "updatedAt" = NOW() WHERE id = $2`,
+        [banned, user.id],
+      );
+    }
+
+    // Revoke all outstanding refresh tokens. A password reset is what an
+    // administrator does when an account may be compromised, and a ban is
+    // pointless if the sessions it was issued before it outlive it.
+    if (password !== undefined || banned === true) {
+      await pool.query(
+        `UPDATE trexdb.refresh_token SET revoked = true, "updatedAt" = NOW()
+         WHERE "userId" = $1 AND revoked = false`,
+        [user.id],
+      );
+    }
 
     const updated = await fetchUserById(user.id);
     res.json(toGoTrueUser(updated ?? user));
   } catch (err) {
     console.error("[auth] admin set-password error:", err);
+    res.status(500).json({ error: "server_error", error_description: "Internal server error" });
+  }
+});
+
+// GET /admin/users/:id is the GoTrue-compatible admin read. Without it a caller
+// holding only a subject has no way to resolve the account behind it.
+router.get("/admin/users/:id", apiLimiter, async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) {
+      res.status(401).json({ error: "not_authenticated" });
+      return;
+    }
+
+    const token = authHeader.slice(7);
+    const claims = await verifyAccessToken(token);
+    if (!claims) {
+      res.status(401).json({ error: "not_authenticated" });
+      return;
+    }
+
+    // service_role bypasses RLS/admin checks (Supabase convention).
+    const callerRole = claims.app_metadata?.trex_role;
+    const isServiceRole = claims.role === "service_role";
+    if (callerRole !== "admin" && !isServiceRole) {
+      res.status(403).json({ error: "forbidden", error_description: "Admin access required" });
+      return;
+    }
+
+    const user = await fetchUserById(req.params.id);
+    if (!user) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+
+    res.json(toGoTrueUser(user));
+  } catch (err) {
+    console.error("[auth] admin get-user error:", err);
     res.status(500).json({ error: "server_error", error_description: "Internal server error" });
   }
 });
