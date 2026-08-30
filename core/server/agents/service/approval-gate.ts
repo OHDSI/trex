@@ -41,6 +41,9 @@ export interface ApprovalGateOpts {
   agentName?: string;
   unattended?: boolean;
   channelBound?: boolean;
+  // See approval-policy.ts's ApprovalPolicyInput.approverReachable. Absent is
+  // "no approver", so an unwired caller keeps denying hard-tier calls.
+  approverReachable?: boolean;
   escalate?: EscalateList;
   approvalPollMs?: number;
   approvalTimeoutMs?: number;
@@ -82,6 +85,7 @@ export async function runApprovalGate(o: ApprovalGateOpts): Promise<{ error: str
     consent,
     unattended: o.unattended === true,
     channelBound: o.channelBound === true,
+    approverReachable: o.approverReachable === true,
     escalate: o.escalate ?? DEFAULT_ESCALATE_LIST,
   });
   if (verdict.outcome === "deny") {

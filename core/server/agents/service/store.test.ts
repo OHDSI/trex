@@ -37,7 +37,7 @@ Deno.test("createSession inserts and returns id", async () => {
   const id = await store.createSession("toy-agent", "toy", "user-1");
   assertEquals(id, "s-1");
   assert(calls[0].sql.includes("INSERT INTO agents.sessions"));
-  assertEquals(calls[0].params, ["toy-agent", "toy", "user-1", false]);
+  assertEquals(calls[0].params, ["toy-agent", "toy", "user-1", false, false]);
 });
 
 Deno.test("addTurn computes next seq atomically in SQL", async () => {

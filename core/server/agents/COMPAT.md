@@ -743,7 +743,9 @@ stream, which no channel adapter subscribes to.
 **Channel binding implies unattended.** A session with a row in
 `agents.channel_sessions` has no browser consent UI to answer a gate, so
 `handler.ts` resolves `unattended = channelBound || isUnattended(sessionId)`.
-Both flags are resolved **once per turn**, alongside `depth` — `buildSdkTools`
+A third flag, `approverReachable` (`agents.sessions.approver_reachable`), is
+resolved beside them and answers a different question — see "Two tiers" below.
+All three are resolved **once per turn**, alongside `depth` — `buildSdkTools`
 spreads its `ToolBuildCtx` into every authored tool, so resolving them per tool
 call would cost one round trip per gated call.
 
@@ -770,27 +772,33 @@ A leading `!` marks an entry **hard**; its absence marks it **soft**
 grant (see "Precedence" below) — under a shared bot identity, neither can be
 bought off with one click. They differ in what an **unattended** session (no
 human watching, see above) gets on a match: hard still denies outright (or
-gates, if channel-bound — no exception either way, `approval-policy.ts:134-135`);
-soft **allows** it. Concretely, this is what lets an unattended coding agent
-run `rm -rf node_modules` or `curl` with nobody watching, while `sudo`,
-`ssh`, `GitPush` and `ExecuteSQL` are refused outright on a non-channel-bound
-session, attended or not.
+gates, if an approver is reachable — no exception either way); soft
+**allows** it. Concretely, this is what lets an unattended coding agent run
+`rm -rf node_modules` or `curl` with nobody watching, while `sudo`, `ssh`,
+`GitPush` and `ExecuteSQL` are refused outright when nobody can be asked,
+attended or not.
 
-**An attended session does NOT see the tiers the same way, and this is easy
-to get wrong**: a soft match still gates an attended session (a human can
-approve), but a hard match **denies** it outright, with no approve button at
-all — `resolveApproval`'s hard branch (`approval-policy.ts:134-135`) checks
-only `channelBound`, never `unattended`, so a non-channel-bound attended
-session is treated exactly like a non-channel-bound unattended one: deny,
-because there is no channel to ask on. Only a channel-bound session gets
-`gate` on a hard match. This is a real, user-visible behaviour change from
-this phase's Bash scopes below, and it affects **both** execution paths, not
-only the new sidecar engine: before them, an attended session running `git
-push`/`psql`/`crontab` through the model loop's own `Bash` tool matched no
-hard entry, so it fell through to `gate` — a dashboard user could approve it.
-Now that those three sit in the hard tier, the identical attended,
-non-channel-bound call gets `deny` instead: that approve button is gone for
-those specific commands.
+**What the hard tier asks is "can anyone be shown this gate", not "is this
+attended"**: a soft match gates an attended session (a human can approve), but
+a hard match gates only when an approver is reachable and otherwise **denies**
+outright, with no approve button at all. `resolveApproval`'s hard branch reads
+`approverReachable`, never `unattended`; `channelBound` implies it, and it
+defaults to **false**, so a session that never declares one is denied on a hard
+match whether it is attended or not. A session declares it at creation
+(`approverReachable: true` on `POST /eve/v1/session`, stored in
+`agents.sessions.approver_reachable` by V13) — which is how a *relayed*
+session says so: claw's coder session is neither channel-bound nor unattended,
+but claw watches it and carries its gates to the channel and the answers back.
+The signal only ever turns a `deny` into a `gate`; it can never produce
+`allow`, so a caller that claims an approver it does not have gets a turn that
+parks and then denies on the gate's timeout.
+
+This matters because of this phase's Bash scopes below, and it affects
+**both** execution paths, not only the new sidecar engine: before them, a
+session running `git push`/`psql`/`crontab` through the model loop's own
+`Bash` tool matched no hard entry and fell through to `gate`. Now that they
+sit in the hard tier, the same call is denied unless the session declares an
+approver.
 
 Default (`DEFAULT_ESCALATE`):
 
@@ -888,8 +896,14 @@ Accepted limitations, recorded rather than fixed:
   used before. A sticky consent recorded against the coarse key does not
   automatically apply to the finer one — same shape of mismatch as the
   case-sensitivity point above, just introduced by this phase rather than
-  pre-existing. How that affects rows recorded before this change is handled
-  elsewhere in this codebase, not documented in this section.
+  pre-existing. Rows recorded before the change are **not** stranded, though:
+  on an exact miss the gate re-derives the coarse key (`coarseScopeKey`) and
+  honours an old `never` from it, so a standing refusal keeps refusing. An old
+  `always` is deliberately *not* honoured — a grant on `git` never covered
+  `git push` — so the user is simply asked again. Fail-safe in both
+  directions, which is why no migration deletes anything; an exact row still
+  wins outright, so a finer decision can be carved out from under an older
+  blanket one.
 
 ### Precedence
 
@@ -897,11 +911,12 @@ Accepted limitations, recorded rather than fixed:
 order:
 
 1. a stored `never` consent → **deny** (`consent-never`)
-2. a **hard** escalate match → **gate** if channel-bound, else **deny**
-   (`no-approver`) — no channel to ask on means deny, not park
+2. a **hard** escalate match → **gate** if an approver is reachable
+   (`approverReachable`, which `channelBound` implies), else **deny**
+   (`no-approver`) — nobody to ask means deny, not park
 3. a **soft** escalate match → **allow** if `unattended`, else **gate** — a
-   soft match never denies outright, and never checks channel-binding: an
-   unattended session with no channel still gets `allow`, not `no-approver`
+   soft match never denies outright, and never checks approver-reachability: an
+   unattended session with nobody to ask still gets `allow`, not `no-approver`
 4. a stored `always` consent → **allow**
 5. `unattended` → **allow**
 6. otherwise → **gate**
@@ -1151,10 +1166,10 @@ or `sessions.unattended`) sidecar session:
   `chmod`/`chown` (soft allows on an unattended match).
 - **Cannot** run `git push` or `git subtree` (anything keying `git:push` or
   `git:subtree`), `psql`, `crontab`, or a command keying on
-  `sudo`/`dd`/`ssh`/`scp` — the hard tier denies these outright for a
-  non-channel-bound session regardless of `unattended` (see
-  above), and gates them (parks for a human) only when channel-bound. No
-  sticky `always` consent can buy back either tier.
+  `sudo`/`dd`/`ssh`/`scp` — the hard tier denies these outright when no
+  approver is reachable, regardless of `unattended` (see above), and gates
+  them (parks for a human) when one is. No sticky `always` consent can buy
+  back either tier.
 - Any SDK tool name outside the six devx maps runs through the gate above
   unrecognized: it allows when unattended, same as any other unmatched call.
 

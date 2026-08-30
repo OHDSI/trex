@@ -22,6 +22,14 @@ export interface ApprovalPolicyInput {
   consent: "always" | "never" | null;
   unattended: boolean;
   channelBound: boolean;
+  // Is there SOMEONE who can be shown a gate and click it — not "does a
+  // channel exist". channelBound used to stand in for this and was wrong for
+  // claw, whose coder session is a plain native session that claw watches and
+  // relays gates for; the hard tier denied it as unapprovable. Defaults to
+  // false everywhere (absent === no approver), so a caller that has not
+  // thought about it keeps the safe answer, and a caller that claims an
+  // approver it does not have gets a turn that parks and denies on timeout.
+  approverReachable?: boolean;
   escalate: EscalateList;
 }
 
@@ -137,7 +145,10 @@ export function resolveApproval(input: ApprovalPolicyInput): ApprovalVerdict {
   // Both tiers sit above the sticky grant, so neither can be bought off with
   // one "always" click under a shared bot identity.
   if (tier === "hard") {
-    return input.channelBound ? { outcome: "gate" } : { outcome: "deny", reason: "no-approver" };
+    // channelBound implies it: a channel session has an approver by
+    // definition, and no caller should have to pass both.
+    const approver = input.approverReachable === true || input.channelBound;
+    return approver ? { outcome: "gate" } : { outcome: "deny", reason: "no-approver" };
   }
   if (tier === "soft") {
     // Yields to a bot so a coder can run rm/curl, still gates a human.

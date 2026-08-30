@@ -976,6 +976,10 @@ function startTurn(
     // browser consent UI to answer a gate.
     const channelBound = await deps.store.isChannelBound(sessionId);
     const unattended = channelBound || await deps.store.isUnattended(sessionId);
+    // Separate from both: whether anyone can be shown a gate and click it.
+    // A relayed session (claw's coder) is neither channel-bound nor
+    // unattended, yet has an approver — see approval-policy.ts.
+    const approverReachable = await deps.store.isApproverReachable(sessionId);
     // Built once, reused by both the success and failure delivery calls
     // below — see buildDeliverDeps' own comment.
     const deliverDeps = buildDeliverDeps(deps);
@@ -1009,6 +1013,7 @@ function startTurn(
           depth,
           unattended,
           channelBound,
+          approverReachable,
           escalate: resolveEscalate(deps),
           retrySleep: deps.retrySleep,
           ...(abort ? { abortSignal: abort.signal } : {}),
@@ -1596,7 +1601,13 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       const body = await req.json().catch(() => ({}));
       // Strict === true: a truthy string from a request body must never widen
       // an approval gate (functions/autonomy.ts states the same rule).
-      const sessionId = await store.createSession(deps.plugin, deps.agentName, createdBy, body.unattended === true);
+      const sessionId = await store.createSession(
+        deps.plugin,
+        deps.agentName,
+        createdBy,
+        body.unattended === true,
+        body.approverReachable === true,
+      );
       if (body.message != null) {
         startTurn(deps, sessionId, body.message, { metadata: body.metadata, bearerToken, userId: createdBy });
       }
@@ -1821,7 +1832,8 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // session-creation route, and a flag wired on only one of them leaves
       // the other silently attended.
       const unattended = body.unattended === true;
-      const sessionId = await store.createSession(deps.plugin, deps.agentName, createdBy, unattended);
+      const approverReachable = body.approverReachable === true;
+      const sessionId = await store.createSession(deps.plugin, deps.agentName, createdBy, unattended, approverReachable);
       const turn = await store.addTurn(sessionId, body.messages.at(-1), body.metadata);
       // Same hooks as the session path: built fresh per request, never
       // cached — resolveModelForTurn/resolveInstructions apply
@@ -1903,6 +1915,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
         // the value just written, and a /chat session is never channel-bound.
         unattended,
         channelBound: false,
+        approverReachable,
         escalate: resolveEscalate(deps),
       });
       // Switched from the bare `result.toUIMessageStreamResponse()` to

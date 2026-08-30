@@ -291,3 +291,38 @@ Deno.test("sidecar engine: `git subtree push` cannot slip past the floor unatten
   });
   assertEquals(decision.behavior, "deny");
 });
+
+// The delegated half of the claw fix: the engine has to READ
+// agents.sessions.approver_reachable and hand it to the gate, or a relayed
+// coder session running on the sidecar is refused where the model loop asks.
+const WATCHED = [{ plugin: "devx", agent: "coder", unattended: false, approver_reachable: true }];
+
+Deno.test("sidecar engine: a watched (relayed) session is asked for a push, not refused", async () => {
+  const { decision, gated } = await decide(
+    { session: WATCHED, decision: [{ decision: "approve" }] },
+    { id: "p-claw", toolName: "Bash", input: { command: "git push origin main" } },
+  );
+  assertEquals(decision.behavior, "allow");
+  assertEquals(gated, 1);
+});
+
+Deno.test("sidecar engine: the same session without an approver is refused outright", async () => {
+  const { decision, gated } = await decide(
+    { session: [{ plugin: "devx", agent: "coder", unattended: false }], decision: [{ decision: "approve" }] },
+    { id: "p-noclaw", toolName: "Bash", input: { command: "git push origin main" } },
+  );
+  assertEquals(decision, { behavior: "deny", message: "requires approval but this session has no approver" });
+  assertEquals(gated, 0);
+});
+
+Deno.test("sidecar engine: an unattended session with a reachable approver is still asked, never allowed outright", async () => {
+  const { decision, gated } = await decide(
+    {
+      session: [{ plugin: "devx", agent: "coder", unattended: true, approver_reachable: true }],
+      decision: [{ decision: "deny" }],
+    },
+    { id: "p-unatt", toolName: "Bash", input: { command: "git push --force origin main" } },
+  );
+  assertEquals(decision, { behavior: "deny", message: "denied by user" });
+  assertEquals(gated, 1);
+});

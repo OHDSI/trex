@@ -191,11 +191,12 @@ async function* runSidecarTurn(
   if (!userId) throw new Error("devx sidecar engine requires an authenticated user");
   const { appId } = readMetadata(ctx.metadata);
   const store = createStore(ctx.sql);
-  const [{ plugin, agentName }, settings, unattended, channelBound] = await Promise.all([
+  const [{ plugin, agentName }, settings, unattended, channelBound, approverReachable] = await Promise.all([
     gateContext(ctx.sql, turn.sessionId),
     readSettings(ctx.sql, userId),
     store.isUnattended(turn.sessionId),
     store.isChannelBound(turn.sessionId),
+    store.isApproverReachable(turn.sessionId),
   ]);
   // The same workspace authoredTool keys a stored consent on (agent.ts's
   // resolveWorkspace) — a grant for one app must not cover another.
@@ -229,6 +230,7 @@ async function* runSidecarTurn(
       agentName,
       unattended: noHuman,
       channelBound,
+      approverReachable,
       escalate,
       approvalPollMs: deps.approvalPollMs,
       approvalTimeoutMs: deps.approvalTimeoutMs,

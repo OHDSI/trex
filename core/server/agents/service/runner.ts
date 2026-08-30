@@ -71,6 +71,7 @@ interface RunTurnOpts {
   // absent, so a caller that never wires them gates as it always did.
   unattended?: boolean;
   channelBound?: boolean;
+  approverReachable?: boolean;
   escalate?: EscalateList;
   // Cancels this turn's model call and every step after it. Handed straight
   // to streamText, which is the only thing here that can be mid-flight for

@@ -100,6 +100,9 @@ export interface ToolBuildCtx {
   // default to the closed value when absent so an unwired caller gates.
   unattended?: boolean;
   channelBound?: boolean;
+  // See approval-policy.ts's ApprovalPolicyInput.approverReachable — the
+  // model loop's half of the same signal the delegated path reads directly.
+  approverReachable?: boolean;
   escalate?: EscalateList;
 }
 
@@ -173,6 +176,7 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boo
           agentName: ctx.agentName,
           unattended: ctx.unattended,
           channelBound: ctx.channelBound,
+          approverReachable: ctx.approverReachable,
           escalate: ctx.escalate,
           approvalPollMs: ctx.approvalPollMs,
           approvalTimeoutMs: ctx.approvalTimeoutMs,
