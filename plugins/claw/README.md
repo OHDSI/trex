@@ -34,10 +34,45 @@ the agent worker at registration time via `${VAR:-default}` substitution
 See `plugins/claw/agent/ACCEPTANCE.md` for the live-acceptance checklist that
 exercises this contract end-to-end against a real Discord app and Code agent.
 
+## Two coder transports
+
+claw talks to the coder over one of two transports, chosen per-turn by the
+coder account's devx provider (`plugins/claw/agent/lib/code-route.ts`'s
+`chooseCoderTransport`, mirroring devx's `resolveEffectiveLoop`):
+
+- **`claude-code` provider → legacy** (`lib/code-stream.ts`): the sidecar
+  engine, driven through the `devx-api` chat endpoints
+  (`POST /chats`, `POST /chats/:id/stream`). This is the only engine the eve
+  runtime cannot host, which is why it keeps its own transport.
+- **every other provider (including none set) → eve** (`lib/code-session.ts`):
+  the ported eve/agents session API, hit directly on the `devx-agent` mount
+  (`POST /eve/v1/session`, `GET .../stream`, `POST .../approval`).
+
+**Approval gating differs sharply between the two, and switching an account's
+provider changes gating behaviour with no other configuration change:**
+
+- On the **eve** path, a `needsApproval` tool call parks the turn
+  (`input.requested`) and claw renders the pending request as a real approval
+  gate in the task's Discord thread (`lib/coder-approval.ts`'s
+  `postApprovalGates`). A human's decision reaches the coder via the
+  `resolveCoderApproval` tool, which calls `code-session.ts`'s
+  `resolveCodeApproval` (`POST .../approval`) and then re-attaches the stream
+  to collect the rest of the turn — nothing is auto-approved.
+  `lib/code-route.ts:routeCodeTurn` even asks the pending-approval endpoint
+  directly on reconnect, so a gate published while claw wasn't attached is
+  never silently missed.
+- On the **legacy** path, `code-stream.ts`'s `streamTurn` sends
+  `remoteChannel: true` and reads the turn straight to completion — there is
+  no approval gate at all; the sidecar auto-approves everything it does. An
+  operator moving a coder account from `claude-code` to any other provider
+  (or back) changes gating behaviour as a side effect, with nothing in
+  Settings calling that out.
+
 ## Surfacing claw chats in the devx UI
 
-claw drives its coding turns through the same `devx-api` chat endpoints the devx
-browser UI uses, so each claw task is already a real `devx.chats` row with its full
+**This only holds for the legacy transport.** claw's legacy path drives its
+coding turns through the same `devx-api` chat endpoints the devx browser UI
+uses, so each such claw task is already a real `devx.chats` row with its full
 transcript in `devx.messages`. To see those chats in devx:
 
 1. Set `CLAW_CODE_USER_ID` to the uuid of the devx user you log in as (the
@@ -56,6 +91,24 @@ poll-while-viewing behaviour in `plugins/devx/src/hooks/useMessages.ts`).
 
 Note: `CLAW_CODE_USER_ID` is deployment-wide, so every claw chat (from any Discord
 user) is owned by this single account. This suits a single-operator setup.
+
+**On the eve transport, this visibility does NOT carry over — a coder session
+is not visible in the devx UI at all.** `lib/code-session.ts` calls the
+`devx-agent`'s `eve/v1/session` API directly and never touches `devx-api`'s
+`/chats` or `/messages` endpoints, so no `devx.chats` row is ever created or
+updated for that task; the chat list (`plugins/devx/functions/index.ts`'s
+`GET /chats`) reads only `devx.chats` and so has nothing to show. Inside the
+devx UI's own agent-chat page, the equivalent live view
+(`plugins/devx/src/hooks/useAgentsChat.ts`) *also* opens an eve session under
+the hood, but that hook additionally calls `api.createMessage(chatId, …)` for
+both the user and assistant turns to mirror them into `devx.messages` against
+an already-existing `devx.chats` row — that mirroring is browser-side glue
+the hook performs on top of the session API, not something the eve session
+itself does, and claw's backend transport never performs it. `core/server/agents`
+has no notion of `devx.chats` at all. Net effect: PR #176's live-visibility
+feature, built and verified against the legacy transport, silently does not
+apply once a coder account is moved to the eve transport. This is a real gap,
+not yet fixed — flagged here rather than fixed, per this task's scope.
 
 ## Thread per task
 
@@ -112,3 +165,16 @@ full skill and `plugins/d2esupport/README.md` for the other half of the flow
 allowlist/user-map settings). Set `CLAW_DEV_CHANNEL_ID` to the Discord channel
 id support summaries and review threads should post into — `postDevSummary`
 throws without it.
+
+## Coder-voice contract
+
+The coder must see claw as one person — its own summary of what's needed, in
+its own words, never a relayed transcript, never told a team is behind it (see
+`agent/instructions.md`'s "Talking to the coder" and `askCodeAgent`'s tool/
+`message` descriptions). The real behavioural check is
+`agent/evals/evals/modes/coder-gets-summary-not-transcript.eval.ts`, but the
+`evals/` suite needs a live stack and no CI workflow runs it, so nothing
+enforces this automatically today. `agent/tools/askCodeAgent.test.ts` adds a
+plain `deno test` guard on the prompt TEXT only (catches a description edited
+back toward "relay the participants") — it cannot verify claw's actual
+behaviour, only that the words asking for it are still there.

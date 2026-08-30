@@ -1,5 +1,5 @@
-import { assertEquals, assertRejects, assertStringIncludes } from "jsr:@std/assert";
-import { askCore, routeCodeTurn, type CodeTurnOutcome, type TransportDeps } from "./askCodeAgent.ts";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "jsr:@std/assert";
+import askCodeAgentTool, { askCore, routeCodeTurn, type CodeTurnOutcome, type TransportDeps } from "./askCodeAgent.ts";
 import type { CodeTurnArgs } from "../lib/code-stream.ts";
 import type { TokioClient } from "../lib/code-session.ts";
 
@@ -369,4 +369,44 @@ Deno.test("routeCodeTurn throws when eve is chosen but Trex.req is unavailable",
     getClient: () => null,
   };
   await assertRejects(() => routeCodeTurn(baseArgs(), 0, deps), Error, "Trex.req unavailable");
+});
+
+// --- Coder-voice contract: TEXT guard, not a behaviour guard -----------------
+//
+// This only asserts the PROMPT TEXT hasn't regressed — it cannot verify that
+// claw actually behaves this way at runtime (that needs a live model turn).
+// The real behavioural check is
+// plugins/claw/agent/evals/evals/modes/coder-gets-summary-not-transcript.eval.ts,
+// which drives claw against a seeded multi-participant discussion and asserts
+// on the RECORDED askCodeAgent argument — but that eval suite needs a live
+// stack and is not wired into any CI workflow (see evals/README.md), so
+// nothing runs it automatically today. This test exists so an edit that walks
+// the description back toward "relay the participants" (the exact instruction
+// that produced the leak — see git history on this file) fails the ordinary
+// `deno test` gate instead of silently reverting the contract.
+
+function messageInputDescription(): string {
+  const schema = askCodeAgentTool.inputSchema as { properties?: Record<string, { description?: unknown }> };
+  const description = schema.properties?.message?.description;
+  assert(typeof description === "string", "askCodeAgent's `message` input must have a string description");
+  return description;
+}
+
+Deno.test("askCodeAgent's tool description does not regress toward relaying the channel", () => {
+  const description = askCodeAgentTool.description;
+  assert(!description.toLowerCase().includes("relay the participants"), "must not reintroduce the transcript-relaying instruction");
+  assertStringIncludes(description, "YOUR OWN summary");
+  assertStringIncludes(description, "channel, thread, participant, or Discord");
+});
+
+Deno.test("askCodeAgent's message input description does not regress toward relaying the channel", () => {
+  const description = messageInputDescription();
+  assert(!description.toLowerCase().includes("relay the participants"), "must not reintroduce the transcript-relaying instruction");
+  assertStringIncludes(description, "YOUR OWN summary");
+  assertStringIncludes(description, "channel, thread, participant, or Discord");
+});
+
+Deno.test("instructions.md still has the Talking to the coder section", async () => {
+  const text = await Deno.readTextFile(new URL("../instructions.md", import.meta.url));
+  assertStringIncludes(text, "## Talking to the coder");
 });
