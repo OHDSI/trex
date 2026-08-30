@@ -153,3 +153,64 @@ Deno.test("ui profile's ask_question rule is byte-identical to the pre-extractio
   const original = `<asking-questions>\nWhenever you need to ask the user ANYTHING — a clarifying question, a choice between options, or a confirmation — you MUST use the \`mcp__ask__ask_question\` tool. Pass \`options\` for a single choice, add \`multiSelect: true\` for multiple, or omit \`options\` for free text. This applies everywhere, not only during brainstorming. NEVER write a question as plain text in your reply: plain-text questions do NOT render as an interactive prompt and the user may not answer them.\n</asking-questions>`;
   assertEquals(rule, original);
 });
+
+// Task 6 re-points WHO decides: when the caller supplies a resolver (eve's
+// approval gate, via agent/lib/sidecar_engine.ts), devx's own consent flow —
+// and its auto_approve shortcut — must not run at all. The file protocol the
+// sidecar polls is unchanged either way.
+
+Deno.test("answerPermissionRequest: an injected resolver decides instead of devx's consent flow", async () => {
+  const id = crypto.randomUUID();
+  try {
+    const calls: Array<[string, unknown[]]> = [];
+    const sent: unknown[] = [];
+    const seen: unknown[] = [];
+    const result = await answerPermissionRequest({
+      id, toolName: "Bash", input: { command: "ls" }, chatId: "c1", userId: "u1",
+      sqlFn: fakeSql({}, calls), send: (e) => sent.push(e), autoApprove: false,
+      resolvePermission: (req) => {
+        seen.push(req);
+        return Promise.resolve({ behavior: "allow", updatedInput: req.input });
+      },
+    });
+    assertEquals(result, { behavior: "allow", updatedInput: { command: "ls" } });
+    assertEquals(seen, [{ id, toolName: "Bash", input: { command: "ls" } }]);
+    // No devx.tool_consents lookup, no pending_consents row, no consent_request.
+    assertEquals(calls.length, 0);
+    assertEquals(sent.length, 0);
+    assertEquals(await readDecisionFile(id), { behavior: "allow", updatedInput: { command: "ls" } });
+  } finally {
+    await cleanupDecisionFile(id);
+  }
+});
+
+Deno.test("answerPermissionRequest: an injected resolver's denial beats settings.auto_approve", async () => {
+  const id = crypto.randomUUID();
+  try {
+    const calls: Array<[string, unknown[]]> = [];
+    const result = await answerPermissionRequest({
+      id, toolName: "Bash", input: { command: "rm -rf /" }, chatId: "c1", userId: "u1",
+      sqlFn: fakeSql({}, calls), send: () => {}, autoApprove: true,
+      resolvePermission: () => Promise.resolve({ behavior: "deny", message: "denied by user" }),
+    });
+    assertEquals(result, { behavior: "deny", message: "denied by user" });
+    assertEquals(await readDecisionFile(id), { behavior: "deny", message: "denied by user" });
+  } finally {
+    await cleanupDecisionFile(id);
+  }
+});
+
+Deno.test("answerPermissionRequest: a throwing injected resolver denies rather than leaving no decision file", async () => {
+  const id = crypto.randomUUID();
+  try {
+    const result = await answerPermissionRequest({
+      id, toolName: "Bash", input: { command: "ls" }, chatId: "c1", userId: "u1",
+      sqlFn: fakeSql({}, []), send: () => {}, autoApprove: false,
+      resolvePermission: () => Promise.reject(new Error("gate exploded")),
+    });
+    assertEquals(result, { behavior: "deny", message: "Permission decision failed" });
+    assertEquals(await readDecisionFile(id), { behavior: "deny", message: "Permission decision failed" });
+  } finally {
+    await cleanupDecisionFile(id);
+  }
+});

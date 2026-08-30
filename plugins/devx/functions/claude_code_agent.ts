@@ -62,14 +62,22 @@ export async function ensureClaudeCodeServer() {
 }
 
 /**
- * Answers a sidecar "permission" event by writing the decision file it polls for,
- * via devx's own consent path (not eve's — Task 6 re-points this once sidecar
- * turns run as real eve turns). Any decision failure denies rather than hangs.
+ * Answers a sidecar "permission" event by writing the decision file it polls for.
+ * WHO decides is now pluggable: a caller running the sidecar as an eve turn
+ * supplies `resolvePermission` (eve's approval gate, keyed to a real
+ * agents.turns row — see agent/lib/sidecar_engine.ts); the legacy /stream path
+ * supplies none and keeps devx's own tool_consents/pending_consents flow.
+ * Any decision failure denies rather than hangs.
  */
-export async function answerPermissionRequest({ id, toolName, input, chatId, userId, sqlFn, send, autoApprove }) {
+export async function answerPermissionRequest({ id, toolName, input, chatId, userId, sqlFn, send, autoApprove, resolvePermission }) {
   let result;
   try {
-    result = await decidePermission({ id, toolName, input: input || {}, chatId, userId, sqlFn, send, autoApprove });
+    // A supplied resolver decides ALONE — autoApprove is a devx-settings
+    // shortcut around devx's flow, and eve's gate has its own (unattended,
+    // escalate tiers) that a pre-emptive allow here would bypass.
+    result = resolvePermission
+      ? await resolvePermission({ id, toolName, input: input || {} })
+      : await decidePermission({ id, toolName, input: input || {}, chatId, userId, sqlFn, send, autoApprove });
   } catch {
     result = { behavior: "deny", message: "Permission decision failed" };
   }
@@ -125,6 +133,9 @@ async function decidePermission({ id, toolName, input, chatId, userId, sqlFn, se
 export async function streamClaudeCodeChat({
   chatId, userId, appId, chatMode, settings, history, send, sqlFn,
   skillContext, commandOverride, hasComponentSelection, workspacePathOverride, useWorktree, remoteChannel, attachments,
+  // Set only when this stream IS an eve turn (agent/lib/sidecar_engine.ts) —
+  // see answerPermissionRequest for what supplying it changes.
+  resolvePermission,
 }) {
   const mode = chatMode || "agent";
   const effectiveSettings = commandOverride?.model
@@ -284,6 +295,7 @@ export async function streamClaudeCodeChat({
                   id: data.id, toolName: data.toolName, input: data.input,
                   chatId, userId, sqlFn, send,
                   autoApprove: !!effectiveSettings.auto_approve,
+                  resolvePermission,
                 });
                 break;
               case "elicitation": {

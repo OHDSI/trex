@@ -5,6 +5,8 @@ import type { LoadedAgent } from "../loader.ts";
 import { packOfSkillName } from "../loader.ts";
 import type { AgentStore } from "./store.ts";
 import { runTurn } from "./runner.ts";
+import { resolveEngineForTurn, runDelegatedTurn } from "./engine/delegate.ts";
+import type { AgentEngine } from "../eve-shim/types.ts";
 import {
   COMPACTION_MAX_ATTEMPTS,
   COMPACTION_MAX_RETRY_DELAY_MS,
@@ -670,6 +672,11 @@ function startTurn(
     let turn: { id: string; seq: number };
     let turnMessage: unknown = message;
     let history: ModelMessage[] = [];
+    // The external engine this turn runs on, or undefined for runner.ts's
+    // model loop (service/engine/delegate.ts). Resolved inside the guarded
+    // block below so a throwing hook requeues the message like every other
+    // pre-turn failure there, rather than destroying it.
+    let engine: AgentEngine | undefined;
     // The origin to stamp on the requeued row if this block fails — see where
     // it is computed, just after the drain.
     let requeueOrigin: string | undefined = wokenByChildId;
@@ -703,6 +710,9 @@ function startTurn(
       // or the model misreads it. Cheap no-op on the common case: an empty or
       // comfortably-under-budget session short-circuits inside maybeCompact
       // without ever calling a model.
+      // Resolved BEFORE the compaction block, not at the run call below,
+      // because it decides whether that block runs at all.
+      engine = await resolveEngineForTurn(deps.agent, hookCtx);
       const priorTurns = (await deps.store.getHistory(sessionId)) as TurnRow[];
       // Assembled ONCE and reused as this turn's `history` on the common path.
       // The compaction check needs the assembled messages anyway (to size the
@@ -718,7 +728,13 @@ function startTurn(
       // is always [] here), so this can never clobber a session's real history.
       if (seedHistory && seedHistory.length > 0) history = seedHistory;
       let compacted = false;
-      if (priorTurns.length > 0) {
+      // NOT for a delegated turn. The engine keeps its own transcript and is
+      // never handed `history` (DelegatedTurnOpts has no such field), so
+      // summarizing it would shorten something nothing reads — and it would
+      // do so through resolveModel, which a sidecar account has no model
+      // credentials for, leaving maybeCompact's catch to silently drop the
+      // oldest turns from eve's own record of the session instead.
+      if (!engine && priorTurns.length > 0) {
         const priorMsgs = history;
         const lastUsage = await deps.store.getLastTurnUsage(sessionId).catch((e) => {
           console.error(`agents: getLastTurnUsage failed for session ${sessionId} (falling back to an estimate):`, e);
@@ -973,21 +989,31 @@ function startTurn(
     // the per-worker limitation this deliberately does not paper over.
     const abort = depth === 1 ? registerChildTurnAbort(sessionId) : undefined;
     try {
-      await runTurn({
-        agent: deps.agent, sessionId, turnId: turn.id, history, message: turnMessage, metadata,
-        store: deps.store, emit: (e) => publish(sessionId, e),
-        model: deps.model, bearerToken, userId, hookCtx,
-        plugin: deps.plugin, agentName: deps.agentName,
-        connectionOpts: connectionOptsFor(deps),
-        activatedTools,
-        spawn,
-        depth,
-        unattended,
-        channelBound,
-        escalate: resolveEscalate(deps),
-        retrySleep: deps.retrySleep,
-        ...(abort ? { abortSignal: abort.signal } : {}),
-      });
+      // The cut-over: an engine executes the whole turn on its own loop, so
+      // none of runTurn's model/tool wiring applies to it (see delegate.ts).
+      if (engine) {
+        await runDelegatedTurn({
+          agent: deps.agent, engine, sessionId, turnId: turn.id, message: turnMessage, metadata,
+          store: deps.store, emit: (e) => publish(sessionId, e), hookCtx,
+          ...(abort ? { abortSignal: abort.signal } : {}),
+        });
+      } else {
+        await runTurn({
+          agent: deps.agent, sessionId, turnId: turn.id, history, message: turnMessage, metadata,
+          store: deps.store, emit: (e) => publish(sessionId, e),
+          model: deps.model, bearerToken, userId, hookCtx,
+          plugin: deps.plugin, agentName: deps.agentName,
+          connectionOpts: connectionOptsFor(deps),
+          activatedTools,
+          spawn,
+          depth,
+          unattended,
+          channelBound,
+          escalate: resolveEscalate(deps),
+          retrySleep: deps.retrySleep,
+          ...(abort ? { abortSignal: abort.signal } : {}),
+        });
+      }
       // Fix round 1 (2026-08-27-agent-orchestration, tasks 12-13 review):
       // `finishTurn` is now scoped to `WHERE status = 'running'` and reports
       // whether THIS call actually won that transition. `false` means a reap

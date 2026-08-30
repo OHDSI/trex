@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertExists, assertRejects } from "jsr:@std/assert";
+import { assert, assertEquals, assertExists, assertRejects, assertStringIncludes } from "jsr:@std/assert";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
 import { createHandler, buildHistory, deliverChildResult, buildDeliverDeps, type DeliverDeps } from "./handler.ts";
 import { createSpawnCapabilities } from "./spawn.ts";
@@ -17,6 +17,7 @@ import { ABANDONED_CHILD_ERROR } from "./sweep.ts";
 import { abortChildTurn, liveChildTurnAborts } from "./aborts.ts";
 import type { EscalateList } from "./approval-policy.ts";
 import { deriveScopeKey } from "./scope-key.ts";
+import type { AgentEngine } from "../eve-shim/types.ts";
 
 // Builds the message the way adapters/discord.ts:807's sendToThread actually
 // composes it for a thread-turn (`[contextBlock, attachmentsBlock, text]`
@@ -5016,4 +5017,104 @@ Deno.test("paths in neither the index nor the workspace report unavailable, not 
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// The cut-over: a resolved engine takes the turn instead of runner.ts's model
+// loop (service/engine/delegate.ts). The switch lives in startTurn, and these
+// assert it from the outside — the persisted rows and the turn's status — so
+// they hold regardless of where in that function it sits.
+// ---------------------------------------------------------------------------
+
+// A model that FAILS if it is ever driven: the point of a delegated turn is
+// that streamText is never reached, so "the engine ran" is only meaningful
+// alongside "the model did not".
+function unusableModel() {
+  return new MockLanguageModelV3({
+    doStream: () => {
+      throw new Error("the model loop must not run for a delegated turn");
+    },
+  });
+}
+
+// Yields SDK-shaped messages, exactly what an AgentEngine streams (see
+// engine/events.ts's SdkMessageLike). No timers, so it cannot leak.
+interface SdkScriptMessage {
+  type: string;
+  [k: string]: unknown;
+}
+function scriptedEngine(name: string, messages: SdkScriptMessage[]): AgentEngine {
+  return {
+    name,
+    // deno-lint-ignore require-await
+    run: async function* () {
+      for (const m of messages) yield m;
+    },
+  };
+}
+
+Deno.test("a resolved engine runs the turn through the delegating backend and never touches the model loop", async () => {
+  const engine = scriptedEngine("claude-code", [
+    { type: "assistant", session_id: "sdk-1", message: { content: [{ type: "text", text: "engine reply" }] } },
+    { type: "result", session_id: "sdk-1", is_error: false, stop_reason: "stop", usage: { input_tokens: 3, output_tokens: 4 } },
+  ]);
+  const { handler, db } = await makeHandler({
+    model: unusableModel(),
+    mutate: (agent) => {
+      agent.config.resolveEngine = () => Promise.resolve(engine);
+    },
+  });
+  const res = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi" }),
+  }));
+  assertEquals(res.status, 200);
+  await res.json();
+  await until(() => settled(db));
+
+  assertEquals(db.turns[0].status, "completed");
+  assertEquals(db.steps.map((s) => s.kind), ["text", "finish"]);
+  assertEquals(JSON.parse(String(db.steps[0].payload)).text, "engine reply");
+});
+
+Deno.test("a resolved engine that fails mid-stream fails the turn rather than leaving it running", async () => {
+  const engine = scriptedEngine("claude-code", [
+    { type: "result", session_id: "sdk-1", is_error: true, result: "sidecar exploded" },
+  ]);
+  const { handler, db } = await makeHandler({
+    model: unusableModel(),
+    mutate: (agent) => {
+      agent.config.resolveEngine = () => Promise.resolve(engine);
+    },
+  });
+  await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi" }),
+  })).then((r) => r.json());
+  await until(() => settled(db));
+
+  assertEquals(db.turns[0].status, "failed");
+  assertEquals(db.steps.map((s) => s.kind), ["error"]);
+  // The ENGINE's message, not the model loop's — without the switch this step
+  // exists too, carrying the unusable model's own throw instead.
+  assertStringIncludes(String(JSON.parse(String(db.steps[0].payload)).message), "sidecar exploded");
+});
+
+Deno.test("resolveEngine returning undefined leaves the turn on runner.ts's model loop", async () => {
+  const { handler, db } = await makeHandler({
+    mutate: (agent) => {
+      agent.config.resolveEngine = () => Promise.resolve(undefined);
+    },
+  });
+  await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi" }),
+  })).then((r) => r.json());
+  await until(() => settled(db));
+
+  assertEquals(db.turns[0].status, "completed");
+  assertEquals(JSON.parse(String(db.steps[0].payload)).text, "hello from toy");
 });

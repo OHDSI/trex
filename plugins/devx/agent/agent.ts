@@ -10,7 +10,8 @@ import type { HookCtx, ModelSpec } from "eve";
 // (see eve-shim/mod.ts) — this is erased at build/runtime, same posture as
 // lib/context.ts's own core-relative type-only imports (see that file's
 // header comment for why this doesn't create a real dependency on core).
-import type { ToolDef } from "../../../core/server/agents/eve-shim/types.ts";
+import type { AgentEngine, ToolDef } from "../../../core/server/agents/eve-shim/types.ts";
+import { createSidecarEngine } from "./lib/sidecar_engine.ts";
 import { readMetadata } from "./lib/context.ts";
 import { loadSkillsForPrompt } from "../functions/skills/resolver.ts";
 import { ensureAppWorkspace, ensureWorkspace, readProjectRules } from "../functions/tools/workspace.ts";
@@ -87,12 +88,11 @@ interface ProviderRow {
 // createModel (:41-119), minus the Bedrock JSON-credential unpacking and the
 // OpenAI-compatible client construction itself — those become core's job
 // (model.ts's resolveModelSpec/buildModel) once we hand back a ModelSpec.
-async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
-  if (!ctx.userId) {
-    throw new Error("devx agent requires an authenticated user");
-  }
-  const userId = ctx.userId;
-
+// The active provider row, or undefined when the user configured none.
+// Extracted so resolveEngine below picks the SAME row resolveModel does — a
+// second, differently-ordered lookup could route a turn to the sidecar while
+// the model hook read a different provider.
+async function readProviderRow(ctx: HookCtx, userId: string): Promise<ProviderRow | undefined> {
   // Probe before selecting the encrypted columns — see provider_key.ts's
   // assertProviderConfigEncryptionMigrated header comment.
   await assertProviderConfigEncryptionMigrated(ctx.sql);
@@ -103,21 +103,40 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
      LIMIT 1`,
     [userId],
   );
-  let row = activeProviderResult.rows[0] as ProviderRow | undefined;
+  const row = activeProviderResult.rows[0] as ProviderRow | undefined;
+  if (row) return row;
 
   // Fall back to the legacy devx.settings row (backward compat) when the
   // user has no active provider_configs row — functions/index.ts:305-333.
   // devx.settings now carries the same encrypted-pair columns as
   // provider_configs (V16) — resolved through the same readProviderKey call
   // below, not a second, differently-shaped resolution.
-  if (!row) {
-    await assertEncryptionMigrated("settings", ctx.sql);
-    const legacyResult = await ctx.sql(
-      `SELECT provider, model, api_key, api_key_encrypted, api_key_iv, base_url FROM devx.settings WHERE user_id = $1`,
-      [userId],
-    );
-    row = legacyResult.rows[0] as ProviderRow | undefined;
+  await assertEncryptionMigrated("settings", ctx.sql);
+  const legacyResult = await ctx.sql(
+    `SELECT provider, model, api_key, api_key_encrypted, api_key_iv, base_url FROM devx.settings WHERE user_id = $1`,
+    [userId],
+  );
+  return legacyResult.rows[0] as ProviderRow | undefined;
+}
+
+// A claude-code account's turns run on the sidecar's own agentic loop
+// (lib/sidecar_engine.ts) instead of runner.ts's model loop; every other
+// provider resolves undefined and is unaffected. Per-request, mirroring
+// resolveModel — which is NOT consulted for a delegated turn: the engine
+// holds its own credentials (a Claude Code OAuth token, not an API key).
+async function resolveEngine(ctx: HookCtx): Promise<AgentEngine | undefined> {
+  if (!ctx.userId) return undefined;
+  const row = await readProviderRow(ctx, ctx.userId);
+  if (row?.provider !== "claude-code") return undefined;
+  return createSidecarEngine(ctx);
+}
+
+async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
+  if (!ctx.userId) {
+    throw new Error("devx agent requires an authenticated user");
   }
+  const userId = ctx.userId;
+  const row = await readProviderRow(ctx, userId);
 
   // No silent model fallback: the former hardcoded anthropic/claude-sonnet
   // default resolved against the worker env's ANTHROPIC_API_KEY, silently
@@ -148,10 +167,17 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
     throw new Error(classified.safe);
   }
 
-  // The UI routes this one to the legacy /stream endpoint
-  // (claude_code_agent.ts) — the eve/agents runtime has no sidecar-process
-  // equivalent.
+  // A claude-code account has NO model credentials to hand back: it
+  // authenticates the sidecar with a Claude Code OAuth token, and any
+  // ModelSpec built here would carry no api_key — which core's buildModel
+  // backfills from the operator's own env var (cross-tenant billing, the
+  // failure this file guards against everywhere else). Such a turn runs on
+  // resolveEngine above instead, and handler.ts skips the compaction
+  // summarizer for it, so this throw is now unreachable on the delegating
+  // path; it still stands for the /chat endpoint, which has no engine switch.
   if (row.provider === "claude-code") {
+    // Wording unchanged on purpose: /chat is the only caller that can still
+    // reach it, and for /chat the legacy endpoint IS still the answer.
     throw new Error("sidecar providers use the legacy endpoint");
   }
 
@@ -702,6 +728,7 @@ export default defineAgent({
   // tells the user their max_steps setting does not apply on this loop.
   maxSteps: DEFAULT_MAX_STEPS,
   resolveModel,
+  resolveEngine,
   filterTools,
   buildInstructions,
   resolveWorkspace,
