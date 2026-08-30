@@ -62,14 +62,9 @@ export async function ensureClaudeCodeServer() {
 }
 
 /**
- * Answers a sidecar "permission" event (canUseTool in fn-claude-code/server.js)
- * by writing the decision file it polls for. Decides via devx's own consent
- * path (devx.tool_consents/pending_consents — the same DB flow agent.ts's
- * requireConsent uses), NOT eve's approval gate: eve keys approvals to
- * agents.turns, which a legacy devx chat has none of. Staged landing — Task 6
- * re-points this at eve's gate once sidecar turns run as real eve turns.
- * Any failure to decide denies, matching the sidecar's own deny-on-timeout —
- * writing nothing would instead hang the tool call for the full 5 minutes.
+ * Answers a sidecar "permission" event by writing the decision file it polls for,
+ * via devx's own consent path (not eve's — Task 6 re-points this once sidecar
+ * turns run as real eve turns). Any decision failure denies rather than hangs.
  */
 export async function answerPermissionRequest({ id, toolName, input, chatId, userId, sqlFn, send, autoApprove }) {
   let result;

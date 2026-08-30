@@ -186,11 +186,9 @@ const server = http.createServer(async (req, res) => {
       const resumeId = chatSessions.get(sessionKey);
       if (resumeId) opts.resume = resumeId;
 
-      // Ask permission before running a tool. Same file-based round trip as
-      // onElicitation below: write a request file, emit an SSE event, poll for
-      // a decision file, deny on timeout. `suggestions` (the SDK's own "always
-      // allow") is deliberately left unused — mapping it to sticky consent is a
-      // separate decision that could grant more than the human agreed to.
+      // Same file round trip as onElicitation below: write a request file, emit
+      // SSE, poll for a decision file, deny on timeout (fail closed). `suggestions`
+      // (SDK's "always allow") is left unused — it could grant more than agreed.
       opts.canUseTool = async (toolName, input, { signal }) => {
         const id = crypto.randomUUID();
         const requestFile = `/tmp/.claude-permission-${id}.json`;
@@ -207,11 +205,16 @@ const server = http.createServer(async (req, res) => {
         const startTime = Date.now();
         while (Date.now() - startTime < 5 * 60 * 1000) {
           if (signal.aborted) return deny("Turn aborted");
-          // Race the poll tick against the abort signal so a cancelled turn
-          // stops immediately instead of waiting out the remaining interval.
+          // Race the poll tick against the abort signal so a cancelled turn stops
+          // immediately. Named handler + explicit removal on both branches, since
+          // {once:true} alone only cleans up when abort actually fires.
           const aborted = await new Promise((resolve) => {
-            const t = setTimeout(() => resolve(false), 500);
-            signal.addEventListener("abort", () => { clearTimeout(t); resolve(true); }, { once: true });
+            const onAbort = () => { clearTimeout(t); resolve(true); };
+            const t = setTimeout(() => {
+              signal.removeEventListener("abort", onAbort);
+              resolve(false);
+            }, 500);
+            signal.addEventListener("abort", onAbort, { once: true });
           });
           if (aborted) return deny("Turn aborted");
           try {

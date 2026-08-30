@@ -2,13 +2,9 @@ import { assertEquals, assertStringIncludes } from "jsr:@std/assert";
 import { answerPermissionRequest, buildAskQuestionRule } from "./claude_code_agent.ts";
 import { resolveCoderProfile } from "./coder_profile.ts";
 
-// answerPermissionRequest answers the sidecar's "permission" SSE event (see
-// canUseTool in fn-claude-code/server.js) by writing the exact decision file
-// path/shape it polls for: /tmp/.claude-permission-<id>.decision holding
-// { behavior: "allow"|"deny", updatedInput?, message? }. Staged landing: it
-// decides via devx's own consent path (devx.tool_consents/pending_consents —
-// the same DB flow agent.ts's requireConsent uses), not eve's approval gate —
-// eve keys approvals to agents.turns, which a legacy devx chat has none of.
+// answerPermissionRequest writes the exact decision file path/shape the sidecar's
+// canUseTool polls for: /tmp/.claude-permission-<id>.decision holding
+// { behavior: "allow"|"deny", updatedInput?, message? }.
 
 async function readDecisionFile(id: string) {
   const raw = await Deno.readTextFile(`/tmp/.claude-permission-${id}.decision`);
