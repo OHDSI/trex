@@ -1,6 +1,7 @@
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "jsr:@std/assert";
 import { createStore, denyApprovalsForTurns, RUNNING_TURN_INDEX, type QueryFn } from "./store.ts";
 import { STOPPED_BY_PARENT_ERROR } from "./orchestration.ts";
+import { deriveScopeKey } from "./scope-key.ts";
 
 function fakeQuery(responses: Array<{ rows: unknown[] }>) {
   const calls: Array<{ sql: string; params?: unknown[] }> = [];
@@ -449,6 +450,27 @@ Deno.test("setToolConsent upserts on the five-column key", async () => {
   const store = createStore((s, _p) => { sql = s; return Promise.resolve({ rows: [] }); });
   await store.setToolConsent("u", "p", "a", "Bash", "npm", "always");
   assertStringIncludes(sql, "ON CONFLICT (user_id, plugin, agent, tool, scope_key)");
+});
+
+// The parity-residue fix: a grant for the SAME path/user/tool in two
+// different app workspaces must land in two different tool_consents rows —
+// deriveScopeKey's workspace component is what makes that true at the store
+// layer, not just in scope-key.test.ts's pure-function assertions.
+Deno.test("getToolConsent keys two workspaces' SAME path/tool into distinct rows", async () => {
+  const seen: unknown[][] = [];
+  const store = createStore((_sql, params) => {
+    seen.push(params ?? []);
+    return Promise.resolve({ rows: [] });
+  });
+  const keyA = deriveScopeKey("Write", { path: "src/index.ts" }, "/workspace/app-a");
+  const keyB = deriveScopeKey("Write", { path: "src/index.ts" }, "/workspace/app-b");
+  assert(keyA !== keyB);
+
+  await store.getToolConsent("u", "p", "a", "Write", keyA);
+  await store.getToolConsent("u", "p", "a", "Write", keyB);
+  assertEquals(seen[0], ["u", "p", "a", "Write", keyA]);
+  assertEquals(seen[1], ["u", "p", "a", "Write", keyB]);
+  assert(seen[0][4] !== seen[1][4]);
 });
 
 Deno.test("createApproval persists the scope key", async () => {

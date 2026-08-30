@@ -16,6 +16,7 @@ import { DEFAULT_CONTEXT_CONFIG } from "./context/budget.ts";
 import { ABANDONED_CHILD_ERROR } from "./sweep.ts";
 import { abortChildTurn, liveChildTurnAborts } from "./aborts.ts";
 import type { EscalateList } from "./approval-policy.ts";
+import { deriveScopeKey } from "./scope-key.ts";
 
 // Builds the message the way adapters/discord.ts:807's sendToThread actually
 // composes it for a thread-turn (`[contextBlock, attachmentsBlock, text]`
@@ -972,7 +973,9 @@ Deno.test("POST /approval with decision 'always' resolves as approve and upserts
   assertEquals(ok.status, 200);
   assertEquals(await ok.json(), { resolved: true });
   assertEquals(db.approvals.get(requestId)!.decision, "approve");
-  assertEquals(db.toolConsents.get("user-1|toy-agent|toy|guarded|"), "always");
+  // No resolveWorkspace configured on this agent, so the stored scope key
+  // carries deriveScopeKey's "unresolved workspace" component, not "".
+  assertEquals(db.toolConsents.get(`user-1|toy-agent|toy|guarded|${deriveScopeKey("guarded", {})}`), "always");
 
   await until(() => settled(db), 10_000);
   assertEquals(db.turns[0].status, "completed");
@@ -1003,7 +1006,7 @@ Deno.test("POST /approval with decision 'never' resolves as deny and upserts a s
   }));
   assertEquals(ok.status, 200);
   assertEquals(db.approvals.get(requestId)!.decision, "deny");
-  assertEquals(db.toolConsents.get("user-1|toy-agent|toy|guarded|"), "never");
+  assertEquals(db.toolConsents.get(`user-1|toy-agent|toy|guarded|${deriveScopeKey("guarded", {})}`), "never");
 
   // Drain the fire-and-forget turn (denied tool call still lets the turn
   // finish, per the existing deny path) — see the `until` helper's own comment
@@ -1075,7 +1078,7 @@ Deno.test("POST /eve/v1/session/:id with inputResponses optionId 'always' resolv
     body: JSON.stringify({ inputResponses: [{ requestId, optionId: "always" }] }),
   }));
   assertEquals(res.status, 202);
-  assertEquals(db.toolConsents.get("user-1|toy-agent|toy|guarded|"), "always");
+  assertEquals(db.toolConsents.get(`user-1|toy-agent|toy|guarded|${deriveScopeKey("guarded", {})}`), "always");
   await until(() => settled(db), 10_000);
   assertEquals(db.turns[0].status, "completed");
 });

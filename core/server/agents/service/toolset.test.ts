@@ -12,6 +12,7 @@ import { loadAgent } from "../loader.ts";
 import type { HookCtx } from "../eve-shim/types.ts";
 import { createStore } from "./store.ts";
 import { publish } from "./stream.ts";
+import { deriveScopeKey } from "./scope-key.ts";
 
 function fakeHookCtx(overrides: Partial<HookCtx> = {}): HookCtx {
   return {
@@ -963,7 +964,12 @@ Deno.test("the consent lookup is keyed on the derived scope", async () => {
   }));
   await run(tools, "Bash", { command: "/usr/bin/npm test" });
   await run(tools, "Write", { path: "./src/a.ts" });
-  assertEquals(seen, ["npm", "src/a.ts"]);
+  // gatedCtx's agent has no resolveWorkspace, so both keys carry
+  // deriveScopeKey's "unresolved workspace" component.
+  assertEquals(seen, [
+    deriveScopeKey("Bash", { command: "/usr/bin/npm test" }),
+    deriveScopeKey("Write", { path: "./src/a.ts" }),
+  ]);
 });
 
 Deno.test("a sticky never denies without creating an approval", async () => {
