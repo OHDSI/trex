@@ -22,14 +22,6 @@ export interface RunArgs {
   // readMetadata/materializeAttachments on the receiving end expect exactly
   // this shape; the devx side downloads them into the coder's workspace.
   attachments?: Array<{ name: string; url: string; contentType?: string }>;
-  // Discord channel/thread id for the task. When set, session creation carries
-  // a continuationToken derived from it (see coderContinuationToken) so the
-  // coder gets its OWN agents.channel_sessions row on the SAME channel as
-  // claw's facilitator — the PK is (channel, continuation_token), so a
-  // distinct token is what makes two sessions share one thread. Omitted
-  // entirely (not sent) when absent: eval/test callers still get a plain
-  // unbound session, not an error.
-  channelId?: string | null;
   // Invoked on a timer while the event stream is open, independent of events
   // arriving — a long silent tool run (build/test) must not read as dead. See
   // code-stream.ts's HEARTBEAT_MS for why this exists (#238).
@@ -49,24 +41,64 @@ const DEFAULT_TIMEOUT_MS = 90 * 60_000;
 
 interface Event { type: string; data?: Record<string, unknown> }
 
+// One tool call the coder has parked on, waiting for a human. Mirrors
+// core/server/agents/service/events.ts's InputRequestItem, flattened: the wire
+// shape is { requestId, action: { kind, callId, toolName, input } } and only
+// requestId/toolName/input are actionable here.
+export interface PendingApproval {
+  requestId: string;
+  toolName: string;
+  input: unknown;
+}
+
+// Why the event stream stopped. ONLY "input-requested" means the turn is still
+// running — parked on a human decision, resumable via resolveCodeApproval +
+// reattachCodeTurn. Every other reason means the turn is over.
+export type TurnEnd = "completed" | "waiting" | "input-requested" | "stream-ended";
+
+export interface TurnResult {
+  codeSessionId: string;
+  replyText: string;
+  nextCursor: number;
+  reason: TurnEnd;
+  /** Non-empty only when reason is "input-requested". */
+  pending: PendingApproval[];
+}
+
+interface StreamArgs {
+  codeSessionId: string;
+  startCursor: number;
+  userId?: string;
+  onHeartbeat?: () => void;
+  timeoutMs?: number;
+}
+
+function parseRequests(value: unknown): PendingApproval[] {
+  if (!Array.isArray(value)) return [];
+  const out: PendingApproval[] = [];
+  for (const raw of value) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const item = raw as { requestId?: unknown; action?: { toolName?: unknown; input?: unknown } };
+    if (typeof item.requestId !== "string" || !item.requestId) continue;
+    out.push({
+      requestId: item.requestId,
+      toolName: typeof item.action?.toolName === "string" ? item.action.toolName : "unknown",
+      input: item.action?.input,
+    });
+  }
+  return out;
+}
+
 function headers(userId?: string): Record<string, string> {
   const h: Record<string, string> = { "content-type": "application/json" };
   if (userId) h["x-user-id"] = userId;
   return h;
 }
 
-// Deterministic per-thread token for the coder's OWN channel_sessions row —
-// distinct from the facilitator's own token (see core/server/agents/channels/
-// store.ts's resolveOrCreateSession) so a later turn on the same thread
-// re-resolves the same coder session instead of minting a new one.
-export function coderContinuationToken(channelId: string): string {
-  return `${channelId}:coder`;
-}
-
 export async function runCodeTurn(
   client: TokioClient,
   args: RunArgs,
-): Promise<{ codeSessionId: string; replyText: string; nextCursor: number }> {
+): Promise<TurnResult> {
   // No `metadata.mode`: an unset mode means the Code agent's readMode() returns
   // undefined, which its filterTools treats as "allow ALL tools" (devx
   // agent.ts:193-194). That is the ONLY mode in which the coder's superpowers
@@ -86,13 +118,9 @@ export async function runCodeTurn(
     ...(args.appId ? { appId: args.appId } : {}),
     ...(args.attachments?.length ? { attachments: args.attachments } : {}),
   };
-  // continuationToken only matters at create/resolve time — a continue call
-  // already addresses the session directly by id, so it's sent ONLY when
-  // there is no prior codeSessionId yet.
   const body = JSON.stringify({
     message: args.message,
     ...(Object.keys(metadata).length ? { metadata } : {}),
-    ...(!args.codeSessionId && args.channelId ? { continuationToken: coderContinuationToken(args.channelId) } : {}),
   });
 
   // 1) Start (create) or continue the turn.
@@ -108,6 +136,49 @@ export async function runCodeTurn(
   }
 
   // 2) Stream the turn's events from startCursor until the turn ends.
+  return await streamTurn(client, {
+    codeSessionId,
+    startCursor: args.startCursor,
+    userId: args.userId,
+    onHeartbeat: args.onHeartbeat,
+    timeoutMs: args.timeoutMs,
+  });
+}
+
+// Re-attach to a turn already in flight — used after a parked approval is
+// resolved, to collect the REST of that turn. Sending a fresh message instead
+// would start a SECOND turn on top of the parked one.
+export function reattachCodeTurn(client: TokioClient, args: StreamArgs): Promise<TurnResult> {
+  return streamTurn(client, args);
+}
+
+// Resolve one parked approval (handler.ts's additive
+// POST /eve/v1/session/:id/approval). A refusal is a normal outcome — an
+// expired or already-decided request 4xxs — so this reports it instead of
+// throwing; only the caller knows whether to re-ask the channel.
+export async function resolveCodeApproval(
+  client: TokioClient,
+  args: { codeSessionId: string; requestId: string; decision: "approve" | "deny"; userId?: string },
+): Promise<{ resolved: boolean; error?: string }> {
+  const res = await client.req(`${CODE_BASE}/eve/v1/session/${args.codeSessionId}/approval`, {
+    method: "POST",
+    headers: headers(args.userId),
+    body: JSON.stringify({ requestId: args.requestId, decision: args.decision }),
+  });
+  if (res.ok) return { resolved: true };
+  const detail = await res.json().catch(() => ({}));
+  const message = (detail as { error?: unknown }).error;
+  return { resolved: false, error: `${res.status}: ${typeof message === "string" ? message : "approval not resolved"}` };
+}
+
+async function streamTurn(client: TokioClient, args: StreamArgs): Promise<TurnResult> {
+  const codeSessionId = args.codeSessionId;
+  // startIndex counts the session's PERSISTED events, while nextCursor counts
+  // every line read (live-only kinds — turn.started, input.requested,
+  // session.waiting — included), so the cursor can run AHEAD of the server's
+  // index. That direction is the safe one: a re-attach skips replaying what was
+  // already seen, and a still-running turn's remainder arrives on the live tail
+  // whatever startIndex says.
   const res = await client.req(
     `${CODE_BASE}/eve/v1/session/${codeSessionId}/stream?startIndex=${args.startCursor}`,
     { method: "GET", headers: headers(args.userId) },
@@ -154,9 +225,28 @@ export async function runCodeTurn(
           replyText = String(d.text ?? d.content ?? d.message ?? replyText);
         } else if (ev.type === "turn.failed" || ev.type === "session.failed") {
           throw new Error(`code turn failed: ${String(d.message ?? "unknown")}`);
+        } else if (ev.type === "input.requested") {
+          // The coder is gated on a human: nothing further reaches this stream
+          // until the request is decided (toolset.ts parks the turn for 30
+          // minutes), so stop reading and hand the request up for the channel
+          // to render.
+          await reader.cancel();
+          return {
+            codeSessionId,
+            replyText,
+            nextCursor: args.startCursor + read,
+            reason: "input-requested",
+            pending: parseRequests(d.requests),
+          };
         } else if (ev.type === "session.waiting" || ev.type === "turn.completed") {
           await reader.cancel();
-          return { codeSessionId, replyText, nextCursor: args.startCursor + read };
+          return {
+            codeSessionId,
+            replyText,
+            nextCursor: args.startCursor + read,
+            reason: ev.type === "turn.completed" ? "completed" : "waiting",
+            pending: [],
+          };
         }
       }
     }
@@ -167,5 +257,5 @@ export async function runCodeTurn(
     clearTimeout(timeout);
     try { await reader.cancel(); } catch { /* already closed */ }
   }
-  return { codeSessionId, replyText, nextCursor: args.startCursor + read };
+  return { codeSessionId, replyText, nextCursor: args.startCursor + read, reason: "stream-ended", pending: [] };
 }

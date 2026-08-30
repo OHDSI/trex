@@ -1,7 +1,7 @@
 // plugins/claw/agent/lib/code-session.test.ts
 import { assert, assertEquals } from "jsr:@std/assert";
 import { FakeTime } from "jsr:@std/testing/time";
-import { runCodeTurn, CODE_BASE, type TokioClient } from "./code-session.ts";
+import { CODE_BASE, reattachCodeTurn, resolveCodeApproval, runCodeTurn, type TokioClient } from "./code-session.ts";
 
 function ndjson(...events: unknown[]): Response {
   const body = events.map((e) => JSON.stringify(e)).join("\n") + "\n";
@@ -150,86 +150,6 @@ Deno.test("runCodeTurn sends no attachments key at all when there are none", asy
   await runCodeTurn(client, { codeSessionId: null, message: "build X", startCursor: 0, appId: "app-7" });
   const metadata = JSON.parse(reqs[0].init.body).metadata;
   assertEquals("attachments" in metadata, false);
-});
-
-Deno.test("runCodeTurn sends a coder-distinct continuationToken (channelId:coder) on create when channelId is given", async () => {
-  const create = new Response(JSON.stringify({ sessionId: "code-1" }), {
-    headers: { "content-type": "application/json" },
-  });
-  const stream = ndjson(
-    { type: "message.completed", data: { text: "ok" } },
-    { type: "session.waiting", data: {} },
-  );
-  const { client, reqs } = fakeClient([create, stream]);
-  await runCodeTurn(client, { codeSessionId: null, message: "build X", startCursor: 0, channelId: "chan-1" });
-  const body = JSON.parse(reqs[0].init.body);
-  assertEquals(body.continuationToken, "chan-1:coder");
-});
-
-Deno.test("runCodeTurn sends no continuationToken at all when channelId is absent — eval/test callers get a plain unbound session", async () => {
-  const create = new Response(JSON.stringify({ sessionId: "code-1" }), {
-    headers: { "content-type": "application/json" },
-  });
-  const stream = ndjson(
-    { type: "message.completed", data: { text: "ok" } },
-    { type: "session.waiting", data: {} },
-  );
-  const { client, reqs } = fakeClient([create, stream]);
-  await runCodeTurn(client, { codeSessionId: null, message: "build X", startCursor: 0 });
-  const body = JSON.parse(reqs[0].init.body);
-  assertEquals("continuationToken" in body, false);
-});
-
-Deno.test("runCodeTurn derives the same continuationToken for the same channelId across two separate create calls (a later turn re-resolves the same session)", async () => {
-  const mk = () => {
-    const create = new Response(JSON.stringify({ sessionId: "code-1" }), {
-      headers: { "content-type": "application/json" },
-    });
-    const stream = ndjson(
-      { type: "message.completed", data: { text: "ok" } },
-      { type: "session.waiting", data: {} },
-    );
-    return fakeClient([create, stream]);
-  };
-  const first = mk();
-  await runCodeTurn(first.client, { codeSessionId: null, message: "build X", startCursor: 0, channelId: "chan-1" });
-  const second = mk();
-  await runCodeTurn(second.client, { codeSessionId: null, message: "build X", startCursor: 0, channelId: "chan-1" });
-  const token1 = JSON.parse(first.reqs[0].init.body).continuationToken;
-  const token2 = JSON.parse(second.reqs[0].init.body).continuationToken;
-  assertEquals(token1, token2);
-});
-
-Deno.test("runCodeTurn derives different continuationTokens for different channelIds (different threads get different coder sessions)", async () => {
-  const mk = () => {
-    const create = new Response(JSON.stringify({ sessionId: "code-1" }), {
-      headers: { "content-type": "application/json" },
-    });
-    const stream = ndjson(
-      { type: "message.completed", data: { text: "ok" } },
-      { type: "session.waiting", data: {} },
-    );
-    return fakeClient([create, stream]);
-  };
-  const a = mk();
-  await runCodeTurn(a.client, { codeSessionId: null, message: "build X", startCursor: 0, channelId: "chan-1" });
-  const b = mk();
-  await runCodeTurn(b.client, { codeSessionId: null, message: "build X", startCursor: 0, channelId: "chan-2" });
-  const tokenA = JSON.parse(a.reqs[0].init.body).continuationToken;
-  const tokenB = JSON.parse(b.reqs[0].init.body).continuationToken;
-  assert(tokenA !== tokenB);
-});
-
-Deno.test("runCodeTurn does not resend continuationToken on a continue call — it only matters at create/resolve time", async () => {
-  const cont = new Response(JSON.stringify({ accepted: true }), { status: 202 });
-  const stream = ndjson(
-    { type: "message.completed", data: { text: "ok" } },
-    { type: "session.waiting", data: {} },
-  );
-  const { client, reqs } = fakeClient([cont, stream]);
-  await runCodeTurn(client, { codeSessionId: "code-1", message: "continue", startCursor: 2, channelId: "chan-1" });
-  const body = JSON.parse(reqs[0].init.body);
-  assertEquals("continuationToken" in body, false);
 });
 
 Deno.test("runCodeTurn continues an existing session with startCursor", async () => {
@@ -400,4 +320,147 @@ Deno.test("runCodeTurn rejects and cancels the reader when timeoutMs is exceeded
   } finally {
     time.restore();
   }
+});
+
+// --- approval gates: input.requested, terminal reason, re-attach ------------
+
+Deno.test("runCodeTurn surfaces an input.requested gate instead of waiting on it, in toolset.ts's emitted shape", async () => {
+  const create = new Response(JSON.stringify({ sessionId: "code-8" }), {
+    headers: { "content-type": "application/json" },
+  });
+  // Exactly what toolset.ts emits: { turnId, requests: [{ requestId, action:
+  // { kind, callId, toolName, input } }] }.
+  const stream = ndjson(
+    { type: "turn.started", data: { turnId: "t1", sequence: 0 } },
+    {
+      type: "input.requested",
+      data: {
+        turnId: "t1",
+        requests: [{
+          requestId: "req-1",
+          action: { kind: "tool-call", callId: "req-1", toolName: "runCommand", input: { cmd: "rm -rf build" } },
+        }],
+      },
+    },
+  );
+  const { client } = fakeClient([create, stream]);
+
+  const res = await runCodeTurn(client, { codeSessionId: null, message: "clean up", startCursor: 0 });
+
+  assertEquals(res.reason, "input-requested");
+  assertEquals(res.pending, [{ requestId: "req-1", toolName: "runCommand", input: { cmd: "rm -rf build" } }]);
+  assertEquals(res.nextCursor, 2);
+});
+
+Deno.test("runCodeTurn reports which terminal state it hit — completed vs waiting vs parked", async () => {
+  const mk = (terminal: unknown) => {
+    const create = new Response(JSON.stringify({ sessionId: "code-9" }), {
+      headers: { "content-type": "application/json" },
+    });
+    return fakeClient([create, ndjson({ type: "message.completed", data: { text: "ok" } }, terminal)]);
+  };
+
+  const done = await runCodeTurn(mk({ type: "turn.completed", data: { turnId: "t1" } }).client, {
+    codeSessionId: null,
+    message: "x",
+    startCursor: 0,
+  });
+  assertEquals(done.reason, "completed");
+  assertEquals(done.pending, []);
+
+  const waiting = await runCodeTurn(mk({ type: "session.waiting", data: { wait: "next-user-message" } }).client, {
+    codeSessionId: null,
+    message: "x",
+    startCursor: 0,
+  });
+  assertEquals(waiting.reason, "waiting");
+
+  const parkedEvent = {
+    type: "input.requested",
+    data: { turnId: "t1", requests: [{ requestId: "r", action: { toolName: "t" } }] },
+  };
+  const parked = await runCodeTurn(mk(parkedEvent).client, { codeSessionId: null, message: "x", startCursor: 0 });
+  assertEquals(parked.reason, "input-requested");
+  // A caller can always tell the parked case from the finished ones.
+  assert(parked.reason !== done.reason && parked.reason !== waiting.reason);
+});
+
+Deno.test("a parked turn's cursor carries into the re-attach: monotonic, and only the remainder is counted", async () => {
+  const create = new Response(JSON.stringify({ sessionId: "code-10" }), {
+    headers: { "content-type": "application/json" },
+  });
+  const parkStream = ndjson(
+    { type: "turn.started", data: { turnId: "t1", sequence: 0 } },
+    { type: "message.completed", data: { text: "about to run it" } },
+    {
+      type: "input.requested",
+      data: { turnId: "t1", requests: [{ requestId: "req-1", action: { toolName: "runCommand", input: {} } }] },
+    },
+  );
+  const { client, reqs } = fakeClient([create, parkStream]);
+  const parked = await runCodeTurn(client, { codeSessionId: null, message: "go", startCursor: 0 });
+  assertEquals(parked.reason, "input-requested");
+  assertEquals(parked.nextCursor, 3);
+
+  // The remainder of the SAME turn, from the cursor the park reported.
+  const restStream = ndjson(
+    { type: "action.result", data: { turnId: "t1" } },
+    { type: "message.completed", data: { text: "done" } },
+    { type: "turn.completed", data: { turnId: "t1" } },
+  );
+  const { client: c2, reqs: reqs2 } = fakeClient([restStream]);
+  const rest = await reattachCodeTurn(c2, { codeSessionId: parked.codeSessionId, startCursor: parked.nextCursor });
+
+  assertEquals(reqs2[0].url, `${CODE_BASE}/eve/v1/session/code-10/stream?startIndex=3`);
+  assertEquals(reqs2[0].init.method, "GET");
+  // No fresh message: a re-attach must never start a second turn.
+  assertEquals(reqs2.length, 1);
+  assertEquals(rest.reason, "completed");
+  assertEquals(rest.replyText, "done");
+  // Monotonic, and counting ONLY the three events not already seen.
+  assert(rest.nextCursor > parked.nextCursor, `${rest.nextCursor} must exceed ${parked.nextCursor}`);
+  assertEquals(rest.nextCursor, parked.nextCursor + 3);
+  // The first attach really did start at 0, so the re-attach skipped it rather
+  // than replaying it.
+  assertEquals(reqs[1].url.endsWith("startIndex=0"), true);
+});
+
+Deno.test("a re-attach that finds the turn still parked returns rather than spinning", async () => {
+  const stream = ndjson({
+    type: "input.requested",
+    data: { turnId: "t1", requests: [{ requestId: "req-2", action: { toolName: "writeFile", input: { path: "a" } } }] },
+  });
+  const { client } = fakeClient([stream]);
+  const res = await reattachCodeTurn(client, { codeSessionId: "code-11", startCursor: 4 });
+  assertEquals(res.reason, "input-requested");
+  assertEquals(res.pending.map((p) => p.requestId), ["req-2"]);
+  assertEquals(res.nextCursor, 5);
+});
+
+Deno.test("resolveCodeApproval posts the decision to the approval route and reports success", async () => {
+  const { client, reqs } = fakeClient([new Response(JSON.stringify({ resolved: true }), { status: 200 })]);
+  const out = await resolveCodeApproval(client, {
+    codeSessionId: "code-12",
+    requestId: "req-1",
+    decision: "approve",
+    userId: "u1",
+  });
+  assertEquals(out, { resolved: true });
+  assertEquals(reqs[0].url, `${CODE_BASE}/eve/v1/session/code-12/approval`);
+  assertEquals(reqs[0].init.method, "POST");
+  assertEquals(JSON.parse(reqs[0].init.body), { requestId: "req-1", decision: "approve" });
+  assertEquals(reqs[0].init.headers["x-user-id"], "u1");
+});
+
+Deno.test("resolveCodeApproval reports a refused/expired request instead of throwing", async () => {
+  const { client } = fakeClient([
+    new Response(JSON.stringify({ error: "unknown or already-decided request" }), {
+      status: 404,
+      headers: { "content-type": "application/json" },
+    }),
+  ]);
+  const out = await resolveCodeApproval(client, { codeSessionId: "code-13", requestId: "req-9", decision: "deny" });
+  assertEquals(out.resolved, false);
+  assert(out.error?.includes("404"), out.error);
+  assert(out.error?.includes("already-decided"), out.error);
 });

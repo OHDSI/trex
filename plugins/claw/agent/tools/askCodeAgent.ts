@@ -15,10 +15,24 @@
 // `app` mid-task is ignored (one task = one thread = one app).
 import { defineTool } from "eve/tools";
 import { runCodeTurn, type CodeTurnArgs } from "../lib/code-stream.ts";
+import type { PendingApproval, TurnEnd } from "../lib/code-session.ts";
+import { parkedReply, postApprovalGates } from "../lib/coder-approval.ts";
 import { readOrchestration, upsertOrchestration, readDecisions, renderDecisionLedger, type QueryFn } from "../lib/state.ts";
 import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
 import { postChannelMessage } from "../lib/discord-rest.ts";
 import { parseTrailer, type HandoffTrailer } from "../lib/handoff-trailer.ts";
+
+// The eve transport (code-session.ts) reports HOW the turn ended and, when it
+// parked on a human approval, which requests are pending. The legacy /stream
+// transport reports neither — and a result without them means exactly what its
+// absence says: the turn ran to the end.
+export interface CodeTurnOutcome {
+  chatId: string;
+  replyText: string;
+  nextCursor?: number;
+  reason?: TurnEnd;
+  pending?: PendingApproval[];
+}
 
 interface Input {
   message: string;
@@ -46,11 +60,7 @@ export async function askCore(
   input: Input,
   // Injected for testability (defaults to the real /stream turn); tests pass a
   // stub so askCore's orchestration can be exercised without a live coder.
-  // Widened over CodeTurnArgs with an optional channelId, which code-stream.ts
-  // (untouched, still the default) simply ignores; the eve transport
-  // (code-session.ts's runCodeTurn) uses it to derive the coder's OWN
-  // channel-bound continuation token.
-  runTurn: (args: CodeTurnArgs & { channelId?: string }) => Promise<{ chatId: string; replyText: string }> = runCodeTurn,
+  runTurn: (args: CodeTurnArgs) => Promise<CodeTurnOutcome> = runCodeTurn,
 ): Promise<{ reply: string; trailer: HandoffTrailer | null }> {
   const prior = await readOrchestration(sql, ctx.sessionId);
   // codeSessionId now holds the devx chat id; the stored app wins once the chat
@@ -80,27 +90,39 @@ export async function askCore(
   // answered.
   const ledger = renderDecisionLedger(await readDecisions(sql, ctx.sessionId));
   const message = ledger ? `${ledger}${input.message}` : input.message;
-  const { chatId, replyText } = await runTurn({
+  const outcome = await runTurn({
     chatId: prior?.codeSessionId ?? null,
     message,
     userId: ctx.userId,
     appId,
     ...(input.attachments?.length ? { attachments: input.attachments } : {}),
     ...(onProgress ? { onProgress } : {}),
-    ...(ctx.channelId ? { channelId: ctx.channelId } : {}),
   });
-  // eventCursor is unused on the /stream path (each turn streams to completion);
-  // the column is retained for schema compatibility.
+  // The cursor is what a re-attach resumes from after a parked approval, so it
+  // must be stored on EVERY turn. The legacy /stream path reports none (each
+  // turn streams to completion there) and keeps writing 0.
   await upsertOrchestration(sql, {
     sessionId: ctx.sessionId,
-    codeSessionId: chatId,
-    eventCursor: 0,
+    codeSessionId: outcome.chatId,
+    eventCursor: outcome.nextCursor ?? 0,
     appId,
   });
+  // Parked on a human: the coder's turn is still open, so the channel gets the
+  // gate and claw gets the requestIds — NOT a reply to relay. Sending the coder
+  // another message here would start a second turn on top of the parked one.
+  if (outcome.reason === "input-requested") {
+    const pending = outcome.pending ?? [];
+    const posted = await postApprovalGates(fetch, {
+      botToken: Deno.env.get("DISCORD_BOT_TOKEN"),
+      channelId: ctx.channelId,
+      pending,
+    });
+    return { reply: parkedReply(pending, posted), trailer: null };
+  }
   // The coder ends its reply with a machine trailer (see prompts_channel.ts's
   // <reply_contract>); strip it from what the channel sees and hand the parsed
   // facts back alongside.
-  const { trailer, body } = parseTrailer(replyText);
+  const { trailer, body } = parseTrailer(outcome.replyText);
   return { reply: body, trailer };
 }
 

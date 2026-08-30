@@ -1,5 +1,5 @@
 import { assertEquals, assertStringIncludes } from "jsr:@std/assert";
-import { askCore } from "./askCodeAgent.ts";
+import { askCore, type CodeTurnOutcome } from "./askCodeAgent.ts";
 import type { CodeTurnArgs } from "../lib/code-stream.ts";
 
 function fakeSql() {
@@ -96,35 +96,6 @@ Deno.test("askCore passes no onProgress at all when there is no channelId — ne
   assertEquals(turn.seen[0].onProgress, undefined);
 });
 
-// The coder needs its OWN agents.channel_sessions row on the task's Discord
-// channel (distinct continuation token from the facilitator's) so its
-// input.requested events can reach the channel adapter — see code-session.ts's
-// continuationToken derivation. askCore's job here is just to forward the
-// thread's channelId to the turn.
-Deno.test("askCore forwards channelId to the coder turn so it can bind its own channel session", async () => {
-  const sql = fakeSql();
-  const turn = stubTurn();
-  await askCore(sql.fn, { sessionId: "s1", userId: "u1", channelId: "chan-1" }, { message: "go" }, turn.fn);
-  assertEquals((turn.seen[0] as { channelId?: string }).channelId, "chan-1");
-});
-
-Deno.test("askCore forwards no channelId when the caller has none (eval/test path) — the coder still gets a working unbound session", async () => {
-  const sql = fakeSql();
-  const turn = stubTurn();
-  await askCore(sql.fn, { sessionId: "s1", userId: "u1" }, { message: "go" }, turn.fn);
-  assertEquals((turn.seen[0] as { channelId?: string }).channelId, undefined);
-});
-
-Deno.test("askCore forwards the SAME channelId across two turns in the same thread", async () => {
-  const sql = fakeSql();
-  const turn = stubTurn("ok", "chat-1");
-  await askCore(sql.fn, { sessionId: "s1", userId: "u1", channelId: "chan-1" }, { message: "first" }, turn.fn);
-  await askCore(sql.fn, { sessionId: "s1", userId: "u1", channelId: "chan-1" }, { message: "second" }, turn.fn);
-  assertEquals((turn.seen[0] as { channelId?: string }).channelId, "chan-1");
-  assertEquals((turn.seen[1] as { channelId?: string }).channelId, "chan-1");
-  assertEquals(turn.seen[1].chatId, "chat-1"); // same coder chat reused
-});
-
 Deno.test("askCore's onProgress posts 'Still on it: <note>' to the channel and swallows a post failure", async () => {
   const sql = fakeSql();
   const turn = stubTurn();
@@ -199,4 +170,88 @@ Deno.test("askCore returns a null trailer and the reply unchanged when the coder
   const out = await askCore(sql.fn, { sessionId: "s1", userId: "u1" }, { message: "go" }, turn.fn);
   assertEquals(out.reply, "Just prose, no trailer.");
   assertEquals(out.trailer, null);
+});
+
+// --- a coder turn that parks on a human approval ---------------------------
+
+// Stubs the EVE transport's richer result: how the turn ended, where the cursor
+// got to, and what it is parked on.
+function stubEveTurn(result: Partial<CodeTurnOutcome>) {
+  const seen: CodeTurnArgs[] = [];
+  const fn = (args: CodeTurnArgs) => {
+    seen.push(args);
+    return Promise.resolve({ chatId: "chat-1", replyText: "", ...result } as CodeTurnOutcome);
+  };
+  return { fn, seen };
+}
+
+async function withDiscord(fn: (posts: { url: string; body: Record<string, unknown> }[]) => Promise<void>) {
+  const originalFetch = globalThis.fetch;
+  const originalToken = Deno.env.get("DISCORD_BOT_TOKEN");
+  const posts: { url: string; body: Record<string, unknown> }[] = [];
+  try {
+    Deno.env.set("DISCORD_BOT_TOKEN", "tok-1");
+    globalThis.fetch = ((url: string, init?: RequestInit) => {
+      posts.push({ url: String(url), body: JSON.parse(String(init?.body ?? "{}")) });
+      return Promise.resolve(new Response(JSON.stringify({ id: "msg-1" }), { status: 200 }));
+    }) as typeof fetch;
+    await fn(posts);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalToken === undefined) Deno.env.delete("DISCORD_BOT_TOKEN");
+    else Deno.env.set("DISCORD_BOT_TOKEN", originalToken);
+  }
+}
+
+Deno.test("askCore posts the coder's approval gate to the thread and reports the park instead of a reply", async () => {
+  await withDiscord(async (posts) => {
+    const sql = fakeSql();
+    const turn = stubEveTurn({
+      nextCursor: 5,
+      reason: "input-requested",
+      pending: [{ requestId: "req-1", toolName: "runCommand", input: { cmd: "rm -rf build" } }],
+    });
+    const out = await askCore(
+      sql.fn,
+      { sessionId: "s1", userId: "u1", channelId: "chan-1" },
+      { message: "go" },
+      turn.fn,
+    );
+
+    assertEquals(posts.length, 1);
+    assertStringIncludes(posts[0].url, "/channels/chan-1/messages");
+    const row = (posts[0].body.components as Array<{ components: Array<Record<string, unknown>> }>)[0].components[0];
+    assertEquals(row.custom_id, "eve_choice");
+    assertStringIncludes(out.reply, "req-1");
+    assertStringIncludes(out.reply, "PAUSED");
+    assertEquals(out.trailer, null);
+    // The cursor the park reported is what a re-attach will resume from.
+    assertEquals(Number(sql.store.get("s1").event_cursor), 5);
+  });
+});
+
+Deno.test("askCore still hands the requestId over when there is no channel to render the gate in", async () => {
+  const sql = fakeSql();
+  const turn = stubEveTurn({
+    nextCursor: 2,
+    reason: "input-requested",
+    pending: [{ requestId: "req-1", toolName: "runCommand", input: {} }],
+  });
+  const out = await askCore(sql.fn, { sessionId: "s1", userId: "u1" }, { message: "go" }, turn.fn);
+  assertStringIncludes(out.reply, "req-1");
+  assertStringIncludes(out.reply, "resolveCoderApproval");
+});
+
+Deno.test("askCore stores the turn's cursor when the transport reports one, and 0 when it does not", async () => {
+  const eve = fakeSql();
+  await askCore(eve.fn, { sessionId: "s1", userId: "u1" }, { message: "go" }, stubEveTurn({
+    replyText: "done",
+    nextCursor: 12,
+    reason: "completed",
+  }).fn);
+  assertEquals(Number(eve.store.get("s1").event_cursor), 12);
+
+  const legacy = fakeSql();
+  await askCore(legacy.fn, { sessionId: "s1", userId: "u1" }, { message: "go" }, stubTurn("done").fn);
+  assertEquals(Number(legacy.store.get("s1").event_cursor), 0);
 });
