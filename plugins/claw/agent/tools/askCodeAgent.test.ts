@@ -1,6 +1,7 @@
-import { assertEquals, assertStringIncludes } from "jsr:@std/assert";
-import { askCore, type CodeTurnOutcome } from "./askCodeAgent.ts";
+import { assertEquals, assertRejects, assertStringIncludes } from "jsr:@std/assert";
+import { askCore, routeCodeTurn, type CodeTurnOutcome, type TransportDeps } from "./askCodeAgent.ts";
 import type { CodeTurnArgs } from "../lib/code-stream.ts";
+import type { TokioClient } from "../lib/code-session.ts";
 
 function fakeSql() {
   const store = new Map<string, any>();
@@ -254,4 +255,118 @@ Deno.test("askCore stores the turn's cursor when the transport reports one, and 
   const legacy = fakeSql();
   await askCore(legacy.fn, { sessionId: "s1", userId: "u1" }, { message: "go" }, stubTurn("done").fn);
   assertEquals(Number(legacy.store.get("s1").event_cursor), 0);
+});
+
+// --- routeCodeTurn: real provider-based routing wired for production --------
+// (askCore's own tests above always inject an explicit runTurn stub and so
+// never exercise this; these tests drive routeCodeTurn directly with fake
+// deps — never mintToken/Trex.req, which only resolve inside a staged worker.)
+
+function baseArgs(overrides: Partial<CodeTurnArgs> = {}): CodeTurnArgs {
+  return { chatId: null, message: "go", userId: "u1", appId: null, ...overrides };
+}
+
+function fakeClient(): TokioClient {
+  return { req: () => Promise.resolve(new Response("{}", { status: 200 })) };
+}
+
+Deno.test("routeCodeTurn calls the legacy transport for a claude-code account", async () => {
+  const seenLegacy: CodeTurnArgs[] = [];
+  const deps: TransportDeps = {
+    getProvider: () => Promise.resolve("claude-code"),
+    runLegacy: (args) => {
+      seenLegacy.push(args);
+      return Promise.resolve({ chatId: "chat-1", replyText: "ok" });
+    },
+    runEve: () => {
+      throw new Error("must not call eve for a claude-code account");
+    },
+  };
+  const out = await routeCodeTurn(baseArgs(), 0, deps);
+  assertEquals(out.replyText, "ok");
+  assertEquals(seenLegacy.length, 1);
+});
+
+Deno.test("routeCodeTurn calls the eve transport for a non-claude-code account", async () => {
+  const seenEve: unknown[] = [];
+  const deps: TransportDeps = {
+    getProvider: () => Promise.resolve("anthropic"),
+    runLegacy: () => {
+      throw new Error("must not call legacy for an anthropic account");
+    },
+    runEve: (_client, runArgs) => {
+      seenEve.push(runArgs);
+      return Promise.resolve({
+        codeSessionId: "sess-1",
+        replyText: "done",
+        nextCursor: 7,
+        reason: "completed",
+        pending: [],
+      });
+    },
+    getClient: () => fakeClient(),
+  };
+  const out = await routeCodeTurn(baseArgs({ chatId: "sess-0" }), 3, deps);
+  assertEquals(out.chatId, "sess-1");
+  assertEquals(out.replyText, "done");
+  assertEquals(out.nextCursor, 7);
+  assertEquals(out.reason, "completed");
+  assertEquals(seenEve.length, 1);
+  assertEquals((seenEve[0] as { codeSessionId: string }).codeSessionId, "sess-0");
+  assertEquals((seenEve[0] as { startCursor: number }).startCursor, 3);
+});
+
+Deno.test("routeCodeTurn falls back to legacy when the provider fetch fails", async () => {
+  const seenLegacy: CodeTurnArgs[] = [];
+  const deps: TransportDeps = {
+    getProvider: () => Promise.reject(new Error("settings fetch failed: 500")),
+    runLegacy: (args) => {
+      seenLegacy.push(args);
+      return Promise.resolve({ chatId: "chat-1", replyText: "ok" });
+    },
+    runEve: () => {
+      throw new Error("must not call eve when the provider is unreadable");
+    },
+  };
+  const out = await routeCodeTurn(baseArgs(), 0, deps);
+  assertEquals(out.replyText, "ok");
+  assertEquals(seenLegacy.length, 1);
+});
+
+Deno.test("routeCodeTurn refuses attachments with no appId on the eve transport instead of silently dropping them", async () => {
+  const deps: TransportDeps = {
+    getProvider: () => Promise.resolve("anthropic"),
+    runEve: () => {
+      throw new Error("must not reach the coder — attachments would be silently dropped");
+    },
+    getClient: () => fakeClient(),
+  };
+  const args = baseArgs({ appId: null, attachments: [{ name: "a.png", url: "https://x/a.png" }] });
+  await assertRejects(() => routeCodeTurn(args, 0, deps), Error, "attachments need an app");
+});
+
+Deno.test("routeCodeTurn allows attachments through on eve when an appId is present", async () => {
+  const seenEve: unknown[] = [];
+  const deps: TransportDeps = {
+    getProvider: () => Promise.resolve("anthropic"),
+    runEve: (_client, runArgs) => {
+      seenEve.push(runArgs);
+      return Promise.resolve({ codeSessionId: "sess-1", replyText: "ok", nextCursor: 1, reason: "completed", pending: [] });
+    },
+    getClient: () => fakeClient(),
+  };
+  const args = baseArgs({ appId: "app-1", attachments: [{ name: "a.png", url: "https://x/a.png" }] });
+  await routeCodeTurn(args, 0, deps);
+  assertEquals(seenEve.length, 1);
+});
+
+Deno.test("routeCodeTurn throws when eve is chosen but Trex.req is unavailable", async () => {
+  const deps: TransportDeps = {
+    getProvider: () => Promise.resolve("anthropic"),
+    runEve: () => {
+      throw new Error("must not call eve with no client");
+    },
+    getClient: () => null,
+  };
+  await assertRejects(() => routeCodeTurn(baseArgs(), 0, deps), Error, "Trex.req unavailable");
 });

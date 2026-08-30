@@ -14,8 +14,10 @@
 // metadata.appId. Once the session exists the stored app wins; a different
 // `app` mid-task is ignored (one task = one thread = one app).
 import { defineTool } from "eve/tools";
-import { runCodeTurn, type CodeTurnArgs } from "../lib/code-stream.ts";
-import type { PendingApproval, TurnEnd } from "../lib/code-session.ts";
+import { apiBase, mintToken, runCodeTurn as runLegacyTurn, type CodeTurnArgs } from "../lib/code-stream.ts";
+import { runCodeTurn as runEveTurn, type PendingApproval, type TokioClient, type TurnEnd } from "../lib/code-session.ts";
+import { tokioClientFromGlobal } from "../lib/tokio.ts";
+import { chooseCoderTransport } from "../lib/code-route.ts";
 import { parkedReply, postApprovalGates } from "../lib/coder-approval.ts";
 import { readOrchestration, upsertOrchestration, readDecisions, renderDecisionLedger, type QueryFn } from "../lib/state.ts";
 import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
@@ -54,13 +56,90 @@ export function effectiveUserId(ctxUserId: string | undefined, env: (k: string) 
   return fromEnv || undefined;
 }
 
+// Reads the coder account's provider the SAME way code-stream.ts's
+// ensureCoderProvider does (mint the same access token, GET the devx-api
+// settings mount) rather than inventing a second path to the same data.
+async function fetchCoderProvider(userId: string): Promise<string | undefined> {
+  const token = await mintToken(userId);
+  const res = await fetch(`${apiBase()}/settings`, { headers: { authorization: `Bearer ${token}` } });
+  if (!res.ok) throw new Error(`coder settings fetch failed: ${res.status}`);
+  const body = (await res.json()) as { provider?: unknown };
+  return typeof body.provider === "string" ? body.provider : undefined;
+}
+
+// Injected so routeCodeTurn's provider-based branch can be exercised in tests
+// without ever invoking mintToken/Trex.req (mintToken's dynamic import only
+// resolves inside a staged worker — see code-stream.ts's header — and
+// Trex.req does not exist outside one either).
+export interface TransportDeps {
+  getProvider?: (userId: string) => Promise<string | undefined>;
+  runLegacy?: (args: CodeTurnArgs) => Promise<CodeTurnOutcome>;
+  runEve?: typeof runEveTurn;
+  getClient?: () => TokioClient | null;
+}
+
+// Real production routing, used only when the caller supplies no runTurn
+// override (see askCore below). Exported for testing only.
+export async function routeCodeTurn(
+  args: CodeTurnArgs,
+  startCursor: number,
+  deps: TransportDeps = {},
+): Promise<CodeTurnOutcome> {
+  const getProvider = deps.getProvider ?? fetchCoderProvider;
+  const runLegacy = deps.runLegacy ?? runLegacyTurn;
+  const runEve = deps.runEve ?? runEveTurn;
+  const getClient = deps.getClient ?? tokioClientFromGlobal;
+
+  let transport: ReturnType<typeof chooseCoderTransport>;
+  try {
+    transport = chooseCoderTransport(await getProvider(args.userId));
+  } catch (e) {
+    // Mirrors effectiveLoop.ts's SETTINGS_FETCH_FAILURE_LOOP: an unreadable
+    // provider might be the sidecar, which eve cannot host, so an unknown
+    // configuration degrades to the transport that works for every provider.
+    console.error("claw: coder provider fetch failed, defaulting to legacy transport:", e);
+    transport = "legacy";
+  }
+  if (transport === "legacy") return await runLegacy(args);
+
+  // devx's buildUserMessage (agent.ts:583) materializes attachments only when
+  // userId AND appId AND attachments all hold — with no appId they vanish
+  // silently (the turn succeeds, no files land). Fail loudly here instead.
+  if (args.attachments?.length && !args.appId) {
+    throw new Error("askCodeAgent: attachments need an app (pass `app`) to reach the coder on the eve transport");
+  }
+  const client = getClient();
+  if (!client) throw new Error("askCodeAgent: Trex.req unavailable for the eve transport");
+  const onProgress = args.onProgress;
+  const result = await runEve(client, {
+    codeSessionId: args.chatId,
+    message: args.message,
+    userId: args.userId,
+    startCursor,
+    appId: args.appId,
+    attachments: args.attachments,
+    // eve's heartbeat carries no activity text (unlike streamTurn's chunk
+    // accumulation), so this uses the same fallback summarizeActivity gives
+    // before any prose has arrived.
+    onHeartbeat: onProgress ? () => onProgress("still working") : undefined,
+  });
+  return {
+    chatId: result.codeSessionId,
+    replyText: result.replyText,
+    nextCursor: result.nextCursor,
+    reason: result.reason,
+    pending: result.pending,
+  };
+}
+
 export async function askCore(
   sql: QueryFn,
   ctx: { sessionId: string; userId: string; channelId?: string },
   input: Input,
-  // Injected for testability (defaults to the real /stream turn); tests pass a
-  // stub so askCore's orchestration can be exercised without a live coder.
-  runTurn: (args: CodeTurnArgs) => Promise<CodeTurnOutcome> = runCodeTurn,
+  // Injected for testability; tests pass a stub so askCore's orchestration can
+  // be exercised without a live coder. Omitted (production) routes for real
+  // via routeCodeTurn, chosen by the account's provider.
+  runTurn?: (args: CodeTurnArgs) => Promise<CodeTurnOutcome>,
 ): Promise<{ reply: string; trailer: HandoffTrailer | null }> {
   const prior = await readOrchestration(sql, ctx.sessionId);
   // codeSessionId now holds the devx chat id; the stored app wins once the chat
@@ -90,14 +169,15 @@ export async function askCore(
   // answered.
   const ledger = renderDecisionLedger(await readDecisions(sql, ctx.sessionId));
   const message = ledger ? `${ledger}${input.message}` : input.message;
-  const outcome = await runTurn({
+  const turnArgs: CodeTurnArgs = {
     chatId: prior?.codeSessionId ?? null,
     message,
     userId: ctx.userId,
     appId,
     ...(input.attachments?.length ? { attachments: input.attachments } : {}),
     ...(onProgress ? { onProgress } : {}),
-  });
+  };
+  const outcome = runTurn ? await runTurn(turnArgs) : await routeCodeTurn(turnArgs, prior?.eventCursor ?? 0);
   // The cursor is what a re-attach resumes from after a parked approval, so it
   // must be stored on EVERY turn. The legacy /stream path reports none (each
   // turn streams to completion there) and keeps writing 0.
