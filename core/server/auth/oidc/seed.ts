@@ -25,14 +25,15 @@ export async function upsertClient(spec: SeedClientSpec): Promise<void> {
   await pool.query(
     `INSERT INTO trexdb.oidc_client
        (client_id, client_secret_hash, name, redirect_uris,
-        post_logout_redirect_uris, require_pkce)
-     VALUES ($1, $2, $3, $4, $5, $6)
+        post_logout_redirect_uris, require_pkce, client_roles)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
      ON CONFLICT (client_id) DO UPDATE
         SET client_secret_hash = EXCLUDED.client_secret_hash,
             name = EXCLUDED.name,
             redirect_uris = EXCLUDED.redirect_uris,
             post_logout_redirect_uris = EXCLUDED.post_logout_redirect_uris,
             require_pkce = EXCLUDED.require_pkce,
+            client_roles = EXCLUDED.client_roles,
             updated_at = now()`,
     [
       spec.clientId,
@@ -43,6 +44,7 @@ export async function upsertClient(spec: SeedClientSpec): Promise<void> {
       // A confidential client authenticates with its secret; PKCE stays required
       // for public ones, which have nothing else to prove who they are.
       secretHash === null,
+      spec.clientRoles,
     ],
   );
 }

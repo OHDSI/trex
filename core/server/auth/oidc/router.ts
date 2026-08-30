@@ -272,13 +272,16 @@ export function registerOidcRoutes(basePath: string) {
           });
           return;
         }
+        // The client's own roles, so a service token authorizes as itself. A
+        // client registered without any is still authenticated and still
+        // carries none, which is what a caller that only needs identity wants.
         const token = await signIdToken(
           {
             id: client.clientId,
             email: "",
             name: client.name ?? client.clientId,
             role: "service",
-            appRoles: [],
+            appRoles: client.clientRoles,
           },
           { issuer, audience: client.clientId, scopes: [] },
         );
