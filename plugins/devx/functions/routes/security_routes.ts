@@ -210,16 +210,11 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       }
     }
 
-    // A browser-dependent review on the delegated path is refused, not degraded:
-    // the claude-code loop has no browser tool at all, so it would read files and
-    // report "no issues" from a page it never opened (review_tools.ts).
-    const refusal = browserlessRefusal(opts.table, resolvedProvider);
-    if (refusal) {
-      return Response.json(
-        { error: refusal, code: "browser_tools_unavailable" },
-        { status: 400, headers: corsHeaders },
-      );
-    }
+    // Backstop for the routes' own early refusal above: a browser-dependent
+    // review must never reach eve on the delegated path, whichever route added
+    // it. Free here — the provider is already resolved.
+    const refusal = browserlessRejection(opts.table, resolvedProvider);
+    if (refusal) return refusal;
 
     // Fetch previous review for context
     let previousContext = "";
@@ -378,6 +373,29 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
 
   // Helper: build QA/Design review message with git diff and app URL.
   // Returns { error } on failure or { message, appUrl } on success.
+  function browserlessRejection(reviewType: string, provider: string | null | undefined): Response | null {
+    const refusal = browserlessRefusal(reviewType, provider);
+    if (!refusal) return null;
+    return Response.json({ error: refusal, code: "browser_tools_unavailable" }, { status: 400, headers: corsHeaders });
+  }
+
+  // Refuse BEFORE any precondition the refusal makes irrelevant. A browserless
+  // QA review behind a stopped dev server otherwise answers "start the dev
+  // server", and the user learns the real reason only on the retry. Reads the
+  // provider NAME alone — the key gate still runs later, in runAgentReview.
+  async function refuseBrowserlessReview(reviewType: string): Promise<Response | null> {
+    const active = await sql(
+      `SELECT provider FROM devx.provider_configs WHERE user_id = $1 AND is_active = true LIMIT 1`,
+      [userId],
+    );
+    let provider = active.rows[0]?.provider;
+    if (provider === undefined) {
+      const legacy = await sql(`SELECT provider FROM devx.settings WHERE user_id = $1 LIMIT 1`, [userId]);
+      provider = legacy.rows[0]?.provider;
+    }
+    return browserlessRejection(reviewType, provider);
+  }
+
   async function buildBrowserReviewMessage(appId: string, prefix: string): Promise<{ error: string } | { message: string; appUrl: string }> {
     const wsPath = getAppWorkspacePath(userId, appId);
 
@@ -484,6 +502,8 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
     if (!await checkApp(appId)) {
       return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
     }
+    const browserless = await refuseBrowserlessReview("qa-test");
+    if (browserless) return browserless;
     const result = await buildBrowserReviewMessage(appId, "Perform functional QA testing on the running web application. Use Playwright browser tools to navigate, click, fill forms, and verify behavior.");
     if (result.error) {
       return Response.json({ error: result.error }, { status: 400, headers: corsHeaders });
@@ -518,6 +538,8 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
     if (!await checkApp(appId)) {
       return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
     }
+    const browserless = await refuseBrowserlessReview("design-review");
+    if (browserless) return browserless;
     const result = await buildBrowserReviewMessage(appId, "Perform a visual design review of the running web application. Use Playwright browser tools to navigate and take screenshots for analysis.");
     if (result.error) {
       return Response.json({ error: result.error }, { status: 400, headers: corsHeaders });

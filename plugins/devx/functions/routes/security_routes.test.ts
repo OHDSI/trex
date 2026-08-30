@@ -462,3 +462,63 @@ Deno.test("a security review still runs on the delegated path — the refusal is
     });
   });
 });
+
+// The refusal must come BEFORE the dev-server precondition it makes irrelevant.
+// Reported the other way round it costs two round trips to reach a reason that
+// was knowable before the first: the user starts a dev server, retries, and only
+// then learns the provider has no browser tools at all. No workspace and no dev
+// server here on purpose — reaching either would itself be the regression.
+Deno.test("a browserless QA review is refused before the dev-server check, not after", async () => {
+  const db = makeFakeDb(CLAUDE_CODE_ROW);
+  const res = await handleSecurityRoutes(
+    `/apps/${APP}/qa/review`,
+    "POST",
+    new Request(`http://x/apps/${APP}/qa/review`, { method: "POST" }),
+    USER,
+    db.sql,
+    CORS,
+  );
+
+  assertEquals(res.status, 400);
+  const body = await res.json();
+  assertEquals(body.code, "browser_tools_unavailable");
+  assertStringIncludes(body.error, "BrowserNavigate");
+  // The dev-server precondition was never consulted.
+  assert(!String(body.error).includes("Dev server"), `got the dev-server error instead: ${body.error}`);
+});
+
+Deno.test("the design review refuses at the same point, on the same provider", async () => {
+  const db = makeFakeDb(CLAUDE_CODE_ROW);
+  const res = await handleSecurityRoutes(
+    `/apps/${APP}/design/review`,
+    "POST",
+    new Request(`http://x/apps/${APP}/design/review`, { method: "POST" }),
+    USER,
+    db.sql,
+    CORS,
+  );
+
+  assertEquals(res.status, 400);
+  const body = await res.json();
+  assertEquals(body.code, "browser_tools_unavailable");
+  assert(!String(body.error).includes("Dev server"));
+});
+
+// Reordered, not removed: a provider that HAS browser tools still meets the
+// dev-server precondition exactly as before.
+Deno.test("a model-loop provider still gets the dev-server precondition, unchanged", async () => {
+  const db = makeFakeDb(OPENAI_ROW);
+  const res = await handleSecurityRoutes(
+    `/apps/${APP}/qa/review`,
+    "POST",
+    new Request(`http://x/apps/${APP}/qa/review`, { method: "POST" }),
+    USER,
+    db.sql,
+    CORS,
+  );
+
+  assertEquals(res.status, 400);
+  const body = await res.json();
+  assertEquals(body.code, undefined, "an openai QA review must not be refused for want of browser tools");
+  assertStringIncludes(body.error, "Dev server");
+});
