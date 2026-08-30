@@ -740,6 +740,14 @@ Both reads are needed — a channel session never writes the `unattended` column
 so the durable flag alone would leave a delegated child gating on its own event
 stream, which no channel adapter subscribes to.
 
+`approver_reachable` is deliberately **not** inherited: `createChildSession`
+omits it, so a child falls to V13's `false` and a hard-tier call in a child
+denies immediately where the parent would gate. That is the better failure, not
+an oversight — a relay watches the PARENT's stream (claw's `postApprovalGates`
+subscribes to the session it started), so a child's gate has nobody to reach
+and would park for the full 30 minutes before denying anyway. Fail-safe, and
+faster to say so.
+
 **Channel binding implies unattended.** A session with a row in
 `agents.channel_sessions` has no browser consent UI to answer a gate, so
 `handler.ts` resolves `unattended = channelBound || isUnattended(sessionId)`.
@@ -785,7 +793,8 @@ outright, with no approve button at all. `resolveApproval`'s hard branch reads
 `approverReachable`, never `unattended`; `channelBound` implies it, and it
 defaults to **false**, so a session that never declares one is denied on a hard
 match whether it is attended or not. A session declares it at creation
-(`approverReachable: true` on `POST /eve/v1/session`, stored in
+(`approverReachable: true` on `POST /eve/v1/session` or `POST /chat` — both
+session-creating routes, same strict `=== true` as `unattended` — stored in
 `agents.sessions.approver_reachable` by V13) — which is how a *relayed*
 session says so: claw's coder session is neither channel-bound nor unattended,
 but claw watches it and carries its gates to the channel and the answers back.
@@ -1073,10 +1082,30 @@ sidecar, not something this phase closes.
 
 ### The tool-input mapping, and why an unmapped tool gates rather than fails
 
-Every sidecar tool call is gated by eve's approval machinery before it runs —
+Sidecar tool calls are gated by eve's approval machinery before they run —
 `sidecar_engine.ts`'s `resolvePermission` is wired as the SDK's `canUseTool`
-callback, so it sees **every** tool call the SDK is about to make, not only
-ones a devx author marked `needsApproval`. To decide, it has to derive the
+callback, and it is consulted for calls of any tool, not only ones a devx
+author marked `needsApproval`.
+
+**`canUseTool` is reached only on the SDK's `ask` outcome**, and that is a
+durable property of the SDK, not a configuration detail: allow rules, deny
+rules and `PreToolUse` hooks all resolve before the callback
+(`sdk.d.ts:4111`, and the SDK's own `CLAUDE_SDK_CAN_USE_TOOL_SHADOWED`
+warning — "Allow rules from settings files can also shadow the callback").
+The sidecar needs `settingSources: ["user"]` to discover the skills
+materialized into `~/.claude/skills`, which also loads
+`~/.claude/settings.json` — a file on a mounted volume that the coder can
+write itself, and whose `permissions.allow`, `permissions.defaultMode:
+"bypassPermissions"` and `hooks.PreToolUse` each route around the gate. What
+makes the statement above true is therefore the in-process policy tier
+`fn-claude-code/permission_policy.js` stamps onto every query
+(`managedSettings`, which no tool call can write): it pins the default mode,
+disables bypass mode, and sets `allowManagedPermissionRulesOnly` and
+`allowManagedHooksOnly` so no user-tier rule or hook is honoured. Those two
+keys are not interchangeable — the managed tier's restrictive-only filter
+covers the permissions arrays, not hooks.
+
+To decide, `resolvePermission` has to derive the
 same `scopeKey` a native devx call would (`scope-key.ts`'s `deriveScopeKey`,
 which reads devx's own field names — `path`, `command`, …) — so
 `engine/tool-input.ts`'s `toDevxToolInput` first renames the SDK's field
