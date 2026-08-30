@@ -1,2 +1,0 @@
-# Build output — rebuilt by `npm run build` (prepack, Dockerfile prometheus-builder, CI)
-dist/

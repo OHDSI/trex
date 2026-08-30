@@ -4,8 +4,8 @@ sidebar_position: 8
 
 # FHIR REST API
 
-Trex ships a FHIR R4 REST API as an edge function (the `@trex/prometheus`
-plugin). It is the HTTP API behind the Prometheus clinical-analytics UI:
+Trex ships a FHIR R4 REST API as an edge function (the `@trex/aithon`
+plugin). It is the HTTP API behind the Aithon clinical-analytics UI:
 datasets, resource CRUD, search, history, bundles, and bulk import/export.
 
 :::info Two FHIR servers
@@ -16,7 +16,7 @@ TypeScript/Deno reimplementation of the same handler surface that runs as an
 edge function and executes SQL against DuckDB in-process. They share the
 on-disk data model and FHIR R4 definitions but are separate servers. Use the
 `fhir` extension for a dedicated FHIR endpoint; this gateway is what the
-Prometheus UI talks to.
+Aithon UI talks to.
 :::
 
 ## Endpoint
@@ -26,7 +26,7 @@ ${BASE_PATH}/fhir/*
 ```
 
 With the default configuration that resolves to `/trex/fhir/*` (and
-`/plugins/trex/fhir/*`, which the Prometheus UI uses by default). FHIR
+`/plugins/trex/fhir/*`, which the Aithon UI uses by default). FHIR
 responses carry `application/fhir+json`, and relative `Location` headers and
 Bundle `fullUrl`s are rewritten to absolute URLs.
 
