@@ -17,7 +17,22 @@ export interface RunArgs {
   startCursor: number;
   /** devx app (devx.apps.id) the Code session works in; sent as metadata.appId on EVERY turn. */
   appId?: string | null;
+  // Invoked on a timer while the event stream is open, independent of events
+  // arriving — a long silent tool run (build/test) must not read as dead. See
+  // code-stream.ts's HEARTBEAT_MS for why this exists (#238).
+  onHeartbeat?: () => void;
+  // Bounds the event stream so a hung upstream cannot wedge the caller
+  // forever — see code-stream.ts's TURN_TIMEOUT_MS. Defaults to the same value.
+  timeoutMs?: number;
 }
+
+// Same cadence as code-stream.ts's HEARTBEAT_MS: a Discord thread wants a sign
+// of life every few minutes, not sooner.
+const HEARTBEAT_MS = 300_000;
+
+// Same bound as code-stream.ts's TURN_TIMEOUT_MS: generous, but finite, so a
+// hung stream doesn't wedge the caller until an external reaper intervenes.
+const DEFAULT_TIMEOUT_MS = 90 * 60_000;
 
 interface Event { type: string; data?: Record<string, unknown> }
 
@@ -71,11 +86,25 @@ export async function runCodeTurn(
   let buf = "";
   let read = 0;
   let replyText = "";
+  // Timer-driven, not event-driven: a long tool run (build/test) produces no
+  // events for minutes, which is exactly the stretch worth reporting on.
+  const beat = args.onHeartbeat
+    ? setInterval(args.onHeartbeat, HEARTBEAT_MS)
+    : undefined;
+  const timeoutMs = args.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    reader.cancel().catch(() => { /* already closed */ });
+  }, timeoutMs);
   try {
     // deno-lint-ignore no-constant-condition
     while (true) {
       const { value, done } = await reader.read();
-      if (done) break;
+      if (done) {
+        if (timedOut) throw new Error(`code stream timed out after ${timeoutMs}ms`);
+        break;
+      }
       buf += value;
       let nl: number;
       while ((nl = buf.indexOf("\n")) >= 0) {
@@ -100,6 +129,10 @@ export async function runCodeTurn(
       }
     }
   } finally {
+    // Cleared on every exit path — including the throw paths above — so
+    // neither timer outlives the stream it measures/bounds.
+    if (beat !== undefined) clearInterval(beat);
+    clearTimeout(timeout);
     try { await reader.cancel(); } catch { /* already closed */ }
   }
   return { codeSessionId, replyText, nextCursor: args.startCursor + read };

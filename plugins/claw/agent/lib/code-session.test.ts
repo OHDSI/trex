@@ -1,5 +1,6 @@
 // plugins/claw/agent/lib/code-session.test.ts
-import { assertEquals } from "jsr:@std/assert";
+import { assert, assertEquals } from "jsr:@std/assert";
+import { FakeTime } from "jsr:@std/testing/time";
 import { runCodeTurn, CODE_BASE, type TokioClient } from "./code-session.ts";
 
 function ndjson(...events: unknown[]): Response {
@@ -20,6 +21,26 @@ function ndjsonChunks(chunks: string[]): Response {
     },
   });
   return new Response(stream, { headers: { "content-type": "application/x-ndjson" } });
+}
+
+// Builds a Response whose ReadableStream body stays open under an externally
+// held controller, and records whether the reader was cancelled. ndjson()/
+// ndjsonChunks() both close their body synchronously in `start()`, so neither
+// can express a stream that goes quiet for a while — needed to drive the
+// heartbeat/timeout with FakeTime instead of a real multi-minute wait.
+function openStream() {
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const state = { cancelled: false };
+  const stream = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c;
+    },
+    cancel() {
+      state.cancelled = true;
+    },
+  });
+  const response = new Response(stream, { headers: { "content-type": "application/x-ndjson" } });
+  return { response, get controller() { return controller; }, state };
 }
 
 // Records requests; returns queued responses in order.
@@ -178,4 +199,82 @@ Deno.test("runCodeTurn throws on session.failed", async () => {
     await runCodeTurn(client, { codeSessionId: null, message: "x", startCursor: 0 });
   } catch (e) { threw = (e as Error).message; }
   assertEquals(threw.includes("kaput"), true);
+});
+
+// Timer wiring, mirroring code-stream.test.ts's heartbeat test: the beat is
+// driven by a timer started when the stream opens, not by incoming events, so
+// it must keep firing through a stretch with no events and stop the instant
+// the turn returns.
+Deno.test("runCodeTurn's heartbeat fires on its own timer while the stream is silent, and is cleared when the turn returns", async () => {
+  const time = new FakeTime();
+  try {
+    const create = new Response(JSON.stringify({ sessionId: "code-6" }), {
+      headers: { "content-type": "application/json" },
+    });
+    const { response: stream, controller } = openStream();
+    const { client } = fakeClient([create, stream]);
+
+    let beats = 0;
+    const turn = runCodeTurn(client, {
+      codeSessionId: null, message: "x", startCursor: 0, onHeartbeat: () => beats++,
+    });
+
+    // Two full heartbeat intervals pass with the stream open and no events
+    // ever sent — an event-driven beat would never fire here.
+    await time.tickAsync(300_000);
+    await time.tickAsync(300_000);
+    assertEquals(beats, 2);
+
+    const enc = new TextEncoder();
+    controller.enqueue(enc.encode(
+      `${JSON.stringify({ type: "message.completed", data: { text: "done" } })}\n` +
+        `${JSON.stringify({ type: "session.waiting", data: {} })}\n`,
+    ));
+    controller.close();
+    const res = await turn;
+    assertEquals(res.replyText, "done");
+
+    // The finally block clears the interval once the turn returns; advancing
+    // the clock further must not produce another beat.
+    await time.tickAsync(300_000);
+    assertEquals(beats, 2, "onHeartbeat must not fire after the turn has returned");
+  } finally {
+    time.restore();
+  }
+});
+
+Deno.test("runCodeTurn rejects and cancels the reader when timeoutMs is exceeded", async () => {
+  const time = new FakeTime();
+  try {
+    const create = new Response(JSON.stringify({ sessionId: "code-7" }), {
+      headers: { "content-type": "application/json" },
+    });
+    const { response: stream, state } = openStream();
+    const { client } = fakeClient([create, stream]);
+
+    const turn = runCodeTurn(client, {
+      codeSessionId: null, message: "x", startCursor: 0, timeoutMs: 10_000,
+    });
+    // Swallow the eventual rejection so it isn't reported as an unhandled
+    // rejection while the clock is advanced below.
+    turn.catch(() => {});
+
+    await time.tickAsync(10_000);
+
+    let threw = "";
+    try {
+      await turn;
+    } catch (e) {
+      threw = (e as Error).message;
+    }
+    // Let the pipeThrough machinery's internal pipe promises settle (they
+    // resolve via microtasks driven off the same fake clock).
+    await time.tickAsync(0);
+    await time.tickAsync(0);
+    assert(threw.toLowerCase().includes("timeout") || threw.toLowerCase().includes("timed out"), threw);
+    assert(threw.includes("10000") || threw.includes("10 000") || threw.includes("10s"), threw);
+    assertEquals(state.cancelled, true, "the stream must be actively cancelled, not merely abandoned");
+  } finally {
+    time.restore();
+  }
 });
