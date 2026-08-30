@@ -109,6 +109,49 @@ Deno.test("runCodeTurn sends metadata.appId on create AND continue when an app i
   assertEquals(JSON.parse(reqs2[0].init.body).metadata, { appId: "app-7" });
 });
 
+Deno.test("runCodeTurn relays attachments as metadata.attachments, in devx's expected shape, on create AND continue", async () => {
+  const attachments = [{ name: "shot.png", url: "https://cdn.example/shot.png", contentType: "image/png" }];
+
+  const create = new Response(JSON.stringify({ sessionId: "code-1" }), {
+    headers: { "content-type": "application/json" },
+  });
+  const stream1 = ndjson(
+    { type: "message.completed", data: { text: "ok" } },
+    { type: "session.waiting", data: {} },
+  );
+  const { client, reqs } = fakeClient([create, stream1]);
+  await runCodeTurn(client, {
+    codeSessionId: null, message: "build X", startCursor: 0, appId: "app-7", attachments,
+  });
+  // appId must still ride the turn alongside attachments, not be displaced by it.
+  assertEquals(JSON.parse(reqs[0].init.body).metadata, { appId: "app-7", attachments });
+
+  const cont = new Response(JSON.stringify({ accepted: true }), { status: 202 });
+  const stream2 = ndjson(
+    { type: "message.completed", data: { text: "ok" } },
+    { type: "session.waiting", data: {} },
+  );
+  const { client: client2, reqs: reqs2 } = fakeClient([cont, stream2]);
+  await runCodeTurn(client2, {
+    codeSessionId: "code-1", message: "continue", startCursor: 2, appId: "app-7", attachments,
+  });
+  assertEquals(JSON.parse(reqs2[0].init.body).metadata, { appId: "app-7", attachments });
+});
+
+Deno.test("runCodeTurn sends no attachments key at all when there are none", async () => {
+  const create = new Response(JSON.stringify({ sessionId: "code-1" }), {
+    headers: { "content-type": "application/json" },
+  });
+  const stream = ndjson(
+    { type: "message.completed", data: { text: "ok" } },
+    { type: "session.waiting", data: {} },
+  );
+  const { client, reqs } = fakeClient([create, stream]);
+  await runCodeTurn(client, { codeSessionId: null, message: "build X", startCursor: 0, appId: "app-7" });
+  const metadata = JSON.parse(reqs[0].init.body).metadata;
+  assertEquals("attachments" in metadata, false);
+});
+
 Deno.test("runCodeTurn continues an existing session with startCursor", async () => {
   const cont = new Response(JSON.stringify({ accepted: true }), {
     status: 202, headers: { "content-type": "application/json" },

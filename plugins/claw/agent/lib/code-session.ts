@@ -17,6 +17,11 @@ export interface RunArgs {
   startCursor: number;
   /** devx app (devx.apps.id) the Code session works in; sent as metadata.appId on EVERY turn. */
   appId?: string | null;
+  // Channel attachments relayed verbatim (metadata only, name/url/contentType)
+  // — same shape as code-stream.ts's CodeTurnArgs.attachments. devx's
+  // readMetadata/materializeAttachments on the receiving end expect exactly
+  // this shape; the devx side downloads them into the coder's workspace.
+  attachments?: Array<{ name: string; url: string; contentType?: string }>;
   // Invoked on a timer while the event stream is open, independent of events
   // arriving — a long silent tool run (build/test) must not read as dead. See
   // code-stream.ts's HEARTBEAT_MS for why this exists (#238).
@@ -58,9 +63,16 @@ export async function runCodeTurn(
   // that app's project rules and its tools run in the app workspace. Metadata
   // is read per TURN (handler.ts's addTurn), so it rides every request, not
   // just session create.
+  //
+  // attachments key omitted entirely (not sent as []) when there are none —
+  // matches code-stream.ts's `...(attachments?.length ? { attachments } : {})`.
+  const metadata = {
+    ...(args.appId ? { appId: args.appId } : {}),
+    ...(args.attachments?.length ? { attachments: args.attachments } : {}),
+  };
   const body = JSON.stringify({
     message: args.message,
-    ...(args.appId ? { metadata: { appId: args.appId } } : {}),
+    ...(Object.keys(metadata).length ? { metadata } : {}),
   });
 
   // 1) Start (create) or continue the turn.
