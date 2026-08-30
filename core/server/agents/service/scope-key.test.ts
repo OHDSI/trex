@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertNotEquals } from "jsr:@std/assert";
-import { bashExecutable, deriveScopeKey, normalizePath } from "./scope-key.ts";
+import { bashExecutable, coarseScopeKey, deriveScopeKey, normalizePath } from "./scope-key.ts";
 import { matchEscalate, parseEscalateList } from "./approval-policy.ts";
 
 Deno.test("bashExecutable strips the directory and lowercases", () => {
@@ -194,4 +194,29 @@ Deno.test("escalate floor: the shell equivalents of the hard devx tools are hard
   assertEquals(hard("git diff HEAD~1"), null);
   assertEquals(hard("cargo build"), null);
   assertEquals(hard("npm test"), null);
+});
+
+// coarseScopeKey exists so approval-gate.ts can rescue a `never` recorded
+// before the subcommand existed. It must never coarsen anything else: a
+// PATH_TOOLS action is a filesystem path, and `:` is legal in one.
+Deno.test("coarseScopeKey reproduces the pre-subcommand key, and only for listed multiplexers", () => {
+  assertEquals(coarseScopeKey("/w+git:push"), "/w+git");
+  assertEquals(coarseScopeKey("/w+cd+git:push"), "/w+cd+git");
+  // Nothing to coarsen — the caller skips the second query entirely.
+  assertEquals(coarseScopeKey("/w+npm"), undefined);
+  assertEquals(coarseScopeKey("/w+"), undefined);
+  // `docker:run` is not a listed multiplexer, so the `:` is somebody's data.
+  assertEquals(coarseScopeKey("/w+docker:run"), undefined);
+  // A path with a colon in it, and a workspace with one: neither is an action.
+  assertEquals(coarseScopeKey("/w+/src/a:b.txt"), undefined);
+  assertEquals(coarseScopeKey("/w:1+npm"), undefined);
+});
+
+Deno.test("escalate floor: `git subtree push` is a push and does not slip through on its subcommand", () => {
+  const list = parseEscalateList(undefined);
+  const tier = (command: string) => matchEscalate(list, "Bash", deriveScopeKey("Bash", { command }, WS));
+  assertEquals(deriveScopeKey("Bash", { command: "git subtree push --prefix=d origin main" }, WS), `${WS}+git:subtree`);
+  assertEquals(tier("git subtree push --prefix=d origin main"), "hard");
+  // The deliberate over-gate: the other subtree verbs escalate too.
+  assertEquals(tier("git subtree add --prefix=d https://x main"), "hard");
 });

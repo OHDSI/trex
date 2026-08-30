@@ -3,6 +3,8 @@ import { createSidecarEngine, type PermissionDecision, type SidecarStream, toSdk
 import type { HookCtx } from "../../../../core/server/agents/eve-shim/types.ts";
 import { createSdkTranslator } from "../../../../core/server/agents/service/engine/events.ts";
 import { subscribe } from "../../../../core/server/agents/service/stream.ts";
+import { coarseScopeKey, deriveScopeKey } from "../../../../core/server/agents/service/scope-key.ts";
+import { getWorkspacePath } from "../../functions/tools/workspace.ts";
 import type { AgentEvent } from "../../../../core/server/agents/service/events.ts";
 
 // The engine's contract is "produce what core's translator reads", so the
@@ -13,8 +15,8 @@ const SESSION = "s-eng-1";
 const TURN = "t-eng-1";
 
 /** Routes on SQL text like the real pool would route on the query itself. */
-function fakeSql(over: Record<string, unknown[]> = {}) {
-  return (sql: string, _params: unknown[] = []) => {
+function fakeSql(over: Record<string, unknown[]> = {}, consentByKey: Record<string, string> = {}) {
+  return (sql: string, params: unknown[] = []) => {
     if (sql.includes("FROM agents.sessions")) {
       // gateContext and store.isUnattended both read this row, exactly as
       // they do in production.
@@ -22,7 +24,13 @@ function fakeSql(over: Record<string, unknown[]> = {}) {
     }
     if (sql.includes("FROM devx.settings")) return Promise.resolve({ rows: over.settings ?? [{ model: "sonnet" }] });
     if (sql.includes("agents.channel_sessions")) return Promise.resolve({ rows: over.channel ?? [] });
-    if (sql.includes("FROM agents.tool_consents")) return Promise.resolve({ rows: over.consent ?? [] });
+    if (sql.includes("FROM agents.tool_consents")) {
+      // Keyed on the scope_key parameter, exactly as the real query is — the
+      // coarse-key fallback is invisible to a fake that ignores it.
+      const key = String(params[4] ?? "");
+      if (key in consentByKey) return Promise.resolve({ rows: [{ consent: consentByKey[key] }] });
+      return Promise.resolve({ rows: over.consent ?? [] });
+    }
     if (sql.includes("INSERT INTO agents.approvals")) return Promise.resolve({ rows: [{ id: "req-1" }] });
     if (sql.includes("FROM agents.approvals")) return Promise.resolve({ rows: over.decision ?? [] });
     return Promise.resolve({ rows: [] });
@@ -182,12 +190,13 @@ const UNATTENDED = [{ plugin: "devx", agent: "coder", unattended: true }];
 async function decide(
   sqlOver: Record<string, unknown[]>,
   permission: { id: string; toolName: string; input: Record<string, unknown> },
+  consentByKey: Record<string, string> = {},
 ) {
   const seen: AgentEvent[] = [];
   const unsubscribe = subscribe(SESSION, (e) => seen.push(e));
   try {
     const { stream, decisions } = fakeStream([], { permission });
-    await drain(hookCtx(fakeSql(sqlOver)), stream);
+    await drain(hookCtx(fakeSql(sqlOver, consentByKey)), stream);
     return { decision: decisions[0], gated: seen.filter((e) => e.type === "input.requested").length };
   } finally {
     unsubscribe();
@@ -256,4 +265,29 @@ Deno.test("sidecar engine: a channel-bound push is asked rather than refused out
   );
   assertEquals(decision.behavior, "allow");
   assertEquals(gated, 1);
+});
+
+Deno.test("sidecar engine: a 'never' recorded before Bash keys carried a subcommand still refuses", async () => {
+  // The ONLY row this user has is keyed on the OLD coarse action, which is what
+  // an existing deployment's agents.tool_consents actually holds. Nothing
+  // rewrites it, so the gate has to find it or the refusal silently lapses.
+  const workspace = getWorkspacePath("u-1");
+  const command = "git clean -fdx";
+  assertEquals(coarseScopeKey(deriveScopeKey("Bash", { command }, workspace)), `${workspace}+git`);
+  const { decision, gated } = await decide(
+    { session: UNATTENDED },
+    { id: "p-old", toolName: "Bash", input: { command } },
+    { [`${workspace}+git`]: "never" },
+  );
+  assertEquals(decision, { behavior: "deny", message: "denied by user" });
+  assertEquals(gated, 0);
+});
+
+Deno.test("sidecar engine: `git subtree push` cannot slip past the floor unattended", async () => {
+  const { decision } = await decide({ session: UNATTENDED }, {
+    id: "p-subtree",
+    toolName: "Bash",
+    input: { command: "git subtree push --prefix=dist origin gh-pages" },
+  });
+  assertEquals(decision.behavior, "deny");
 });

@@ -230,3 +230,31 @@ const UNRESOLVED_WORKSPACE = "(unresolved)";
 export function deriveScopeKey(toolName: string, input: unknown, workspace?: string): string {
   return `${workspace ?? UNRESOLVED_WORKSPACE}+${scopeAction(toolName, input)}`;
 }
+
+// The key this tool call WOULD have derived before SUBCOMMAND_TOOLS existed —
+// `<ws>+git` for `<ws>+git:push` — or undefined when nothing coarsens, so the
+// common call derives no second key and the gate issues no second query.
+//
+// It exists for exactly one job (approval-gate.ts): a stored consent row is
+// matched by exact scope_key, so introducing the subcommand orphaned every
+// existing `<ws>+git` row. An orphaned `always` is fail-safe (the user is asked
+// again); an orphaned `never` is FAIL-OPEN — a standing refusal silently stops
+// refusing — so the gate consults this key for `never` only.
+//
+// Strips only where the part's head is a SUBCOMMAND_TOOLS key, never on a bare
+// `:`: a PATH_TOOLS action is a filesystem path, and `:` is legal in one.
+// Index 0 is skipped for the same reason — it is the workspace half.
+export function coarseScopeKey(scopeKey: string): string | undefined {
+  const parts = scopeKey.split("+");
+  let changed = false;
+  const coarse = parts.map((part, i) => {
+    if (i === 0) return part;
+    const colon = part.indexOf(":");
+    if (colon === -1) return part;
+    const exe = part.slice(0, colon);
+    if (!SUBCOMMAND_TOOLS.has(exe)) return part;
+    changed = true;
+    return exe;
+  });
+  return changed ? coarse.join("+") : undefined;
+}

@@ -91,3 +91,76 @@ Deno.test("approval gate: a caller with no store/turn/emit cannot gate and says 
     { error: "approval required — use the session API" },
   );
 });
+
+// ---------------------------------------------------------------------------
+// The consent-key migration. Giving Bash keys a subcommand (`<ws>+git:push`
+// where it used to be `<ws>+git`) orphans every stored row, and store.ts
+// matches scope_key EXACTLY. An orphaned `always` is fail-safe — the user is
+// asked again. An orphaned `never` is FAIL-OPEN, and that is what these pin.
+// ---------------------------------------------------------------------------
+
+// Records what was looked up, so "did it fall back at all" is observable
+// rather than inferred from the verdict.
+function keyedStore(rows: Record<string, "always" | "never">): ApprovalGateStore & { lookups: string[] } {
+  const lookups: string[] = [];
+  return {
+    lookups,
+    getToolConsent: (_u, _p, _a, _t, scopeKey) => {
+      lookups.push(scopeKey);
+      return Promise.resolve(rows[scopeKey] ?? null);
+    },
+    createApproval: () => Promise.resolve("r-1"),
+    getApprovalDecision: () => Promise.resolve(null),
+  };
+}
+
+Deno.test("consent keys: a 'never' recorded under the old coarse key still refuses", async () => {
+  const store = keyedStore({ "/w+git": "never" });
+  const events: AgentEvent[] = [];
+  const push = {
+    ...base(store, events),
+    toolName: "Bash",
+    input: { command: "git push origin main" },
+    scopeKey: "/w+git:push",
+  };
+  assertEquals(await runApprovalGate(push), { error: "denied by user" });
+  // Exact first, coarse only on a miss.
+  assertEquals(store.lookups, ["/w+git:push", "/w+git"]);
+});
+
+Deno.test("consent keys: an 'always' recorded under the old coarse key does NOT grant the subcommand", async () => {
+  const store = keyedStore({ "/w+git": "always" });
+  const events: AgentEvent[] = [];
+  // A subcommand in no escalate tier, so an honoured coarse `always` would show
+  // up as an immediate allow. It reaches the gate and times out instead: the
+  // coarse row was read and deliberately ignored.
+  const soft = {
+    ...base(store, events),
+    toolName: "Bash",
+    input: { command: "git clean -fdx" },
+    scopeKey: "/w+git:clean",
+    approvalTimeoutMs: 20,
+  };
+  assertEquals(await runApprovalGate(soft), { error: "approval timed out" });
+  assertEquals(store.lookups, ["/w+git:clean", "/w+git"]);
+});
+
+Deno.test("consent keys: an exact row wins outright and no coarse lookup happens", async () => {
+  const store = keyedStore({ "/w+git:clean": "never", "/w+git": "always" });
+  const events: AgentEvent[] = [];
+  const exact = {
+    ...base(store, events),
+    toolName: "Bash",
+    input: { command: "git clean" },
+    scopeKey: "/w+git:clean",
+  };
+  assertEquals(await runApprovalGate(exact), { error: "denied by user" });
+  assertEquals(store.lookups, ["/w+git:clean"]);
+});
+
+Deno.test("consent keys: a key with nothing to coarsen issues no second query", async () => {
+  const store = keyedStore({});
+  const events: AgentEvent[] = [];
+  await runApprovalGate({ ...base(store, events), approvalTimeoutMs: 20 });
+  assertEquals(store.lookups, ["/w+bash:ls"]);
+});

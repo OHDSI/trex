@@ -33,9 +33,14 @@ export interface ApprovalPolicyInput {
 // `git status`), `psql` for ExecuteSQL, `crontab` for CronCreate/CronDelete.
 // RestartApp has no shell equivalent — it drives the process manager through
 // devx's own duckdb functions, which a sidecar shell cannot reach.
+// `git:subtree` is here because `git subtree push` IS a push and keys on the
+// subcommand `subtree`, not on `push`. Nesting a second subcommand level to
+// separate it from `subtree add/split/pull` would buy precision on a command an
+// unattended coder essentially never runs, so the whole subcommand is escalated
+// and the over-gate on the other three is deliberate.
 export const DEFAULT_ESCALATE =
   "!GitPush,!ExecuteSQL,!CronCreate,!CronDelete,!RestartApp," +
-  "!Bash:sudo|dd|ssh|scp|psql|crontab|git:push," +
+  "!Bash:sudo|dd|ssh|scp|psql|crontab|git:push|git:subtree," +
   "DeleteFile,Bash:rm|curl|wget|chmod|chown";
 
 // Parsed once. toolset.ts falls back to this when a caller passes no list;

@@ -12,12 +12,14 @@ import { seedResponse, authKey, getCached, setCached } from "./models_cache.js";
 const modelsCache = new Map(); // authKey -> { models, expires }
 
 const PORT = 4322;
-// MUST match core/server/agents/service/approval-gate.ts's own 1_800_000ms
-// deadline (this is plain Node and cannot import that constant). A shorter
-// window here silently truncates the longer one: canUseTool would already have
-// denied by the time a human's approval lands, and nothing reads the decision
-// file after that. The 30 minutes is measured, not arbitrary — see that file.
-const PERMISSION_WAIT_MS = 30 * 60 * 1000;
+// Deliberately ONE MINUTE LONGER than core/server/agents/service/approval-gate.ts's
+// 1_800_000ms deadline (this is plain Node and cannot import that constant), so
+// eve's gate is always the side that decides. Equal windows are not enough: this
+// timer starts first, so a decision landing at ~29:59 could still be lost here —
+// canUseTool would already have denied, and nothing reads the decision file
+// after that. Shortening this below the gate reintroduces exactly that bug; the
+// gate's 30 minutes is measured, not arbitrary, so raise BOTH or neither.
+const PERMISSION_WAIT_MS = 31 * 60 * 1000;
 
 // Make the devx skills (brainstorming, writing-plans, etc.) invocable by the
 // agent. The claude-agent-sdk only discovers skills from disk via

@@ -8,6 +8,7 @@
 import type { AgentStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
 import { DEFAULT_ESCALATE_LIST, type EscalateList, resolveApproval } from "./approval-policy.ts";
+import { coarseScopeKey } from "./scope-key.ts";
 
 // Exported for tests. An explicit approvalPollMs stays flat (tests depend on a
 // deterministic cadence); the default doubles to a 5s ceiling, cutting a
@@ -61,6 +62,19 @@ export async function runApprovalGate(o: ApprovalGateOpts): Promise<{ error: str
   let consent: "always" | "never" | null = null;
   if (store && userId && plugin && agentName) {
     consent = await store.getToolConsent(userId, plugin, agentName, toolName, scopeKey);
+    if (consent === null) {
+      // A stored row is matched by EXACT scope_key (store.ts's getToolConsent),
+      // so giving Bash keys a subcommand orphaned every consent recorded under
+      // the old coarse key. Honouring a `never` from it keeps a standing
+      // refusal refusing; an `always` is deliberately NOT honoured, because a
+      // grant on `git` never covered `git push` and must not silently widen
+      // into it. Fail-safe in both directions, so no rows need deleting.
+      const coarse = coarseScopeKey(scopeKey);
+      if (coarse !== undefined) {
+        const prior = await store.getToolConsent(userId, plugin, agentName, toolName, coarse);
+        if (prior === "never") consent = "never";
+      }
+    }
   }
   const verdict = resolveApproval({
     toolName,
@@ -87,9 +101,11 @@ export async function runApprovalGate(o: ApprovalGateOpts): Promise<{ error: str
     // 7 of 43 real gates were clicked after the 5-minute poll window had
     // already given up (median human response was ~15 minutes). Raised to
     // 30 minutes; caller override (tests, other callers) is unchanged.
-    // plugins/devx/fn-claude-code/server.js's PERMISSION_WAIT_MS mirrors this
-    // number: on the delegated path the sidecar polls for the decision file in
-    // parallel, and the SHORTER of the two windows is the one that decides.
+    // plugins/devx/fn-claude-code/server.js's PERMISSION_WAIT_MS is this plus a
+    // one-minute margin: on the delegated path the sidecar polls for the
+    // decision file in parallel and its timer starts FIRST, so the margin is
+    // what makes this gate — not that one — the side that decides. Raising
+    // this number means raising that one too.
     const deadline = Date.now() + (o.approvalTimeoutMs ?? 1_800_000);
     // An explicit approvalPollMs stays flat — tests depend on a
     // deterministic cadence. The default backs off 500ms -> 5s, cutting
