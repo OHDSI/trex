@@ -1371,6 +1371,17 @@ MCP).
   `agents.sessions.activated_tools` in the same statement as the allowlist,
   before the turn is posted. `Browser*` stays deferred for ordinary chats;
   pre-activation is what makes that safe.
+- **A skill cannot declare "no tools at all".** An autonomous run passes the
+  matched skill's `allowed_tools` through `index.ts`'s
+  `matchedSkill?.allowed_tools?.length ? … : undefined`, so an EMPTY array and a
+  `NULL` column mean the same thing: no restriction. That is the inverse of
+  `RunOnEveOpts.allowedTools`, where `[]` is a declaration of nothing and only
+  `undefined` is the absence of one — a distinction the session row, the two SDK
+  hops and their tests all keep deliberately. The asymmetry is intentional for
+  now (it preserves the legacy reading of a skill row, and no skill in the repo
+  declares an empty array), but it means a skill author has no way to express a
+  read-nothing, do-nothing skill; they would have to name a tool that does
+  nothing instead.
 - **A declared allowlist naming no MCP tool also denies
   `mcp__ask__ask_question`**, the sidecar's structured elicitation channel
   (registered only on UI/chat turns, not these unattended ones —

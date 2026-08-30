@@ -200,34 +200,61 @@ async function turnToolNames(sessionId: string, allowlist: readonly string[], in
   return [...core.map(([n]) => n), ...activated.map(([n]) => n)].sort();
 }
 
+// A SECOND, independent copy of what each review is supposed to end up with.
+// Deliberately literal: comparing the turn's tools to the route's own array is
+// self-referential, and removing a tool moves both sides at once. With this,
+// dropping any single name from review_tools.ts reds the suite — which is what
+// caught nothing when BrowserScreenshot ("without it a bug report is prose
+// only") was quietly removed.
+const EXPECTED_REVIEW_TOOLS: Record<string, string[]> = {
+  "security-review": ["CodeSearch", "GitDiff", "GitLog", "GitStatus", "Glob", "Grep", "Read"],
+  "code-review": ["CodeSearch", "GitDiff", "GitLog", "GitStatus", "Glob", "Grep", "Read"],
+  "qa-test": [
+    "BrowserClick", "BrowserEvaluate", "BrowserFill", "BrowserGetText", "BrowserNavigate", "BrowserScreenshot",
+    "GitDiff", "Glob", "Grep", "Read",
+  ],
+  "design-review": [
+    "BrowserClick", "BrowserEvaluate", "BrowserGetText", "BrowserNavigate", "BrowserScreenshot",
+    "GitDiff", "Glob", "Grep", "Read",
+  ],
+  "docs-update": [
+    "CodeSearch", "Edit", "GitDiff", "GitLog", "GitStatus", "Glob", "Grep", "Read", "SearchReplace", "Write",
+  ],
+};
+
 Deno.test("every review type's turn gets exactly the tools its route allowlists", async () => {
   const inventory = await allDevxToolNames();
+  // The two maps must cover the same review types, or a new review would be
+  // silently unpinned and a deleted one would leave a stale expectation.
+  assertEquals(Object.keys(REVIEW_TOOLSETS).sort(), Object.keys(EXPECTED_REVIEW_TOOLS).sort());
+
   for (const [reviewType, allowlist] of Object.entries(REVIEW_TOOLSETS)) {
-    // Guards the inventory itself: an allowlisted name that is not a devx tool
-    // would otherwise make the comparison below vacuously "missing everywhere".
+    const expected = EXPECTED_REVIEW_TOOLS[reviewType];
+    // 1. The route still declares what it is supposed to declare.
+    assertEquals([...allowlist].sort(), [...expected].sort(), `${reviewType}'s allowlist changed`);
+    // 2. Every declared name is a real devx tool — otherwise the comparison
+    //    below would be vacuously "missing everywhere".
     const unknown = allowlist.filter((n) => !inventory.includes(n));
     assertEquals(unknown, [], `${reviewType} allowlists tools devx does not have: ${unknown.join(", ")}`);
-
+    // 3. And the turn actually ends up with them, deferral included.
     assertEquals(
       await turnToolNames(`s-review-${reviewType}`, allowlist, inventory),
-      [...allowlist].sort(),
+      [...expected].sort(),
       `${reviewType} does not get the tools it declared`,
     );
   }
 });
 
 // The specific loss the review found: both browser-driven reviews allowlist six
-// (QA) and five (design) Browser* tools, every one of them deferred.
+// (QA) and five (design) Browser* tools, every one of them deferred. Pinned by
+// exact set, not by a count — a floor of five tolerated losing one of six.
 Deno.test("the browser-driven reviews keep their whole browser surface", async () => {
   const inventory = await allDevxToolNames();
   for (const reviewType of ["qa-test", "design-review"]) {
-    const allowlist = REVIEW_TOOLSETS[reviewType];
-    const browser = allowlist.filter((n) => n.startsWith("Browser"));
-    assert(browser.length >= 5, `${reviewType} should allowlist the browser tools`);
-    const got = new Set(await turnToolNames(`s-browser-${reviewType}`, allowlist, inventory));
-    for (const name of browser) {
-      assert(got.has(name), `${reviewType} lost ${name} to deferral — a browser review with no browser`);
-    }
+    const expectedBrowser = EXPECTED_REVIEW_TOOLS[reviewType].filter((n) => n.startsWith("Browser"));
+    const got = (await turnToolNames(`s-browser-${reviewType}`, REVIEW_TOOLSETS[reviewType], inventory))
+      .filter((n) => n.startsWith("Browser"));
+    assertEquals(got, expectedBrowser, `${reviewType} did not get its whole browser surface`);
   }
 });
 

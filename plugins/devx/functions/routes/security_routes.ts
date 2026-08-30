@@ -14,6 +14,7 @@ import { isNoKeyProvider, removedProviderResponse } from "../provider_support.ts
 import { classifyCoderError } from "../error_codes.ts";
 import { bearerFromRequest, denialSummary, runOnEve } from "../lib/eve_run.ts";
 import {
+  browserlessRefusal,
   CODE_REVIEW_TOOLS,
   DESIGN_REVIEW_TOOLS,
   DOCS_UPDATE_TOOLS,
@@ -123,6 +124,8 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       [userId],
     );
     const providerRow = activePC.rows[0];
+    // Which loop this review will run on — the refusal below turns on it.
+    let resolvedProvider = providerRow?.provider;
 
     if (!providerRow) {
       // Legacy fallback. devx.settings carries the same encrypted-pair
@@ -159,6 +162,7 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       // whenever the user has no active provider_configs row.
       const removedLegacyProviderRejection = removedProviderResponse(legacyRow.provider, corsHeaders);
       if (removedLegacyProviderRejection) return removedLegacyProviderRejection;
+      resolvedProvider = legacyRow.provider;
       // Only providers that genuinely authenticate without a stored key belong
       // in the shared waiver — see the providerRow branch below for why a removed
       // engine must never be waived past the key gate.
@@ -204,6 +208,17 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
           { status: 400, headers: corsHeaders },
         );
       }
+    }
+
+    // A browser-dependent review on the delegated path is refused, not degraded:
+    // the claude-code loop has no browser tool at all, so it would read files and
+    // report "no issues" from a page it never opened (review_tools.ts).
+    const refusal = browserlessRefusal(opts.table, resolvedProvider);
+    if (refusal) {
+      return Response.json(
+        { error: refusal, code: "browser_tools_unavailable" },
+        { status: 400, headers: corsHeaders },
+      );
     }
 
     // Fetch previous review for context

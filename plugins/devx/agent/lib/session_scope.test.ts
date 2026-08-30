@@ -100,8 +100,23 @@ Deno.test("isUndefinedColumn: only SQLSTATE 42703, never a message that merely l
   assert(!isUndefinedColumn(undefined));
 });
 
-Deno.test("loadSessionScope: a session with no row at all is nothing-declared", async () => {
-  assertEquals(await loadSessionScope("s-scope-norow", rows(undefined)), {});
+// Re-review also-fix 2: a MISSING row used to parse as `{}` — unrestricted, no
+// workspace — and be cached for the worker's lifetime, which is MF3's fail-open
+// arriving through a different input. Every session that reaches a turn has a
+// row, so an empty result is a failed read wearing a success's clothes.
+Deno.test("loadSessionScope: a session with no row at all fails the turn, it is not 'nothing declared'", async () => {
+  await assertRejects(
+    () => loadSessionScope("s-scope-norow", rows(undefined)),
+    Error,
+    "has no agents.sessions row",
+  );
+  assertEquals(peekSessionScope("s-scope-norow"), undefined, "a missing row must not be cached either");
+});
+
+// A row that EXISTS and declares nothing is the ordinary unrestricted session,
+// and stays exactly that.
+Deno.test("loadSessionScope: a row that declares nothing is nothing-declared", async () => {
+  assertEquals(await loadSessionScope("s-scope-emptyrow", rows({})), {});
 });
 
 // Must-fix 3: the session map evicts in INSERTION order, not LRU, so a worker
@@ -113,7 +128,7 @@ Deno.test("loadSessionScope: cache pressure cannot cold-start the in-flight turn
   const live = rows({ tool_allowlist: ["Read"], tool_allowlist_declared: true, workspace_path: "" });
   await loadSessionScope("s-scope-inflight", live, ctx);
   // More than CACHE_MAX (512) distinct sessions primed after it.
-  for (let i = 0; i < 600; i++) await loadSessionScope(`s-scope-pressure-${i}`, rows(undefined));
+  for (let i = 0; i < 600; i++) await loadSessionScope(`s-scope-pressure-${i}`, rows({}));
   assertEquals(peekSessionScope("s-scope-inflight"), undefined, "the session map must actually have evicted it");
   assertEquals(peekSessionScopeForCtx(ctx, "s-scope-inflight")?.allowedTools, ["Read"]);
   // Without a ctx entry the session map is still the answer.

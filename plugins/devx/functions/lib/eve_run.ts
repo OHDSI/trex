@@ -1,9 +1,6 @@
-// Runs ONE devx turn on eve's agent runtime, so security reviews (routes/
-// security_routes.ts) and autonomous runs (index.ts) share one seam.
-//
-// Plain fetch, not Trex.req: the inter-service channel buffers a whole
-// response and these turns run for minutes. No import from core/ either —
-// functions/ cannot, and deno tests do not catch it.
+// One devx turn on eve, shared by security reviews (routes/security_routes.ts)
+// and autonomous runs (index.ts). Plain fetch (these turns run for minutes) and
+// no import from core/ — functions/ cannot, and deno tests do not catch it.
 
 import { type DevxSseFrame, type EveEvent, toDevxSse } from "./eve_sse.ts";
 
@@ -100,14 +97,9 @@ async function writeSessionScope(opts: RunOnEveOpts, sessionId: string): Promise
   if (!opts.sql) {
     throw new Error("runOnEve: a declared tool allowlist or workspace needs `sql` to write it onto the session row");
   }
-  // activated_tools: an explicit allowlist outranks deferral, which is only a
-  // context-size optimisation. Deferral runs AFTER filterTools (toolset.ts
-  // Step 4 then Step 6), so an allowlisted tool that is also deferred is
-  // dropped outright, and ToolSearch cannot recover it — it is not allowlisted
-  // itself, and activation only takes effect on the NEXT turn, while a review
-  // is a single turn. Pre-activating the declared set is what puts those tools
-  // in THIS turn's tool set. Written in the same statement, before the turn is
-  // posted, for exactly the ordering reason above.
+  // activated_tools: an explicit allowlist outranks deferral. Deferral runs
+  // AFTER filterTools (toolset.ts Step 4 then Step 6) and ToolSearch cannot
+  // recover a tool within the turn, so the declared set is pre-activated here.
   const written = await opts.sql(
     `UPDATE agents.sessions
         SET tool_allowlist = $1::text[],
@@ -171,12 +163,9 @@ export async function runOnEve(opts: RunOnEveOpts): Promise<RunOnEveResult> {
   const headers: Record<string, string> = { "content-type": "application/json", "x-user-id": opts.userId };
   if (opts.bearerToken) headers.authorization = `Bearer ${opts.bearerToken}`;
 
-  // unattended: true, and NO approverReachable. Neither consumer has a human
-  // watching a gate, so hard-tier tools (git push, psql, ExecuteSQL, …) are
-  // denied outright rather than parked for 30 minutes and then denied; the
-  // unattended flag is what keeps every OTHER needsApproval tool from gating.
-  // Deliberately no `message`: the create route starts the turn as soon as one
-  // is present, and that turn's events would be gone before we subscribe.
+  // unattended, no approverReachable: hard-tier tools are denied outright
+  // rather than parked on a gate nobody watches. No `message` either — the
+  // create route would start a turn whose events are gone before we subscribe.
   const created = await f(base, { method: "POST", headers, body: JSON.stringify({ unattended: true }) });
   if (!created.ok) {
     await created.body?.cancel();

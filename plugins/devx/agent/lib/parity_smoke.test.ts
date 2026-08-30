@@ -55,7 +55,8 @@ const filterTools = agentConfig.filterTools!;
 
 // filterTools reads the session's V14 scope from the snapshot buildInstructions
 // primes; calling the hook directly means priming it here. Nothing declared.
-await loadSessionScope("s-1", () => Promise.resolve({ rows: [] }));
+// A row with nothing declared; a missing row fails the turn.
+await loadSessionScope("s-1", () => Promise.resolve({ rows: [{}] }));
 
 function fakeHookCtx(overrides: Partial<HookCtx> = {}): HookCtx {
   return {

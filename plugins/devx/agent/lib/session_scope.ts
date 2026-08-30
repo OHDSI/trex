@@ -83,7 +83,17 @@ export function loadSessionScope(sessionId: string, sql: QueryFn, ctx?: object):
         [sessionId],
       )
     )
-    .then((r) => remember(sessionId, parseSessionScopeRow(r.rows[0])))
+    .then((r) => {
+      // A MISSING row is not "nothing declared". Every session that reaches a
+      // turn has a row (it is inserted at creation, and a declared scope is
+      // written onto it before the turn is posted), so an empty result is a
+      // failed read wearing a success's clothes — and caching it would restore
+      // exactly the fail-open the catch below no longer allows.
+      if (r.rows.length === 0) {
+        throw new Error(`devx: session ${sessionId} has no agents.sessions row — refusing to run it unscoped`);
+      }
+      return remember(sessionId, parseSessionScopeRow(r.rows[0]));
+    })
     // ONLY the pre-V14 shape (undefined_column) is "nothing declared", and only
     // that is cached. Any other failure — a connection blip on the first turn —
     // would otherwise drop the allowlist AND the workspace for the worker's

@@ -1,15 +1,7 @@
-// The claude-code sidecar as an eve AgentEngine (core's eve-shim/types.ts):
-// it runs its OWN agentic loop, so eve hands it the whole turn and translates
-// what it streams back (core's service/engine/delegate.ts) instead of driving
-// streamText over eve's tools.
-//
-// Two jobs live here and nowhere else:
-//   1. re-shape the sidecar's devx-flavoured SSE events into the SDK message
-//      shapes core's translator reads (service/engine/events.ts), and
-//   2. answer the sidecar's permission requests from EVE's approval gate,
-//      which is only possible now that a sidecar turn is a real agents.turns
-//      row — Task 4 had to use devx's own consent tables for exactly that
-//      reason.
+// The claude-code sidecar as an eve AgentEngine: it runs its OWN agentic loop,
+// so eve hands it the whole turn (service/engine/delegate.ts). Two jobs live
+// here — reshaping its SSE events into the SDK shapes core's translator reads,
+// and answering its permission requests from eve's approval gate.
 import { ensureAppWorkspace, ensureWorkspace } from "../../functions/tools/workspace.ts";
 import { readMetadata } from "./context.ts";
 import { acceptDeclaredWorkspace, loadSessionScope } from "./session_scope.ts";
@@ -27,12 +19,10 @@ import { parseEscalateList, resolveEscalateFor } from "../../../../core/server/a
 
 export const SIDECAR_ENGINE_NAME = "claude-code";
 
-// devx tool names the delegated loop can actually run. The `tools` option
-// fn-claude-code/server.js sets names the SDK's BUILT-INS, so only a devx tool
-// whose name IS an SDK built-in survives the hop; every other devx tool
-// (CodeSearch, Git*, SearchReplace, Browser*, KB*, Figma*, …) exists on the
-// model loop alone, and the sidecar registers only the kb/ask MCP servers, so
-// there is no equivalent for it either.
+// devx tool names the delegated loop can actually run. server.js's `tools`
+// option names the SDK's BUILT-INS, so only a devx tool whose name IS one
+// survives; the rest (CodeSearch, Git*, SearchReplace, Browser*, …) exist on
+// the model loop alone, and the sidecar registers only the kb/ask MCP servers.
 const DELEGATED_TOOL_NAMES: ReadonlySet<string> = new Set([
   "Read", "Write", "Edit", "Bash", "Glob", "Grep",
   "WebFetch", "WebSearch", "TodoWrite", "Skill",
@@ -176,13 +166,10 @@ async function readSettings(sql: HookCtx["sql"], userId: string): Promise<Settin
   return (r.rows[0] as SettingsRow | undefined) ?? {};
 }
 
-// `escalate` is the agent's AUTHORED override (AgentConfig.escalate), which
-// handler.ts:63 passes to the model loop and which nothing here can read off
-// the LoadedAgent — agent.ts supplies it, from the same constant it declares
-// to defineAgent, so the two loops cannot drift. The two approval timings are
-// test seams, exactly as they are on toolset.ts's ToolBuildCtx: a test that
-// asserts "this must NOT gate" has to fail fast rather than park for the
-// production 30 minutes.
+// `escalate` is the agent's AUTHORED override, supplied by agent.ts from the
+// same constant it declares to defineAgent so the two loops cannot drift. The
+// approval timings are test seams: a "must NOT gate" test has to fail fast
+// rather than park for the production 30 minutes.
 export interface SidecarEngineDeps {
   stream?: SidecarStream;
   escalate?: string;
@@ -278,12 +265,9 @@ async function* runSidecarTurn(
     return refusal ? { behavior: "deny", message: refusal.error } : { behavior: "allow", updatedInput: req.input };
   };
 
-  // Do not silently degrade: a declared tool this path cannot provide is never
-  // CALLED, so it produces no result of its own and would leave no trace at
-  // all. Publishing one failed action.result per tool is what carries it into
-  // eve_run.ts's `denials`, and from there into devx.agent_results.denials, the
-  // plan-status guard and the Problems-tab banner — the same durability the
-  // approval denials already use.
+  // Do not silently degrade: a tool this path cannot provide is never CALLED,
+  // so it leaves no trace of its own. One failed action.result each is what
+  // carries it into eve_run.ts's `denials` and the durability behind them.
   for (const toolName of unavailableDelegatedTools(scope.allowedTools)) {
     publish(turn.sessionId, {
       type: "action.result",

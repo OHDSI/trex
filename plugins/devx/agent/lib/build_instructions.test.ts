@@ -58,9 +58,11 @@ function fakeHookCtx(overrides: Partial<HookCtx> & { aiRules?: string | null } =
         return Promise.resolve({ rows: [] });
       }
       // buildInstructions also primes the session's V14 scope (session_scope.ts),
-      // the snapshot the synchronous filterTools reads. Nothing declared here.
+      // the snapshot the synchronous filterTools reads. A ROW with nothing
+      // declared — a MISSING row now fails the turn rather than reading as
+      // unrestricted (session_scope.ts).
       if (query.includes("FROM agents.sessions")) {
-        return Promise.resolve({ rows: [] });
+        return Promise.resolve({ rows: [{}] });
       }
       throw new Error(`unexpected query: ${query}`);
     },

@@ -33,7 +33,9 @@ export { buildAskQuestionRule } from "./coder_context.ts";
  * leaves the SDK preset alone. A truthiness test here (`?.length ? … :
  * undefined`) inverts that and hands a declared-nothing session every tool.
  */
-export function sidecarAllowedTools(allowedTools) {
+export function sidecarAllowedTools(
+  allowedTools: readonly string[] | null | undefined,
+): string[] | undefined {
   return Array.isArray(allowedTools) ? [...allowedTools] : undefined;
 }
 

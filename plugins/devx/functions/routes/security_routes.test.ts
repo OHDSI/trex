@@ -9,9 +9,10 @@
 // Same in-memory fake-db approach as provider_config_routes.test.ts: driven
 // off the literal query shapes security_routes.ts issues today, white-box on
 // purpose.
-import { assertEquals } from "jsr:@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert";
 import { handleSecurityRoutes } from "./security_routes.ts";
 import { __resetMigrationCacheForTests } from "../provider_key.ts";
+import { browserlessRefusal, DELEGATED_PROVIDER, REVIEW_TOOLSETS } from "./review_tools.ts";
 
 const CORS = { "content-type": "application/json" };
 const USER = "u-review";
@@ -393,6 +394,71 @@ Deno.test("security review: a hard-tier denial completes the review and is repor
       assertEquals(insertIdx >= 0, true);
       assertEquals(db.calls[insertIdx].includes("denials"), true);
       assertEquals(JSON.parse(String(db.params[insertIdx][4])), denials);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// User ruling: QA and design reviews REFUSE to start on the delegated
+// (claude-code) path. That loop has no browser tool at all, so the review would
+// read files and report on a page it never opened; a partial-but-flagged result
+// is not enough, because a reader who misses the banner reads it as a real pass.
+// Security and code review still run there — Read/Glob/Grep genuinely cover them.
+// ---------------------------------------------------------------------------
+
+const CLAUDE_CODE_ROW = {
+  provider: DELEGATED_PROVIDER,
+  model: "sonnet",
+  api_key: null,
+  api_key_encrypted: null,
+  api_key_iv: null,
+  base_url: null,
+};
+
+Deno.test("browserlessRefusal: refuses exactly the two browser-dependent reviews, and only on the delegated path", () => {
+  for (const reviewType of ["qa-test", "design-review"]) {
+    const msg = browserlessRefusal(reviewType, DELEGATED_PROVIDER);
+    assert(msg, `${reviewType} must be refused on ${DELEGATED_PROVIDER}`);
+    // Names every browser tool it would have needed, so the message says WHY.
+    for (const tool of REVIEW_TOOLSETS[reviewType].filter((t) => t.startsWith("Browser"))) {
+      assertStringIncludes(String(msg), tool);
+    }
+    // And says there is no fallback: a claude-code account has no API key, so
+    // resolveModel throws and the model loop is not an option either.
+    assertStringIncludes(String(msg), "no API key");
+    assertStringIncludes(String(msg), "Settings");
+  }
+  // The reviews that genuinely work on that path are untouched.
+  for (const reviewType of ["security-review", "code-review", "docs-update"]) {
+    assertEquals(browserlessRefusal(reviewType, DELEGATED_PROVIDER), null);
+  }
+  // And no review is refused on a model-loop provider.
+  for (const reviewType of Object.keys(REVIEW_TOOLSETS)) {
+    assertEquals(browserlessRefusal(reviewType, "openai"), null);
+    assertEquals(browserlessRefusal(reviewType, null), null);
+  }
+});
+
+Deno.test("a security review still runs on the delegated path — the refusal is scoped, not blanket", async () => {
+  await withWorkspace(async () => {
+    const db = makeFakeDb(CLAUDE_CODE_ROW);
+    await withEve(turnEvents(`Reviewed.\n${FINDING}`), async (calls) => {
+      const res = await handleSecurityRoutes(
+        `/apps/${APP}/security/review`,
+        "POST",
+        new Request(`http://x/apps/${APP}/security/review`, {
+          method: "POST",
+          headers: { authorization: "Bearer caller-jwt" },
+        }),
+        USER,
+        db.sql,
+        CORS,
+      );
+      assertEquals(res.status, 200);
+      const frames = await sseFrames(res);
+      assertEquals(frames.some((f) => f.type === "review_error"), false);
+      assert(frames.some((f) => f.type === "review_done"));
+      assert(calls.some((c) => c.url.endsWith("/session")), "the review should have reached eve");
     });
   });
 });

@@ -37,6 +37,9 @@ function fakeCtx(metadata: unknown) {
     env: () => undefined,
     sql: (q: string) => {
       if (q.includes("devx.skills")) return Promise.resolve({ rows: SKILL_ROWS });
+      // The V14 scope row buildInstructions primes: present, nothing declared.
+      // A MISSING row now fails the turn (session_scope.ts).
+      if (q.includes("FROM agents.sessions")) return Promise.resolve({ rows: [{}] });
       return Promise.resolve({ rows: [] });
     },
   } as any;

@@ -934,15 +934,6 @@ function startTurn(
       console.error(`agents: channel delivery registration failed for turn ${turn.id}:`, e);
     }
     publish(sessionId, { type: "turn.started", data: { turnId: turn.id, sequence: turn.seq } });
-    // Task 15: whatever ToolSearch has activated on earlier turns of THIS
-    // session, read fresh (never cached) so a tool activated last turn is
-    // still visible this turn. Degrades to "none activated" on a read
-    // failure — same posture as the getLastTurnUsage fallback above — rather
-    // than failing a turn over a withheld-tool bookkeeping read.
-    const activatedTools = await deps.store.getActivatedTools(sessionId).catch((e) => {
-      console.error(`agents: getActivatedTools failed for session ${sessionId} (continuing with none activated):`, e);
-      return [];
-    });
     // Liveness stamp for as long as this turn runs. Without it the only signal
     // that a turn is still alive is `started_at`, so a worker killed mid-turn
     // (crash, redeploy, or the runtime's EarlyDrop at half of workerTimeoutMs)
@@ -1002,6 +993,28 @@ function startTurn(
           ...(abort ? { abortSignal: abort.signal } : {}),
         });
       } else {
+        // Task 15: whatever ToolSearch has activated on earlier turns of THIS
+        // session, read fresh (never cached) so a tool activated last turn is
+        // still visible this turn.
+        //
+        // NOT caught into "none activated". Step 6 of buildSdkTools WITHHOLDS
+        // every deferred tool this does not name, so an empty answer silently
+        // NARROWS the turn's tool set - and a session that pre-activated a
+        // declared allowlist (see COMPAT.md's allowlist-plus-deferral entry)
+        // would then run without the tools it declared and still report a clean
+        // result. A failed turn is visible and retryable; a silently narrowed
+        // one is not.
+        //
+        // Inside this try, not beside `depth` above: a throw between
+        // turn.started and here escapes to the fire-and-forget IIFE's catch,
+        // which publishes no turn.failed and hangs every /stream reader. Here
+        // the catch below turns it into a real turn.failed/session.failed.
+        // Read only when the agent defers something - for every other agent the
+        // value is unused (Step 6 is gated on the same emptiness), which keeps
+        // both the round trip and this failure mode off them entirely.
+        const activatedTools = deps.agent.config.context.deferredTools.length > 0
+          ? await deps.store.getActivatedTools(sessionId)
+          : [];
         await runTurn({
           agent: deps.agent, sessionId, turnId: turn.id, history, message: turnMessage, metadata,
           store: deps.store, emit: (e) => publish(sessionId, e),
