@@ -890,4 +890,78 @@ router.post(["/admin/create-user", "/admin/users"], apiLimiter, async (req, res)
   }
 });
 
+// PUT /admin/users/:id is the GoTrue-compatible admin update. Only the password
+// is settable: an administrator resetting a password for someone who has lost
+// it cannot supply the current one, so this is the counterpart to
+// /change-password rather than a duplicate of it.
+router.put("/admin/users/:id", apiLimiter, async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) {
+      res.status(401).json({ error: "not_authenticated" });
+      return;
+    }
+
+    const token = authHeader.slice(7);
+    const claims = await verifyAccessToken(token);
+    if (!claims) {
+      res.status(401).json({ error: "not_authenticated" });
+      return;
+    }
+
+    // service_role bypasses RLS/admin checks (Supabase convention).
+    const callerRole = claims.app_metadata?.trex_role;
+    const isServiceRole = claims.role === "service_role";
+    if (callerRole !== "admin" && !isServiceRole) {
+      res.status(403).json({ error: "forbidden", error_description: "Admin access required" });
+      return;
+    }
+
+    const { password } = req.body ?? {};
+    if (!password) {
+      res.status(422).json({ error: "validation_failed", error_description: "Password is required" });
+      return;
+    }
+
+    if (password.length < 8) {
+      res.status(422).json({ error: "Password must be at least 8 characters" });
+      return;
+    }
+
+    const user = await fetchUserById(req.params.id);
+    if (!user) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+
+    const newHash = await hashPassword(password);
+    await pool.query(
+      `UPDATE trexdb."user" SET password_hash = $1, "updatedAt" = NOW() WHERE id = $2`,
+      [newHash, user.id],
+    );
+
+    // Also update account table
+    await pool.query(
+      `UPDATE trexdb.account SET password = $1, "updatedAt" = NOW()
+       WHERE "userId" = $2 AND "providerId" = 'credential'`,
+      [newHash, user.id],
+    );
+
+    // Revoke all outstanding refresh tokens, as a password change does: a reset
+    // is what an administrator does when an account may be compromised, so the
+    // sessions opened with the old password must not survive it.
+    await pool.query(
+      `UPDATE trexdb.refresh_token SET revoked = true, "updatedAt" = NOW()
+       WHERE "userId" = $1 AND revoked = false`,
+      [user.id],
+    );
+
+    const updated = await fetchUserById(user.id);
+    res.json(toGoTrueUser(updated ?? user));
+  } catch (err) {
+    console.error("[auth] admin set-password error:", err);
+    res.status(500).json({ error: "server_error", error_description: "Internal server error" });
+  }
+});
+
 export { router as authRouter };
