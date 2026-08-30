@@ -22,6 +22,14 @@ export interface RunArgs {
   // readMetadata/materializeAttachments on the receiving end expect exactly
   // this shape; the devx side downloads them into the coder's workspace.
   attachments?: Array<{ name: string; url: string; contentType?: string }>;
+  // Discord channel/thread id for the task. When set, session creation carries
+  // a continuationToken derived from it (see coderContinuationToken) so the
+  // coder gets its OWN agents.channel_sessions row on the SAME channel as
+  // claw's facilitator — the PK is (channel, continuation_token), so a
+  // distinct token is what makes two sessions share one thread. Omitted
+  // entirely (not sent) when absent: eval/test callers still get a plain
+  // unbound session, not an error.
+  channelId?: string | null;
   // Invoked on a timer while the event stream is open, independent of events
   // arriving — a long silent tool run (build/test) must not read as dead. See
   // code-stream.ts's HEARTBEAT_MS for why this exists (#238).
@@ -47,6 +55,14 @@ function headers(userId?: string): Record<string, string> {
   return h;
 }
 
+// Deterministic per-thread token for the coder's OWN channel_sessions row —
+// distinct from the facilitator's own token (see core/server/agents/channels/
+// store.ts's resolveOrCreateSession) so a later turn on the same thread
+// re-resolves the same coder session instead of minting a new one.
+export function coderContinuationToken(channelId: string): string {
+  return `${channelId}:coder`;
+}
+
 export async function runCodeTurn(
   client: TokioClient,
   args: RunArgs,
@@ -70,9 +86,13 @@ export async function runCodeTurn(
     ...(args.appId ? { appId: args.appId } : {}),
     ...(args.attachments?.length ? { attachments: args.attachments } : {}),
   };
+  // continuationToken only matters at create/resolve time — a continue call
+  // already addresses the session directly by id, so it's sent ONLY when
+  // there is no prior codeSessionId yet.
   const body = JSON.stringify({
     message: args.message,
     ...(Object.keys(metadata).length ? { metadata } : {}),
+    ...(!args.codeSessionId && args.channelId ? { continuationToken: coderContinuationToken(args.channelId) } : {}),
   });
 
   // 1) Start (create) or continue the turn.

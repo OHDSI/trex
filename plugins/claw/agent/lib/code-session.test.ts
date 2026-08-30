@@ -152,6 +152,86 @@ Deno.test("runCodeTurn sends no attachments key at all when there are none", asy
   assertEquals("attachments" in metadata, false);
 });
 
+Deno.test("runCodeTurn sends a coder-distinct continuationToken (channelId:coder) on create when channelId is given", async () => {
+  const create = new Response(JSON.stringify({ sessionId: "code-1" }), {
+    headers: { "content-type": "application/json" },
+  });
+  const stream = ndjson(
+    { type: "message.completed", data: { text: "ok" } },
+    { type: "session.waiting", data: {} },
+  );
+  const { client, reqs } = fakeClient([create, stream]);
+  await runCodeTurn(client, { codeSessionId: null, message: "build X", startCursor: 0, channelId: "chan-1" });
+  const body = JSON.parse(reqs[0].init.body);
+  assertEquals(body.continuationToken, "chan-1:coder");
+});
+
+Deno.test("runCodeTurn sends no continuationToken at all when channelId is absent — eval/test callers get a plain unbound session", async () => {
+  const create = new Response(JSON.stringify({ sessionId: "code-1" }), {
+    headers: { "content-type": "application/json" },
+  });
+  const stream = ndjson(
+    { type: "message.completed", data: { text: "ok" } },
+    { type: "session.waiting", data: {} },
+  );
+  const { client, reqs } = fakeClient([create, stream]);
+  await runCodeTurn(client, { codeSessionId: null, message: "build X", startCursor: 0 });
+  const body = JSON.parse(reqs[0].init.body);
+  assertEquals("continuationToken" in body, false);
+});
+
+Deno.test("runCodeTurn derives the same continuationToken for the same channelId across two separate create calls (a later turn re-resolves the same session)", async () => {
+  const mk = () => {
+    const create = new Response(JSON.stringify({ sessionId: "code-1" }), {
+      headers: { "content-type": "application/json" },
+    });
+    const stream = ndjson(
+      { type: "message.completed", data: { text: "ok" } },
+      { type: "session.waiting", data: {} },
+    );
+    return fakeClient([create, stream]);
+  };
+  const first = mk();
+  await runCodeTurn(first.client, { codeSessionId: null, message: "build X", startCursor: 0, channelId: "chan-1" });
+  const second = mk();
+  await runCodeTurn(second.client, { codeSessionId: null, message: "build X", startCursor: 0, channelId: "chan-1" });
+  const token1 = JSON.parse(first.reqs[0].init.body).continuationToken;
+  const token2 = JSON.parse(second.reqs[0].init.body).continuationToken;
+  assertEquals(token1, token2);
+});
+
+Deno.test("runCodeTurn derives different continuationTokens for different channelIds (different threads get different coder sessions)", async () => {
+  const mk = () => {
+    const create = new Response(JSON.stringify({ sessionId: "code-1" }), {
+      headers: { "content-type": "application/json" },
+    });
+    const stream = ndjson(
+      { type: "message.completed", data: { text: "ok" } },
+      { type: "session.waiting", data: {} },
+    );
+    return fakeClient([create, stream]);
+  };
+  const a = mk();
+  await runCodeTurn(a.client, { codeSessionId: null, message: "build X", startCursor: 0, channelId: "chan-1" });
+  const b = mk();
+  await runCodeTurn(b.client, { codeSessionId: null, message: "build X", startCursor: 0, channelId: "chan-2" });
+  const tokenA = JSON.parse(a.reqs[0].init.body).continuationToken;
+  const tokenB = JSON.parse(b.reqs[0].init.body).continuationToken;
+  assert(tokenA !== tokenB);
+});
+
+Deno.test("runCodeTurn does not resend continuationToken on a continue call — it only matters at create/resolve time", async () => {
+  const cont = new Response(JSON.stringify({ accepted: true }), { status: 202 });
+  const stream = ndjson(
+    { type: "message.completed", data: { text: "ok" } },
+    { type: "session.waiting", data: {} },
+  );
+  const { client, reqs } = fakeClient([cont, stream]);
+  await runCodeTurn(client, { codeSessionId: "code-1", message: "continue", startCursor: 2, channelId: "chan-1" });
+  const body = JSON.parse(reqs[0].init.body);
+  assertEquals("continuationToken" in body, false);
+});
+
 Deno.test("runCodeTurn continues an existing session with startCursor", async () => {
   const cont = new Response(JSON.stringify({ accepted: true }), {
     status: 202, headers: { "content-type": "application/json" },

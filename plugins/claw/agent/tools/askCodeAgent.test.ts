@@ -96,6 +96,35 @@ Deno.test("askCore passes no onProgress at all when there is no channelId — ne
   assertEquals(turn.seen[0].onProgress, undefined);
 });
 
+// The coder needs its OWN agents.channel_sessions row on the task's Discord
+// channel (distinct continuation token from the facilitator's) so its
+// input.requested events can reach the channel adapter — see code-session.ts's
+// continuationToken derivation. askCore's job here is just to forward the
+// thread's channelId to the turn.
+Deno.test("askCore forwards channelId to the coder turn so it can bind its own channel session", async () => {
+  const sql = fakeSql();
+  const turn = stubTurn();
+  await askCore(sql.fn, { sessionId: "s1", userId: "u1", channelId: "chan-1" }, { message: "go" }, turn.fn);
+  assertEquals((turn.seen[0] as { channelId?: string }).channelId, "chan-1");
+});
+
+Deno.test("askCore forwards no channelId when the caller has none (eval/test path) — the coder still gets a working unbound session", async () => {
+  const sql = fakeSql();
+  const turn = stubTurn();
+  await askCore(sql.fn, { sessionId: "s1", userId: "u1" }, { message: "go" }, turn.fn);
+  assertEquals((turn.seen[0] as { channelId?: string }).channelId, undefined);
+});
+
+Deno.test("askCore forwards the SAME channelId across two turns in the same thread", async () => {
+  const sql = fakeSql();
+  const turn = stubTurn("ok", "chat-1");
+  await askCore(sql.fn, { sessionId: "s1", userId: "u1", channelId: "chan-1" }, { message: "first" }, turn.fn);
+  await askCore(sql.fn, { sessionId: "s1", userId: "u1", channelId: "chan-1" }, { message: "second" }, turn.fn);
+  assertEquals((turn.seen[0] as { channelId?: string }).channelId, "chan-1");
+  assertEquals((turn.seen[1] as { channelId?: string }).channelId, "chan-1");
+  assertEquals(turn.seen[1].chatId, "chat-1"); // same coder chat reused
+});
+
 Deno.test("askCore's onProgress posts 'Still on it: <note>' to the channel and swallows a post failure", async () => {
   const sql = fakeSql();
   const turn = stubTurn();

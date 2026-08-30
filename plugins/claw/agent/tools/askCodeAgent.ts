@@ -46,7 +46,11 @@ export async function askCore(
   input: Input,
   // Injected for testability (defaults to the real /stream turn); tests pass a
   // stub so askCore's orchestration can be exercised without a live coder.
-  runTurn: (args: CodeTurnArgs) => Promise<{ chatId: string; replyText: string }> = runCodeTurn,
+  // Widened over CodeTurnArgs with an optional channelId, which code-stream.ts
+  // (untouched, still the default) simply ignores; the eve transport
+  // (code-session.ts's runCodeTurn) uses it to derive the coder's OWN
+  // channel-bound continuation token.
+  runTurn: (args: CodeTurnArgs & { channelId?: string }) => Promise<{ chatId: string; replyText: string }> = runCodeTurn,
 ): Promise<{ reply: string; trailer: HandoffTrailer | null }> {
   const prior = await readOrchestration(sql, ctx.sessionId);
   // codeSessionId now holds the devx chat id; the stored app wins once the chat
@@ -83,6 +87,7 @@ export async function askCore(
     appId,
     ...(input.attachments?.length ? { attachments: input.attachments } : {}),
     ...(onProgress ? { onProgress } : {}),
+    ...(ctx.channelId ? { channelId: ctx.channelId } : {}),
   });
   // eventCursor is unused on the /stream path (each turn streams to completion);
   // the column is retained for schema compatibility.
