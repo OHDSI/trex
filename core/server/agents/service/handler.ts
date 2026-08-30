@@ -1667,6 +1667,27 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       return json({ error: "unknown or already-decided request" }, 404);
     }
 
+    // Additive, read-only (not part of eve's documented HTTP surface): lets a
+    // caller ASK whether a gate is pending instead of relying on `input.requested`
+    // arriving on a live stream — that event has no stepToEvent mapping (it is
+    // never persisted/replayed), so a caller that attaches after it was published
+    // would otherwise see nothing until the turn's approval timeout. Mirrors
+    // getSinglePendingApproval's own null-when-ambiguous semantic verbatim: null
+    // covers both "nothing pending" and "more than one pending" (never guess which).
+    const pendingApproval = path.match(/^\/eve\/v1\/session\/([^/]+)\/pending-approval$/);
+    if (pendingApproval && req.method === "GET") {
+      const [, sessionId] = pendingApproval;
+      const session = await store.getSession(sessionId);
+      if (!session) return json({ error: "session not found" }, 404);
+      // Same session-ownership check as the approval/inputResponses routes above
+      // — a session with a known owner only lets that owner read its own gate.
+      if (session.created_by != null && session.created_by !== createdBy) {
+        return json({ error: "pending approval can only be read by the session owner" }, 403);
+      }
+      const pending = await store.getSinglePendingApproval(sessionId);
+      return json({ pending });
+    }
+
     const stream = path.match(/^\/eve\/v1\/session\/([^/]+)\/stream$/);
     if (stream && req.method === "GET") {
       const [, sessionId] = stream;

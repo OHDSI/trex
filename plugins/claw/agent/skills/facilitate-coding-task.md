@@ -156,6 +156,14 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    - `awaitApproval` posts Approve/Deny buttons and waits for the click — use it
      for a go/no-go decision. Approve lets you proceed; Deny means revise and
      gate again.
+   - `resolveCoderApproval` relays a decision on the CODER's own tool gates. When
+     a hand-off comes back saying the coder is PAUSED it names one or more
+     `requestId`s: the coding agent hit a gate of its own and its turn is still
+     open. Approve/Deny is already posted in the thread, and the pick resumes you
+     with "The team selected: approve <requestId>" — pass that exact requestId
+     and decision to `resolveCoderApproval`, which continues the SAME paused
+     turn and returns what the coder did next. Never answer a paused coder with
+     `askCodeAgent`: that starts a second turn on top of the paused one.
 
    Rule of thumb: acknowledge before you act. When an answer or approval lets you
    move to the next step, first `postUpdate` a short line naming what you are

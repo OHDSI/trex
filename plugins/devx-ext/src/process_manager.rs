@@ -1,3 +1,4 @@
+use crate::subprocess::filtered_env;
 use crate::validation;
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
@@ -103,9 +104,16 @@ pub fn process_start(process_id: &str, config_json: &str) -> Result<String, Box<
     }
 
     let arg_refs: Vec<&str> = args.iter().copied().collect();
+    // Same opt-out as subprocess.rs's one-shot commands: a long-lived dev
+    // server has broader legitimate env needs, so it shares the widening knob.
+    let extra = std::env::var("DEVX_CHILD_ENV_EXTRA").ok();
     let mut child = Command::new(cmd)
         .args(&arg_refs)
         .current_dir(path)
+        // env_clear THEN allowlist THEN PORT — reversing this order would
+        // wipe PORT and the dev server would bind wrongly.
+        .env_clear()
+        .envs(filtered_env(std::env::vars(), extra.as_deref()))
         .env("PORT", port.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -394,5 +402,43 @@ mod tests {
             elapsed
         );
         eprintln!("concurrent poll test elapsed = {:?}", elapsed);
+    }
+
+    /// env_clear() must run BEFORE the allowlist, and PORT must be set AFTER
+    /// it — reversing either would leak a secret or wipe PORT, and the
+    /// latter would not show up in a unit test of filtered_env alone.
+    #[test]
+    fn dev_server_env_is_allowlisted_and_port_survives() {
+        let id = "test-env-allowlist";
+        let secret_name = "DEVX_TEST_SECRET_TOKEN";
+        let extra_name = "DEVX_TEST_EXTRA_VAR";
+        // SAFETY: no other test reads/writes these process-global names.
+        unsafe {
+            std::env::set_var(secret_name, "leak-me");
+            std::env::set_var(extra_name, "admit-me");
+            std::env::set_var("DEVX_CHILD_ENV_EXTRA", extra_name);
+        }
+
+        let config = json!({
+            "path": "/tmp",
+            "command": "sh -c env",
+            "port": 19913,
+        })
+        .to_string();
+        process_start(id, &config).expect("process_start failed");
+        thread::sleep(Duration::from_millis(300));
+        let output = process_output(id, "0").unwrap();
+
+        // SAFETY: matches the set_var calls above; no other test touches these.
+        unsafe {
+            std::env::remove_var(secret_name);
+            std::env::remove_var(extra_name);
+            std::env::remove_var("DEVX_CHILD_ENV_EXTRA");
+        }
+        cleanup(id);
+
+        assert!(output.contains("PORT=19913"), "PORT did not survive: {output}");
+        assert!(!output.contains(secret_name), "secret leaked into child env: {output}");
+        assert!(output.contains(extra_name), "opt-out extra was not re-admitted: {output}");
     }
 }

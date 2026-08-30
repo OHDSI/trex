@@ -20,6 +20,14 @@ export interface Orchestration {
   codeSessionId: string | null; // the shared Code agent session, once opened
   eventCursor: number; // position in the Code session's event stream
   appId: string | null; // devx app the Code session is scoped to (fixed per task)
+  // The devx chat id used to mirror an eve-transport turn into
+  // devx.chats/devx.messages for UI visibility — a DIFFERENT identifier from
+  // codeSessionId (which, on the eve transport, holds the eve session id, not
+  // a devx chat). Optional like `decisions` below: upsertOrchestration never
+  // writes this column (see setDevxChatId, which touches ONLY this column),
+  // so callers building an Orchestration to upsert don't need to supply it.
+  // readOrchestration always populates it (null when unset).
+  devxChatId?: string | null;
   // Optional, not required — upsertOrchestration never writes this column
   // (see below), so callers building an Orchestration to upsert don't need
   // to supply it. readOrchestration always populates it (with
@@ -34,12 +42,13 @@ interface Row {
   code_session_id: string | null;
   event_cursor: number | string;
   app_id: string | null;
+  devx_chat_id?: string | null;
   decisions?: Decision[] | null;
 }
 
 export async function readOrchestration(sql: QueryFn, sessionId: string): Promise<Orchestration | null> {
   const { rows } = await sql(
-    `SELECT session_id, code_session_id, event_cursor, app_id, decisions
+    `SELECT session_id, code_session_id, event_cursor, app_id, decisions, devx_chat_id
        FROM claw.orchestrations WHERE session_id = $1`,
     [sessionId],
   );
@@ -50,6 +59,7 @@ export async function readOrchestration(sql: QueryFn, sessionId: string): Promis
     codeSessionId: r.code_session_id,
     eventCursor: Number(r.event_cursor) || 0,
     appId: r.app_id ?? null,
+    devxChatId: r.devx_chat_id ?? null,
     decisions: Array.isArray(r.decisions) ? r.decisions : [],
   };
 }
@@ -85,6 +95,20 @@ export async function appendDecision(
      ON CONFLICT (session_id) DO UPDATE
        SET decisions = claw.orchestrations.decisions || $2::jsonb, updated_at = now()`,
     [sessionId, JSON.stringify({ at: new Date().toISOString(), ...d })],
+  );
+}
+
+// Sets the devx chat id used to mirror an eve-transport turn into
+// devx.chats/devx.messages, in isolation — same ON-CONFLICT-touches-only-this-
+// column shape as appendDecision, so this can never clobber the live coder
+// session id/app/cursor the main upsertOrchestration write owns.
+export async function setDevxChatId(sql: QueryFn, sessionId: string, devxChatId: string): Promise<void> {
+  await sql(
+    `INSERT INTO claw.orchestrations (session_id, code_session_id, event_cursor, app_id, devx_chat_id, updated_at)
+       VALUES ($1, NULL, 0, NULL, $2, now())
+     ON CONFLICT (session_id) DO UPDATE
+       SET devx_chat_id = EXCLUDED.devx_chat_id, updated_at = now()`,
+    [sessionId, devxChatId],
   );
 }
 

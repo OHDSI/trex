@@ -14,11 +14,33 @@
 // metadata.appId. Once the session exists the stored app wins; a different
 // `app` mid-task is ignored (one task = one thread = one app).
 import { defineTool } from "eve/tools";
-import { runCodeTurn, type CodeTurnArgs } from "../lib/code-stream.ts";
+import { apiBase, mintToken, runCodeTurn as runLegacyTurn, type CodeTurnArgs } from "../lib/code-stream.ts";
+import { runCodeTurn as runEveTurn, type PendingApproval, type TokioClient, type TurnEnd } from "../lib/code-session.ts";
+import { tokioClientFromGlobal } from "../lib/tokio.ts";
+import { chooseCoderTransport } from "../lib/code-route.ts";
+import { parkedReply, postApprovalGates } from "../lib/coder-approval.ts";
 import { readOrchestration, upsertOrchestration, readDecisions, renderDecisionLedger, type QueryFn } from "../lib/state.ts";
+import { mirrorEveTurn, type MirrorDeps } from "../lib/chat-mirror.ts";
 import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
 import { postChannelMessage } from "../lib/discord-rest.ts";
 import { parseTrailer, type HandoffTrailer } from "../lib/handoff-trailer.ts";
+
+// The eve transport (code-session.ts) reports HOW the turn ended and, when it
+// parked on a human approval, which requests are pending. The legacy /stream
+// transport reports neither — and a result without them means exactly what its
+// absence says: the turn ran to the end.
+export interface CodeTurnOutcome {
+  chatId: string;
+  replyText: string;
+  nextCursor?: number;
+  reason?: TurnEnd;
+  pending?: PendingApproval[];
+  // Set only by routeCodeTurn's real branches (absent from existing test
+  // stubs by design). Eve turns need mirroring into devx.chats/devx.messages
+  // for UI visibility (chat-mirror.ts); the legacy transport already writes
+  // those server-side and must never be mirrored a second time.
+  transport?: "legacy" | "eve";
+}
 
 interface Input {
   message: string;
@@ -40,13 +62,94 @@ export function effectiveUserId(ctxUserId: string | undefined, env: (k: string) 
   return fromEnv || undefined;
 }
 
+// Reads the coder account's provider the SAME way code-stream.ts's
+// ensureCoderProvider does (mint the same access token, GET the devx-api
+// settings mount) rather than inventing a second path to the same data.
+async function fetchCoderProvider(userId: string): Promise<string | undefined> {
+  const token = await mintToken(userId);
+  const res = await fetch(`${apiBase()}/settings`, { headers: { authorization: `Bearer ${token}` } });
+  if (!res.ok) throw new Error(`coder settings fetch failed: ${res.status}`);
+  const body = (await res.json()) as { provider?: unknown };
+  return typeof body.provider === "string" ? body.provider : undefined;
+}
+
+// Injected so routeCodeTurn's provider-based branch can be exercised in tests
+// without ever invoking mintToken/Trex.req (mintToken's dynamic import only
+// resolves inside a staged worker — see code-stream.ts's header — and
+// Trex.req does not exist outside one either).
+export interface TransportDeps {
+  getProvider?: (userId: string) => Promise<string | undefined>;
+  runLegacy?: (args: CodeTurnArgs) => Promise<CodeTurnOutcome>;
+  runEve?: typeof runEveTurn;
+  getClient?: () => TokioClient | null;
+}
+
+// Real production routing, used only when the caller supplies no runTurn
+// override (see askCore below). Exported for testing only.
+export async function routeCodeTurn(
+  args: CodeTurnArgs,
+  startCursor: number,
+  deps: TransportDeps = {},
+): Promise<CodeTurnOutcome> {
+  const getProvider = deps.getProvider ?? fetchCoderProvider;
+  const runLegacy = deps.runLegacy ?? runLegacyTurn;
+  const runEve = deps.runEve ?? runEveTurn;
+  const getClient = deps.getClient ?? tokioClientFromGlobal;
+
+  let transport: ReturnType<typeof chooseCoderTransport>;
+  try {
+    transport = chooseCoderTransport(await getProvider(args.userId));
+  } catch (e) {
+    // Mirrors effectiveLoop.ts's SETTINGS_FETCH_FAILURE_LOOP: an unreadable
+    // provider might be the sidecar, which eve cannot host, so an unknown
+    // configuration degrades to the transport that works for every provider.
+    console.error("claw: coder provider fetch failed, defaulting to legacy transport:", e);
+    transport = "legacy";
+  }
+  if (transport === "legacy") return { ...(await runLegacy(args)), transport: "legacy" };
+
+  // devx's buildUserMessage (agent.ts:583) materializes attachments only when
+  // userId AND appId AND attachments all hold — with no appId they vanish
+  // silently (the turn succeeds, no files land). Fail loudly here instead.
+  if (args.attachments?.length && !args.appId) {
+    throw new Error("askCodeAgent: attachments need an app (pass `app`) to reach the coder on the eve transport");
+  }
+  const client = getClient();
+  if (!client) throw new Error("askCodeAgent: Trex.req unavailable for the eve transport");
+  const onProgress = args.onProgress;
+  const result = await runEve(client, {
+    codeSessionId: args.chatId,
+    message: args.message,
+    userId: args.userId,
+    startCursor,
+    appId: args.appId,
+    attachments: args.attachments,
+    // eve's heartbeat carries no activity text (unlike streamTurn's chunk
+    // accumulation), so this uses the same fallback summarizeActivity gives
+    // before any prose has arrived.
+    onHeartbeat: onProgress ? () => onProgress("still working") : undefined,
+  });
+  return {
+    chatId: result.codeSessionId,
+    replyText: result.replyText,
+    nextCursor: result.nextCursor,
+    reason: result.reason,
+    pending: result.pending,
+    transport: "eve",
+  };
+}
+
 export async function askCore(
   sql: QueryFn,
   ctx: { sessionId: string; userId: string; channelId?: string },
   input: Input,
-  // Injected for testability (defaults to the real /stream turn); tests pass a
-  // stub so askCore's orchestration can be exercised without a live coder.
-  runTurn: (args: CodeTurnArgs) => Promise<{ chatId: string; replyText: string }> = runCodeTurn,
+  // Injected for testability; tests pass a stub so askCore's orchestration can
+  // be exercised without a live coder. Omitted (production) routes for real
+  // via routeCodeTurn, chosen by the account's provider.
+  runTurn?: (args: CodeTurnArgs) => Promise<CodeTurnOutcome>,
+  // Injected for testability, same as runTurn — production omits it and
+  // chat-mirror.ts's real mintToken/ensureChat/fetch are used.
+  mirrorDeps?: MirrorDeps,
 ): Promise<{ reply: string; trailer: HandoffTrailer | null }> {
   const prior = await readOrchestration(sql, ctx.sessionId);
   // codeSessionId now holds the devx chat id; the stored app wins once the chat
@@ -76,26 +179,54 @@ export async function askCore(
   // answered.
   const ledger = renderDecisionLedger(await readDecisions(sql, ctx.sessionId));
   const message = ledger ? `${ledger}${input.message}` : input.message;
-  const { chatId, replyText } = await runTurn({
+  const turnArgs: CodeTurnArgs = {
     chatId: prior?.codeSessionId ?? null,
     message,
     userId: ctx.userId,
     appId,
     ...(input.attachments?.length ? { attachments: input.attachments } : {}),
     ...(onProgress ? { onProgress } : {}),
-  });
-  // eventCursor is unused on the /stream path (each turn streams to completion);
-  // the column is retained for schema compatibility.
+  };
+  const outcome = runTurn ? await runTurn(turnArgs) : await routeCodeTurn(turnArgs, prior?.eventCursor ?? 0);
+  // The cursor is what a re-attach resumes from after a parked approval, so it
+  // must be stored on EVERY turn. The legacy /stream path reports none (each
+  // turn streams to completion there) and keeps writing 0.
   await upsertOrchestration(sql, {
     sessionId: ctx.sessionId,
-    codeSessionId: chatId,
-    eventCursor: 0,
+    codeSessionId: outcome.chatId,
+    eventCursor: outcome.nextCursor ?? 0,
     appId,
   });
+  // Eve turns never touch devx.chats/devx.messages themselves (see
+  // chat-mirror.ts) — mirror this turn so the devx UI shows it, same as the
+  // legacy transport already does server-side. Never for legacy: that would
+  // double-write what /stream already persisted.
+  if (outcome.transport === "eve") {
+    await mirrorEveTurn(sql, {
+      sessionId: ctx.sessionId,
+      userId: ctx.userId,
+      appId,
+      existingDevxChatId: prior?.devxChatId ?? null,
+      userMessage: message,
+      replyText: outcome.replyText,
+    }, mirrorDeps);
+  }
+  // Parked on a human: the coder's turn is still open, so the channel gets the
+  // gate and claw gets the requestIds — NOT a reply to relay. Sending the coder
+  // another message here would start a second turn on top of the parked one.
+  if (outcome.reason === "input-requested") {
+    const pending = outcome.pending ?? [];
+    const posted = await postApprovalGates(fetch, {
+      botToken: Deno.env.get("DISCORD_BOT_TOKEN"),
+      channelId: ctx.channelId,
+      pending,
+    });
+    return { reply: parkedReply(pending, posted), trailer: null };
+  }
   // The coder ends its reply with a machine trailer (see prompts_channel.ts's
   // <reply_contract>); strip it from what the channel sees and hand the parsed
   // facts back alongside.
-  const { trailer, body } = parseTrailer(replyText);
+  const { trailer, body } = parseTrailer(outcome.replyText);
   return { reply: body, trailer };
 }
 
@@ -107,16 +238,21 @@ export default defineTool({
     "(e.g. 'run your brainstorming skill and present options, do not write code, stop'; " +
     "then, after the channel approves, 'run writing-plans for option B, stop'; then, after " +
     "approval, 'implement the approved plan with subagent-driven-development'). Relay each " +
-    "reply to the channel and wait for the humans before the next step. Also use this to " +
-    "relay the participants' answers. Pass `app` (a devx app id from listApps) on the FIRST " +
-    "call when the task targets an existing app — it fixes the coder's workspace and project " +
-    "rules for the whole task and cannot be changed later.",
+    "reply to the channel and wait for the humans before the next step. Every message you " +
+    "send is YOUR OWN summary, in your own words, of what's needed — including a clarified " +
+    "answer, never a copy of a channel message. To the coder you are one person: never " +
+    "mention a team, channel, thread, participant, or Discord. Pass `app` (a devx app id " +
+    "from listApps) on the FIRST call when the task targets an existing app — it fixes the " +
+    "coder's workspace and project rules for the whole task and cannot be changed later.",
   inputSchema: {
     type: "object",
     properties: {
       message: {
         type: "string",
-        description: "The clear single-step instruction, answer, or message for the coding agent.",
+        description:
+          "The clear single-step instruction, answer, or message for the coding agent — always " +
+          "YOUR OWN summary in the first person singular, never a copied channel message, and " +
+          "never naming a team, channel, thread, participant, or Discord.",
       },
       app: {
         type: "string",

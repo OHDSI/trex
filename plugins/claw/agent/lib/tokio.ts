@@ -11,3 +11,11 @@ export function makeTokioClient(req: ReqFn, service = CODE_SERVICE): TokioClient
     },
   };
 }
+
+// The worker injects Trex.req; outside a Trex worker it is absent (tests build
+// their own TokioClient instead), so this reports null rather than throwing.
+export function tokioClientFromGlobal(service = CODE_SERVICE): TokioClient | null {
+  const trex = (globalThis as unknown as { Trex?: { req?: ReqFn } }).Trex;
+  if (typeof trex?.req !== "function") return null;
+  return makeTokioClient(trex.req.bind(trex), service);
+}

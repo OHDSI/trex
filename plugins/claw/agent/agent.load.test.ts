@@ -18,6 +18,9 @@ Deno.test("claw agent exposes its facilitator tools", async () => {
   // recordDecision must be loaded so claw can actually call it per
   // facilitate-coding-task.md's instruction.
   assertEquals(names.includes("recordDecision"), true);
+  // Without this the coder's own approval gates have no way back to it and its
+  // parked turn just times out.
+  assertEquals(names.includes("resolveCoderApproval"), true);
   // the old plan/build/ship tools are gone
   assertEquals(names.includes("dispatchToCode"), false);
   assertEquals(names.includes("shipIt"), false);

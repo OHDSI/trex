@@ -1,6 +1,8 @@
-import { assertEquals, assertStringIncludes } from "jsr:@std/assert";
-import { askCore } from "./askCodeAgent.ts";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "jsr:@std/assert";
+import askCodeAgentTool, { askCore, routeCodeTurn, type CodeTurnOutcome, type TransportDeps } from "./askCodeAgent.ts";
 import type { CodeTurnArgs } from "../lib/code-stream.ts";
+import type { TokioClient } from "../lib/code-session.ts";
+import type { MirrorDeps } from "../lib/chat-mirror.ts";
 
 function fakeSql() {
   const store = new Map<string, any>();
@@ -170,4 +172,356 @@ Deno.test("askCore returns a null trailer and the reply unchanged when the coder
   const out = await askCore(sql.fn, { sessionId: "s1", userId: "u1" }, { message: "go" }, turn.fn);
   assertEquals(out.reply, "Just prose, no trailer.");
   assertEquals(out.trailer, null);
+});
+
+// --- a coder turn that parks on a human approval ---------------------------
+
+// Stubs the EVE transport's richer result: how the turn ended, where the cursor
+// got to, and what it is parked on.
+function stubEveTurn(result: Partial<CodeTurnOutcome>) {
+  const seen: CodeTurnArgs[] = [];
+  const fn = (args: CodeTurnArgs) => {
+    seen.push(args);
+    return Promise.resolve({ chatId: "chat-1", replyText: "", ...result } as CodeTurnOutcome);
+  };
+  return { fn, seen };
+}
+
+async function withDiscord(fn: (posts: { url: string; body: Record<string, unknown> }[]) => Promise<void>) {
+  const originalFetch = globalThis.fetch;
+  const originalToken = Deno.env.get("DISCORD_BOT_TOKEN");
+  const posts: { url: string; body: Record<string, unknown> }[] = [];
+  try {
+    Deno.env.set("DISCORD_BOT_TOKEN", "tok-1");
+    globalThis.fetch = ((url: string, init?: RequestInit) => {
+      posts.push({ url: String(url), body: JSON.parse(String(init?.body ?? "{}")) });
+      return Promise.resolve(new Response(JSON.stringify({ id: "msg-1" }), { status: 200 }));
+    }) as typeof fetch;
+    await fn(posts);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalToken === undefined) Deno.env.delete("DISCORD_BOT_TOKEN");
+    else Deno.env.set("DISCORD_BOT_TOKEN", originalToken);
+  }
+}
+
+Deno.test("askCore posts the coder's approval gate to the thread and reports the park instead of a reply", async () => {
+  await withDiscord(async (posts) => {
+    const sql = fakeSql();
+    const turn = stubEveTurn({
+      nextCursor: 5,
+      reason: "input-requested",
+      pending: [{ requestId: "req-1", toolName: "runCommand", input: { cmd: "rm -rf build" } }],
+    });
+    const out = await askCore(
+      sql.fn,
+      { sessionId: "s1", userId: "u1", channelId: "chan-1" },
+      { message: "go" },
+      turn.fn,
+    );
+
+    assertEquals(posts.length, 1);
+    assertStringIncludes(posts[0].url, "/channels/chan-1/messages");
+    const row = (posts[0].body.components as Array<{ components: Array<Record<string, unknown>> }>)[0].components[0];
+    assertEquals(row.custom_id, "eve_choice");
+    assertStringIncludes(out.reply, "req-1");
+    assertStringIncludes(out.reply, "PAUSED");
+    assertEquals(out.trailer, null);
+    // The cursor the park reported is what a re-attach will resume from.
+    assertEquals(Number(sql.store.get("s1").event_cursor), 5);
+  });
+});
+
+Deno.test("askCore still hands the requestId over when there is no channel to render the gate in", async () => {
+  const sql = fakeSql();
+  const turn = stubEveTurn({
+    nextCursor: 2,
+    reason: "input-requested",
+    pending: [{ requestId: "req-1", toolName: "runCommand", input: {} }],
+  });
+  const out = await askCore(sql.fn, { sessionId: "s1", userId: "u1" }, { message: "go" }, turn.fn);
+  assertStringIncludes(out.reply, "req-1");
+  assertStringIncludes(out.reply, "resolveCoderApproval");
+});
+
+Deno.test("askCore stores the turn's cursor when the transport reports one, and 0 when it does not", async () => {
+  const eve = fakeSql();
+  await askCore(eve.fn, { sessionId: "s1", userId: "u1" }, { message: "go" }, stubEveTurn({
+    replyText: "done",
+    nextCursor: 12,
+    reason: "completed",
+  }).fn);
+  assertEquals(Number(eve.store.get("s1").event_cursor), 12);
+
+  const legacy = fakeSql();
+  await askCore(legacy.fn, { sessionId: "s1", userId: "u1" }, { message: "go" }, stubTurn("done").fn);
+  assertEquals(Number(legacy.store.get("s1").event_cursor), 0);
+});
+
+// --- routeCodeTurn: real provider-based routing wired for production --------
+// (askCore's own tests above always inject an explicit runTurn stub and so
+// never exercise this; these tests drive routeCodeTurn directly with fake
+// deps — never mintToken/Trex.req, which only resolve inside a staged worker.)
+
+function baseArgs(overrides: Partial<CodeTurnArgs> = {}): CodeTurnArgs {
+  return { chatId: null, message: "go", userId: "u1", appId: null, ...overrides };
+}
+
+function fakeClient(): TokioClient {
+  return { req: () => Promise.resolve(new Response("{}", { status: 200 })) };
+}
+
+Deno.test("routeCodeTurn calls the legacy transport for a claude-code account", async () => {
+  const seenLegacy: CodeTurnArgs[] = [];
+  const deps: TransportDeps = {
+    getProvider: () => Promise.resolve("claude-code"),
+    runLegacy: (args) => {
+      seenLegacy.push(args);
+      return Promise.resolve({ chatId: "chat-1", replyText: "ok" });
+    },
+    runEve: () => {
+      throw new Error("must not call eve for a claude-code account");
+    },
+  };
+  const out = await routeCodeTurn(baseArgs(), 0, deps);
+  assertEquals(out.replyText, "ok");
+  assertEquals(seenLegacy.length, 1);
+});
+
+Deno.test("routeCodeTurn calls the eve transport for a non-claude-code account", async () => {
+  const seenEve: unknown[] = [];
+  const deps: TransportDeps = {
+    getProvider: () => Promise.resolve("anthropic"),
+    runLegacy: () => {
+      throw new Error("must not call legacy for an anthropic account");
+    },
+    runEve: (_client, runArgs) => {
+      seenEve.push(runArgs);
+      return Promise.resolve({
+        codeSessionId: "sess-1",
+        replyText: "done",
+        nextCursor: 7,
+        reason: "completed",
+        pending: [],
+      });
+    },
+    getClient: () => fakeClient(),
+  };
+  const out = await routeCodeTurn(baseArgs({ chatId: "sess-0" }), 3, deps);
+  assertEquals(out.chatId, "sess-1");
+  assertEquals(out.replyText, "done");
+  assertEquals(out.nextCursor, 7);
+  assertEquals(out.reason, "completed");
+  assertEquals(seenEve.length, 1);
+  assertEquals((seenEve[0] as { codeSessionId: string }).codeSessionId, "sess-0");
+  assertEquals((seenEve[0] as { startCursor: number }).startCursor, 3);
+});
+
+Deno.test("routeCodeTurn falls back to legacy when the provider fetch fails", async () => {
+  const seenLegacy: CodeTurnArgs[] = [];
+  const deps: TransportDeps = {
+    getProvider: () => Promise.reject(new Error("settings fetch failed: 500")),
+    runLegacy: (args) => {
+      seenLegacy.push(args);
+      return Promise.resolve({ chatId: "chat-1", replyText: "ok" });
+    },
+    runEve: () => {
+      throw new Error("must not call eve when the provider is unreadable");
+    },
+  };
+  const out = await routeCodeTurn(baseArgs(), 0, deps);
+  assertEquals(out.replyText, "ok");
+  assertEquals(seenLegacy.length, 1);
+});
+
+Deno.test("routeCodeTurn refuses attachments with no appId on the eve transport instead of silently dropping them", async () => {
+  const deps: TransportDeps = {
+    getProvider: () => Promise.resolve("anthropic"),
+    runEve: () => {
+      throw new Error("must not reach the coder — attachments would be silently dropped");
+    },
+    getClient: () => fakeClient(),
+  };
+  const args = baseArgs({ appId: null, attachments: [{ name: "a.png", url: "https://x/a.png" }] });
+  await assertRejects(() => routeCodeTurn(args, 0, deps), Error, "attachments need an app");
+});
+
+Deno.test("routeCodeTurn allows attachments through on eve when an appId is present", async () => {
+  const seenEve: unknown[] = [];
+  const deps: TransportDeps = {
+    getProvider: () => Promise.resolve("anthropic"),
+    runEve: (_client, runArgs) => {
+      seenEve.push(runArgs);
+      return Promise.resolve({ codeSessionId: "sess-1", replyText: "ok", nextCursor: 1, reason: "completed", pending: [] });
+    },
+    getClient: () => fakeClient(),
+  };
+  const args = baseArgs({ appId: "app-1", attachments: [{ name: "a.png", url: "https://x/a.png" }] });
+  await routeCodeTurn(args, 0, deps);
+  assertEquals(seenEve.length, 1);
+});
+
+Deno.test("routeCodeTurn throws when eve is chosen but Trex.req is unavailable", async () => {
+  const deps: TransportDeps = {
+    getProvider: () => Promise.resolve("anthropic"),
+    runEve: () => {
+      throw new Error("must not call eve with no client");
+    },
+    getClient: () => null,
+  };
+  await assertRejects(() => routeCodeTurn(baseArgs(), 0, deps), Error, "Trex.req unavailable");
+});
+
+// --- devx-UI mirroring: eve turns only, never legacy ------------------------
+// (regression: PR #176's live devx-UI visibility was built on the legacy
+// transport's server-side /chats,/messages writes; the eve transport never
+// touches those tables on its own — see chat-mirror.ts.)
+
+// Like fakeSql above, but MERGES writes into a session's row instead of
+// overwriting it wholesale — askCore issues two distinct writes per eve turn
+// (the main orchestration upsert, and chat-mirror's dedicated devx_chat_id
+// write), which must coexist the same way they do against the real table.
+function fakeSqlMerging() {
+  const store = new Map<string, any>();
+  const fn = (sql: string, params: unknown[] = []) => {
+    if (sql.trim().startsWith("SELECT")) {
+      const r = store.get(String(params[0]));
+      return Promise.resolve({ rows: r ? [r] : [] });
+    }
+    const existing = store.get(String(params[0])) ?? { session_id: params[0] };
+    if (sql.includes("devx_chat_id = EXCLUDED.devx_chat_id")) {
+      store.set(String(params[0]), { ...existing, devx_chat_id: params[1] });
+    } else {
+      store.set(String(params[0]), {
+        ...existing,
+        code_session_id: params[1],
+        event_cursor: params[2],
+        app_id: params[3] ?? null,
+      });
+    }
+    return Promise.resolve({ rows: [] });
+  };
+  return { fn, store };
+}
+
+function stubEveTurnWithTransport(overrides: Partial<CodeTurnOutcome> = {}) {
+  return (_args: CodeTurnArgs): Promise<CodeTurnOutcome> =>
+    Promise.resolve({
+      chatId: "sess-1",
+      replyText: "done",
+      nextCursor: 1,
+      reason: "completed",
+      pending: [],
+      transport: "eve",
+      ...overrides,
+    });
+}
+
+Deno.test("askCore mirrors an eve turn into devx once and reuses the chat on the next turn", async () => {
+  const sql = fakeSqlMerging();
+  const ensureCalls: Array<string | null> = [];
+  const postedRoles: string[] = [];
+  const mirrorDeps: MirrorDeps = {
+    mintToken: () => Promise.resolve("tok"),
+    ensureChat: (_token, _appId, existingChatId) => {
+      ensureCalls.push(existingChatId);
+      return Promise.resolve("devx-chat-1");
+    },
+    fetch: ((_url: string, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      postedRoles.push(body.role);
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }) as typeof fetch,
+  };
+
+  await askCore(sql.fn, { sessionId: "s1", userId: "u1" }, { message: "go" }, stubEveTurnWithTransport(), mirrorDeps);
+  await askCore(sql.fn, { sessionId: "s1", userId: "u1" }, { message: "go again" }, stubEveTurnWithTransport(), mirrorDeps);
+
+  assertEquals(ensureCalls, [null, "devx-chat-1"]); // created once, reused on turn 2
+  assertEquals(postedRoles, ["user", "assistant", "user", "assistant"]);
+  assertEquals(sql.store.get("s1").devx_chat_id, "devx-chat-1");
+});
+
+Deno.test("askCore does not mirror a legacy-transport turn", async () => {
+  const sql = fakeSqlMerging();
+  let mintCalled = false;
+  const mirrorDeps: MirrorDeps = {
+    mintToken: () => {
+      mintCalled = true;
+      return Promise.resolve("tok");
+    },
+  };
+  const turn = stubTurn("ok", "chat-1"); // no `transport` field — legacy shape
+  await askCore(sql.fn, { sessionId: "s1", userId: "u1" }, { message: "go" }, turn.fn, mirrorDeps);
+  assertEquals(mintCalled, false);
+});
+
+Deno.test("askCore's turn result is intact even when eve mirroring fails outright (chat creation)", async () => {
+  const sql = fakeSqlMerging();
+  const mirrorDeps: MirrorDeps = { mintToken: () => Promise.reject(new Error("mint failed")) };
+  const out = await askCore(
+    sql.fn,
+    { sessionId: "s1", userId: "u1" },
+    { message: "go" },
+    stubEveTurnWithTransport({ replyText: "done" }),
+    mirrorDeps,
+  );
+  assertEquals(out.reply, "done");
+});
+
+Deno.test("askCore's turn result is intact even when eve mirroring's message POST fails", async () => {
+  const sql = fakeSqlMerging();
+  const mirrorDeps: MirrorDeps = {
+    mintToken: () => Promise.resolve("tok"),
+    ensureChat: () => Promise.resolve("devx-chat-1"),
+    fetch: (() => Promise.resolve(new Response("fail", { status: 500 }))) as typeof fetch,
+  };
+  const out = await askCore(
+    sql.fn,
+    { sessionId: "s1", userId: "u1" },
+    { message: "go" },
+    stubEveTurnWithTransport({ replyText: "done" }),
+    mirrorDeps,
+  );
+  assertEquals(out.reply, "done");
+});
+
+// --- Coder-voice contract: TEXT guard, not a behaviour guard -----------------
+//
+// This only asserts the PROMPT TEXT hasn't regressed — it cannot verify that
+// claw actually behaves this way at runtime (that needs a live model turn).
+// The real behavioural check is
+// plugins/claw/agent/evals/evals/modes/coder-gets-summary-not-transcript.eval.ts,
+// which drives claw against a seeded multi-participant discussion and asserts
+// on the RECORDED askCodeAgent argument — but that eval suite needs a live
+// stack and is not wired into any CI workflow (see evals/README.md), so
+// nothing runs it automatically today. This test exists so an edit that walks
+// the description back toward "relay the participants" (the exact instruction
+// that produced the leak — see git history on this file) fails the ordinary
+// `deno test` gate instead of silently reverting the contract.
+
+function messageInputDescription(): string {
+  const schema = askCodeAgentTool.inputSchema as { properties?: Record<string, { description?: unknown }> };
+  const description = schema.properties?.message?.description;
+  assert(typeof description === "string", "askCodeAgent's `message` input must have a string description");
+  return description;
+}
+
+Deno.test("askCodeAgent's tool description does not regress toward relaying the channel", () => {
+  const description = askCodeAgentTool.description;
+  assert(!description.toLowerCase().includes("relay the participants"), "must not reintroduce the transcript-relaying instruction");
+  assertStringIncludes(description, "YOUR OWN summary");
+  assertStringIncludes(description, "channel, thread, participant, or Discord");
+});
+
+Deno.test("askCodeAgent's message input description does not regress toward relaying the channel", () => {
+  const description = messageInputDescription();
+  assert(!description.toLowerCase().includes("relay the participants"), "must not reintroduce the transcript-relaying instruction");
+  assertStringIncludes(description, "YOUR OWN summary");
+  assertStringIncludes(description, "channel, thread, participant, or Discord");
+});
+
+Deno.test("instructions.md still has the Talking to the coder section", async () => {
+  const text = await Deno.readTextFile(new URL("../instructions.md", import.meta.url));
+  assertStringIncludes(text, "## Talking to the coder");
 });

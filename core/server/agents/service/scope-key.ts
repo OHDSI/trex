@@ -170,7 +170,7 @@ export function touchedPaths(toolName: string, input: unknown): string[] {
   return [];
 }
 
-export function deriveScopeKey(toolName: string, input: unknown): string {
+function scopeAction(toolName: string, input: unknown): string {
   const obj = input && typeof input === "object" ? input as Record<string, unknown> : {};
   if (toolName === "Bash") {
     return typeof obj.command === "string" ? bashScopeKey(obj.command) : "";
@@ -185,4 +185,19 @@ export function deriveScopeKey(toolName: string, input: unknown): string {
     return JSON.stringify([normalizePath(obj.source), normalizePath(obj.destination)]);
   }
   return "";
+}
+
+// Must contain no NUL (Postgres' `text` type rejects it outright, and this
+// key is stored/queried via store.createApproval/getToolConsent) and must
+// not be a value ensureWorkspace/ensureAppWorkspace could ever produce (an
+// absolute filesystem path), so it can never collide with a real workspace.
+const UNRESOLVED_WORKSPACE = "(unresolved)";
+
+// `workspace` is resolved by the CALLER (AgentConfig.resolveWorkspace) and
+// handed in already-resolved, keeping this pure/sync. Glued with the same
+// `+` bashScopeKey uses internally — approval-policy.ts's matchEscalate
+// splits the whole key on `+`, and any other separator risks fusing the
+// workspace onto the first executable (e.g. "sudo" -> "<ws>sudo").
+export function deriveScopeKey(toolName: string, input: unknown, workspace?: string): string {
+  return `${workspace ?? UNRESOLVED_WORKSPACE}+${scopeAction(toolName, input)}`;
 }

@@ -151,7 +151,7 @@ export async function resolveUserMessage(
   return await agent.config.buildUserMessage(base, hookCtx);
 }
 
-function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boolean): any {
+function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boolean, workspace: string | undefined): any {
   const schema = isZodSchema(def.inputSchema) ? def.inputSchema : jsonSchema(def.inputSchema);
   if (def.clientOnly) {
     // No execute: the AI SDK surfaces the call and the turn ends with
@@ -164,7 +164,10 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boo
     execute: async (input: unknown) => {
       if (def.needsApproval) {
         const { store, turnId, emit, userId, plugin, agentName } = ctx;
-        const scopeKey = deriveScopeKey(name, input);
+        // `workspace` (resolved once per buildSdkTools call, below) keys the
+        // STORED consent row — a grant for one app must not silently cover
+        // the same path in another under a shared bot identity.
+        const scopeKey = deriveScopeKey(name, input, workspace);
         // A sticky decision short-circuits the one-shot flow entirely.
         // Only consulted when there's an identity to key it on — an
         // anonymous session (no userId, e.g. no x-user-id header) has no
@@ -654,6 +657,21 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
   const { agent } = ctx;
   const depth = ctx.depth ?? 0;
 
+  // Resolved once per buildSdkTools call (same "once per turn, not per tool
+  // call" posture as channelBound/depth above it in handler.ts), not inside
+  // deriveScopeKey — that function stays pure/sync per scope-key.ts's
+  // contract. No turnId, or no resolveWorkspace configured, or a hook that
+  // itself can't resolve one all leave this undefined; deriveScopeKey keys
+  // that as its own distinct "unresolved" bucket rather than a wildcard.
+  const workspace = ctx.turnId && agent.config.resolveWorkspace
+    ? await agent.config.resolveWorkspace({
+      sessionId: ctx.sessionId,
+      turnId: ctx.turnId,
+      userId: ctx.userId,
+      metadata: ctx.metadata,
+    })
+    : undefined;
+
   // Step 1+2: merge static + dynamic ToolDefs before building any SDK tool
   // objects, so a dynamic tool goes through the same authoredTool() path
   // (needsApproval/clientOnly honored) as a static one.
@@ -722,7 +740,7 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
   const out: Record<string, any> = {};
   const filterDefs: Record<string, ToolDef> = { ...defs };
   for (const [name, def] of Object.entries(defs)) {
-    out[name] = authoredTool(name, def, ctx, !dynamicNames.has(name));
+    out[name] = authoredTool(name, def, ctx, !dynamicNames.has(name), workspace);
   }
 
   // Step 3: built-ins at top level only; authored/dynamic tools of the same
