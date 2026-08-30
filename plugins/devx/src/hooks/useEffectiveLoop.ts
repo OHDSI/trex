@@ -4,17 +4,28 @@
 // legacy) lives in ./effectiveLoop.ts's resolveEffectiveLoop, which is
 // characterization-tested by the Deno suite at
 // plugins/devx/agent/lib/effective_loop.test.ts.
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import * as api from "@/lib/api";
-import { resolveEffectiveLoop, SETTINGS_FETCH_FAILURE_LOOP, type EffectiveLoop } from "./effectiveLoop";
+import { resolveEffectiveLoop, SETTINGS_FETCH_FAILED, type EffectiveLoop } from "./effectiveLoop";
 
 export type { EffectiveLoop };
 
-export function useEffectiveLoop(): { loop: EffectiveLoop; resolved: boolean } {
-  const [state, setState] = useState<{ loop: EffectiveLoop; resolved: boolean }>({
-    loop: "legacy",
-    resolved: false,
-  });
+// Three states, not two: a failed settings/provider fetch is neither "still
+// loading" nor "resolved to a loop" — it must not guess a loop (see
+// SETTINGS_FETCH_FAILED). `retry` re-runs the fetch without a page reload.
+export type EffectiveLoopState =
+  | { status: "loading" }
+  | { status: "error"; retry: () => void }
+  | { status: "resolved"; loop: EffectiveLoop };
+
+export function useEffectiveLoop(): EffectiveLoopState {
+  const [state, setState] = useState<EffectiveLoopState>({ status: "loading" });
+  const [attempt, setAttempt] = useState(0);
+
+  const retry = useCallback(() => {
+    setState({ status: "loading" });
+    setAttempt((n) => n + 1);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -22,27 +33,25 @@ export function useEffectiveLoop(): { loop: EffectiveLoop; resolved: boolean } {
       .then(([settings, active]) => {
         if (cancelled) return;
         setState({
+          status: "resolved",
           loop: resolveEffectiveLoop({
             loop: settings?.loop,
             provider: active.provider,
           }),
-          resolved: true,
         });
       })
       .catch((err) => {
         // A FAILED fetch is not the same as an ABSENT settings row. A user
         // with no row resolves to "agents" (resolveEffectiveLoop, matching
         // V17's column default); a user whose settings/provider we could not
-        // read at all falls back to "legacy", because they may be on
-        // `claude-code` — the sidecar, for which eve's resolveModel throws —
-        // and we have no way to tell. See SETTINGS_FETCH_FAILURE_LOOP.
-        console.error("useEffectiveLoop: failed to resolve settings/provider, defaulting to legacy:", err);
-        if (!cancelled) setState({ loop: SETTINGS_FETCH_FAILURE_LOOP, resolved: true });
+        // read at all gets no guess at all — see SETTINGS_FETCH_FAILED.
+        console.error(`useEffectiveLoop: failed to resolve settings/provider (${SETTINGS_FETCH_FAILED}):`, err);
+        if (!cancelled) setState({ status: "error", retry });
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [attempt, retry]);
 
   return state;
 }

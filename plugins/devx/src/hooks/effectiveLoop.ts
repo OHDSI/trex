@@ -22,15 +22,14 @@
 // which tells them to switch to a bearer token.
 export type EffectiveLoop = "legacy" | "agents";
 
-// The loop a user gets when their settings/provider could NOT be read at all
-// (useEffectiveLoop's `.catch`). Deliberately NOT the same as an ABSENT
-// `loop` value, which resolves to "agents" below: a user whose provider row
-// we failed to fetch may be on `claude-code`, for which eve's resolveModel
-// throws — so an unreadable configuration must degrade to the loop that
-// works for EVERY provider, while a merely-unset flag follows V17's new
-// column default. Exported so the distinction is pinned by a test rather
-// than living only as a literal inside a React `.catch`.
-export const SETTINGS_FETCH_FAILURE_LOOP: EffectiveLoop = "legacy";
+// Sentinel useEffectiveLoop.ts's `.catch` sets when settings/provider could
+// NOT be read at all. This is a browser-side routing decision made before
+// any turn exists, not a turn to fail — and there is no safe loop to guess:
+// silently degrading to "legacy" used to work only because legacy accepted
+// every provider, a property Phase 4 removes. Deliberately NOT an
+// EffectiveLoop value, so it can't be mistaken for a resolved routing
+// decision; the UI renders it as a retryable error instead.
+export const SETTINGS_FETCH_FAILED = "settings-fetch-failed" as const;
 
 export interface ResolveEffectiveLoopInput {
   // devx.settings.loop, as returned by GET /settings. ABSENT (null/undefined/
