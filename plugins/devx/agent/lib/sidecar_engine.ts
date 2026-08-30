@@ -13,6 +13,7 @@
 import { ensureAppWorkspace, ensureWorkspace } from "../../functions/tools/workspace.ts";
 import { readMetadata } from "./context.ts";
 import { acceptDeclaredWorkspace, loadSessionScope } from "./session_scope.ts";
+import { UNAVAILABLE_TOOL_ERROR } from "../../functions/lib/eve_run.ts";
 // Type-only, erased at runtime — same posture as agent.ts's ToolDef import
 // (these types are not part of eve's public re-export surface).
 import type { AgentEngine, EngineTurn, HookCtx } from "../../../../core/server/agents/eve-shim/types.ts";
@@ -25,6 +26,27 @@ import { deriveScopeKey } from "../../../../core/server/agents/service/scope-key
 import { parseEscalateList, resolveEscalateFor } from "../../../../core/server/agents/service/approval-policy.ts";
 
 export const SIDECAR_ENGINE_NAME = "claude-code";
+
+// devx tool names the delegated loop can actually run. The `tools` option
+// fn-claude-code/server.js sets names the SDK's BUILT-INS, so only a devx tool
+// whose name IS an SDK built-in survives the hop; every other devx tool
+// (CodeSearch, Git*, SearchReplace, Browser*, KB*, Figma*, …) exists on the
+// model loop alone, and the sidecar registers only the kb/ask MCP servers, so
+// there is no equivalent for it either.
+const DELEGATED_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "Read", "Write", "Edit", "Bash", "Glob", "Grep",
+  "WebFetch", "WebSearch", "TodoWrite", "Skill",
+]);
+
+/**
+ * The declared tools this path would silently drop. Returned so they can be
+ * recorded as denials — a review that ran 3 of its 7 tools must never be
+ * byte-identical, in devx.agent_results, to one that ran all 7.
+ */
+export function unavailableDelegatedTools(allowedTools: readonly string[] | undefined): string[] {
+  if (!allowedTools) return [];
+  return [...new Set(allowedTools)].filter((name) => !DELEGATED_TOOL_NAMES.has(name));
+}
 
 // The subset of the SDK's message shapes core's translator reads
 // (service/engine/events.ts's SdkMessageLike). Declared rather than imported
@@ -224,16 +246,9 @@ async function* runSidecarTurn(
   const resolvePermission = async (
     req: { id: string; toolName: string; input: Record<string, unknown> },
   ): Promise<PermissionDecision> => {
-    // The SDK's argument names are not devx's, and deriveScopeKey reads
-    // devx's — an unmapped shape yields an empty action half, which gates.
-    // The session's declared allowlist (V14), checked before the gate so no
-    // stored consent can override it. Second of two layers now: the allowlist
-    // also reaches the sidecar's query() as the SDK `tools` option, which drops
-    // every unlisted BUILT-IN from the model's context — including the
-    // read-only ones (Read/Glob/Grep) the SDK auto-approves in `default` mode
-    // and which therefore never reach this callback. This check still earns its
-    // place: `tools` governs built-ins only, so the kb/ask MCP tools are caught
-    // only here, and it is what survives if the option is ever dropped.
+    // Second of two allowlist layers, checked before the gate so no stored
+    // consent can override it: the SDK `tools` option governs BUILT-INS only,
+    // so the kb/ask MCP tools are caught only here.
     if (scope.allowedTools && !scope.allowedTools.includes(req.toolName)) {
       return { behavior: "deny", message: `${req.toolName} is not in this session's tool allowlist` };
     }
@@ -262,6 +277,28 @@ async function* runSidecarTurn(
     // consent, never to rewrite the call.
     return refusal ? { behavior: "deny", message: refusal.error } : { behavior: "allow", updatedInput: req.input };
   };
+
+  // Do not silently degrade: a declared tool this path cannot provide is never
+  // CALLED, so it produces no result of its own and would leave no trace at
+  // all. Publishing one failed action.result per tool is what carries it into
+  // eve_run.ts's `denials`, and from there into devx.agent_results.denials, the
+  // plan-status guard and the Problems-tab banner — the same durability the
+  // approval denials already use.
+  for (const toolName of unavailableDelegatedTools(scope.allowedTools)) {
+    publish(turn.sessionId, {
+      type: "action.result",
+      data: {
+        turnId: turn.turnId,
+        result: {
+          kind: "tool-result",
+          callId: `unavailable:${turn.turnId}:${toolName}`,
+          toolName,
+          output: { error: `${toolName} ${UNAVAILABLE_TOOL_ERROR} (${SIDECAR_ENGINE_NAME})` },
+        },
+        status: "failed",
+      },
+    });
+  }
 
   const queue = messageQueue();
   let usage: { input_tokens?: number; output_tokens?: number } | undefined;

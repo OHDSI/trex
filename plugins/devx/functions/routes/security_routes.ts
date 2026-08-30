@@ -13,6 +13,13 @@ import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readP
 import { isNoKeyProvider, removedProviderResponse } from "../provider_support.ts";
 import { classifyCoderError } from "../error_codes.ts";
 import { bearerFromRequest, denialSummary, runOnEve } from "../lib/eve_run.ts";
+import {
+  CODE_REVIEW_TOOLS,
+  DESIGN_REVIEW_TOOLS,
+  DOCS_UPDATE_TOOLS,
+  QA_REVIEW_TOOLS,
+  SECURITY_REVIEW_TOOLS,
+} from "./review_tools.ts";
 
 const EXCLUDED_DIRS = new Set([
   "node_modules", ".git", "dist", "build", ".next", ".venv", "venv",
@@ -20,35 +27,6 @@ const EXCLUDED_DIRS = new Set([
 ]);
 
 const CODE_EXTENSIONS = /\.(ts|tsx|js|jsx|mjs|cjs|json|env|yaml|yml|py|sql|html|css|vue|svelte)$/;
-
-// Tool allowlists per review type
-const CODE_REVIEW_TOOLS = [
-  "Read", "Glob", "Grep", "CodeSearch", "GitDiff", "GitLog", "GitStatus",
-];
-const SECURITY_REVIEW_TOOLS = [
-  "Read", "Glob", "Grep", "CodeSearch", "GitDiff", "GitLog", "GitStatus",
-];
-const QA_REVIEW_TOOLS = [
-  // Screenshot lets a QA finding carry visual evidence; without it a bug report is
-  // prose only. BrowserEvaluate doubles as the console/pageerror capture channel.
-  "BrowserNavigate", "BrowserClick", "BrowserFill", "BrowserGetText", "BrowserEvaluate",
-  "BrowserScreenshot",
-  "Read", "Glob", "Grep", "GitDiff",
-];
-const DESIGN_REVIEW_TOOLS = [
-  // BrowserEvaluate is what makes the design review measurable rather than impressionistic:
-  // it can read computed styles (font stacks, contrast, touch-target sizes) and resize the
-  // viewport, without which the Responsive Design category cannot be honestly assessed.
-  "BrowserNavigate", "BrowserClick", "BrowserScreenshot", "BrowserGetText", "BrowserEvaluate",
-  "Read", "Glob", "Grep", "GitDiff",
-];
-const DOCS_UPDATE_TOOLS = [
-  // The one agent in this file that WRITES: it adds/updates pages in the app's
-  // documentation website (d2e: docs/website), so it needs Write/Edit/SearchReplace
-  // on top of the explore set the code review uses.
-  "Read", "Glob", "Grep", "CodeSearch", "GitDiff", "GitLog", "GitStatus",
-  "Write", "Edit", "SearchReplace",
-];
 
 export async function handleSecurityRoutes(path, method, req, userId, sql, corsHeaders) {
   // POST /apps/:id/security/scan — fast npm audit + secret scan (unchanged)
@@ -133,7 +111,7 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
     parseFindings: (text: string) => { title: string; level: string; description: string }[];
     table: string;
     eventPrefix: string;
-    allowedTools: string[];
+    allowedTools: readonly string[];
   }) {
     // Pre-flight provider gate. The model itself is now resolved inside the
     // eve devx agent (agent.ts's resolveModel, off the same rows) — this is

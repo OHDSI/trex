@@ -47,10 +47,11 @@ function scripted(events: unknown[]) {
     return Promise.resolve(new Response("{}", { status: 202 }));
   };
 
+  // The scope UPDATE carries RETURNING id — a zero-row answer refuses the turn.
   const sql = (query: string, params: unknown[] = []) => {
     log.push(`sql ${query.trim().split(/\s+/).slice(0, 3).join(" ")}`);
     updates.push({ query, params });
-    return Promise.resolve({ rows: [] });
+    return Promise.resolve({ rows: [{ id: "s-1" }] });
   };
 
   return { fetchImpl, sql, calls, log, updates };

@@ -27,6 +27,16 @@ const CLAUDE_PROCESS = "claude-code-node-server";
 // which is what actually applies it during prompt assembly.
 export { buildAskQuestionRule } from "./coder_context.ts";
 
+/**
+ * The `allowedTools` value put on the wire to the sidecar. An EMPTY declared
+ * allowlist means "no built-ins" and must survive as `[]`; only an ABSENT one
+ * leaves the SDK preset alone. A truthiness test here (`?.length ? … :
+ * undefined`) inverts that and hands a declared-nothing session every tool.
+ */
+export function sidecarAllowedTools(allowedTools) {
+  return Array.isArray(allowedTools) ? [...allowedTools] : undefined;
+}
+
 export async function ensureClaudeCodeServer() {
   try {
     const raw = await duckdb(`SELECT * FROM trex_devx_process_status('${CLAUDE_PROCESS}', '')`);
@@ -238,7 +248,7 @@ export async function streamClaudeCodeChat({
         cwd: workspacePath,
         // Restricts the SDK's built-in tool set (server.js maps it to `tools`).
         // Sent only when declared, so an unrestricted session keeps the preset.
-        allowedTools: Array.isArray(allowedTools) ? [...allowedTools] : undefined,
+        allowedTools: sidecarAllowedTools(allowedTools),
         // Resume each chat's OWN claude session — a single global session would
         // bleed context across chats and let one bad session break all of them.
         chatId,

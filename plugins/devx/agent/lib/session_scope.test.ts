@@ -4,8 +4,15 @@
 // these tests pin the two traps: an EMPTY allowlist means "no tools" (not
 // "all tools"), and a declared workspace is honoured only when it is a value
 // devx itself could have produced.
-import { assert, assertEquals } from "jsr:@std/assert";
-import { acceptDeclaredWorkspace, loadSessionScope, parseSessionScopeRow, peekSessionScope, peekSessionScopeForCtx } from "./session_scope.ts";
+import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
+import {
+  acceptDeclaredWorkspace,
+  isUndefinedColumn,
+  loadSessionScope,
+  parseSessionScopeRow,
+  peekSessionScope,
+  peekSessionScopeForCtx,
+} from "./session_scope.ts";
 import { getAppWorkspacePath, getRunWorktreePath, getWorkspacePath } from "../../functions/tools/workspace.ts";
 
 const rows = (row: unknown) => () => Promise.resolve({ rows: row === undefined ? [] : [row] });
@@ -48,14 +55,49 @@ Deno.test("loadSessionScope: reads the row once per session and answers peek syn
 });
 
 // A deployment whose agents.sessions predates V14 has no such columns: the
-// SELECT errors. That must read as "nothing declared" (today's behaviour),
-// not fail every turn.
+// SELECT errors with SQLSTATE 42703. THAT must read as "nothing declared"
+// (today's behaviour), not fail every turn.
+function pgError(code: string, message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code });
+}
+
 Deno.test("loadSessionScope: a failing read (pre-V14 columns) is nothing-declared, not a thrown turn", async () => {
-  const sql = () => Promise.reject(new Error(`column "tool_allowlist" does not exist`));
+  const sql = () => Promise.reject(pgError("42703", `column "tool_allowlist" does not exist`));
   const scope = await loadSessionScope("s-scope-premigration", sql);
   assertEquals(scope.allowedTools, undefined);
   assertEquals(scope.workspace, undefined);
   assertEquals(peekSessionScope("s-scope-premigration")?.allowedTools, undefined);
+});
+
+// Whole-branch review must-fix 3: the catch used to swallow ANY error into
+// "nothing declared" AND cache it for the worker's lifetime. A transient blip on
+// a session's first turn therefore dropped the allowlist and the workspace
+// together - and sidecar_engine.ts awaits the same value, so a claude-code plan
+// run would then get the full SDK preset and ensureAppWorkspace, mutating the
+// MAIN app tree with unrestricted tools. Failing the turn is the same fail-safe
+// posture agent.ts takes on a cold snapshot.
+Deno.test("loadSessionScope: a transient read failure fails the turn rather than silently unrestricting it", async () => {
+  const sql = () => Promise.reject(pgError("57P01", "terminating connection due to administrator command"));
+  await assertRejects(() => loadSessionScope("s-scope-blip", sql), Error, "terminating connection");
+  // And it is NOT cached: the next turn re-reads and gets the real scope.
+  assertEquals(peekSessionScope("s-scope-blip"), undefined);
+  const ok = rows({ tool_allowlist: ["Read"], tool_allowlist_declared: true, workspace_path: "" });
+  assertEquals((await loadSessionScope("s-scope-blip", ok)).allowedTools, ["Read"]);
+});
+
+Deno.test("loadSessionScope: a query fn that throws synchronously is still surfaced, not swallowed", async () => {
+  const boom = () => {
+    throw pgError("08006", "connection failure");
+  };
+  await assertRejects(() => loadSessionScope("s-scope-sync-throw", boom), Error, "connection failure");
+  assertEquals(peekSessionScope("s-scope-sync-throw"), undefined);
+});
+
+Deno.test("isUndefinedColumn: only SQLSTATE 42703, never a message that merely looks like one", () => {
+  assert(isUndefinedColumn(pgError("42703", "column x does not exist")));
+  assert(!isUndefinedColumn(new Error(`column "tool_allowlist" does not exist`)));
+  assert(!isUndefinedColumn(pgError("42P01", "relation does not exist")));
+  assert(!isUndefinedColumn(undefined));
 });
 
 Deno.test("loadSessionScope: a session with no row at all is nothing-declared", async () => {

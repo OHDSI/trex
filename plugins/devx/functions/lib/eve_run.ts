@@ -1,16 +1,9 @@
-// Runs ONE devx turn on eve's agent runtime and returns what
-// streamAgentChat used to return, so security reviews (routes/
-// security_routes.ts) and autonomous runs (index.ts) share one seam instead
-// of hand-rolling HTTP each. Modelled on plugins/claw/agent/lib/
-// code-session.ts, the only other client of this API.
+// Runs ONE devx turn on eve's agent runtime, so security reviews (routes/
+// security_routes.ts) and autonomous runs (index.ts) share one seam.
 //
 // Plain fetch, not Trex.req: the inter-service channel buffers a whole
-// response (ext/trex/js/trex_lib.js's req) and these turns run for minutes —
-// the same reason plugins/d2esupport/agent/lib/claw-session.ts uses fetch.
-//
-// No import from core/: functions/ cannot (it breaks the staged worker, which
-// has no node_modules — deno tests do not catch it). The event shapes come
-// from eve_sse.ts's local declarations.
+// response and these turns run for minutes. No import from core/ either —
+// functions/ cannot, and deno tests do not catch it.
 
 import { type DevxSseFrame, type EveEvent, toDevxSse } from "./eve_sse.ts";
 
@@ -23,6 +16,12 @@ const DEFAULT_TIMEOUT_MS = 90 * 60_000;
 // the tool's result, the sidecar as a permission_denied that engine/events.ts
 // translates into the same `{ error }` output.
 export const NO_APPROVER_ERROR = "requires approval but this session has no approver";
+
+// agent/lib/sidecar_engine.ts's marker for a declared tool the delegated
+// (claude-code) loop cannot provide at all. Such a tool is never CALLED, so it
+// produces no action.result of its own — the engine publishes one, and this is
+// what tells the two apart from an ordinary tool error.
+export const UNAVAILABLE_TOOL_ERROR = "is not available on this session's execution path";
 
 // Kinds the native runner emits that eve_sse.ts's union does not carry (it
 // mirrors the external-engine translation). Terminal handling reads these, so
@@ -48,7 +47,7 @@ export interface RunOnEveOpts {
   prompt: string;
   /** Declared on the session row; agent.ts's filterTools enforces it. An EMPTY
    * array declares "no tools" — only `undefined` is "no restriction". */
-  allowedTools?: string[] | null;
+  allowedTools?: readonly string[] | null;
   /** Prepended to the message; eve's devx loop refuses a client-supplied system prompt. */
   skillContext?: string;
   /** Declared on the session row. Honoured only when it round-trips through
@@ -95,18 +94,36 @@ function buildMetadata(opts: RunOnEveOpts): Record<string, unknown> {
 // before the tool set is built, so a turn posted first runs unrestricted in
 // the derived workspace — the regression V14 exists to prevent.
 async function writeSessionScope(opts: RunOnEveOpts, sessionId: string): Promise<void> {
-  const allowlist = Array.isArray(opts.allowedTools) ? opts.allowedTools : null;
+  const allowlist = Array.isArray(opts.allowedTools) ? [...opts.allowedTools] : null;
   const workspace = opts.workspacePathOverride ?? "";
   if (!allowlist && !workspace) return;
   if (!opts.sql) {
     throw new Error("runOnEve: a declared tool allowlist or workspace needs `sql` to write it onto the session row");
   }
-  await opts.sql(
+  // activated_tools: an explicit allowlist outranks deferral, which is only a
+  // context-size optimisation. Deferral runs AFTER filterTools (toolset.ts
+  // Step 4 then Step 6), so an allowlisted tool that is also deferred is
+  // dropped outright, and ToolSearch cannot recover it — it is not allowlisted
+  // itself, and activation only takes effect on the NEXT turn, while a review
+  // is a single turn. Pre-activating the declared set is what puts those tools
+  // in THIS turn's tool set. Written in the same statement, before the turn is
+  // posted, for exactly the ordering reason above.
+  const written = await opts.sql(
     `UPDATE agents.sessions
-        SET tool_allowlist = $1::text[], tool_allowlist_declared = $2, workspace_path = $3
-      WHERE id = $4`,
+        SET tool_allowlist = $1::text[],
+            tool_allowlist_declared = $2,
+            workspace_path = $3,
+            activated_tools = CASE WHEN $2 THEN $1::text[] ELSE activated_tools END
+      WHERE id = $4
+      RETURNING id`,
     [allowlist ?? [], allowlist !== null, workspace, sessionId],
   );
+  // A zero-row UPDATE is not an error to Postgres, and the turn would then post
+  // unrestricted into the derived workspace — the regression V14 exists to
+  // prevent, with the ordering proven and the effect not.
+  if (written.rows.length === 0) {
+    throw new Error(`runOnEve: declared scope matched no agents.sessions row (${sessionId}) — refusing to start the turn`);
+  }
 }
 
 /** The caller's own bearer token, for a loopback call made on their behalf.
@@ -116,12 +133,18 @@ export function bearerFromRequest(req: Request): string | undefined {
   return match ? match[1] : undefined;
 }
 
-/** One line naming what eve refused for want of an approver, so a run that
- * completed WITHOUT its hard-tier tools is not mistaken for a clean one. */
-export function denialSummary(denials: EveDenial[]): string | null {
+/** One line naming every declared tool that did not run, so a result produced
+ * WITHOUT them is never mistaken for a clean one. */
+export function denialSummary(denials: readonly EveDenial[]): string | null {
   if (denials.length === 0) return null;
   const tools = [...new Set(denials.map((d) => d.toolName))].join(", ");
-  return `${denials.length} tool call(s) denied — this run is unattended and has no approver: ${tools}`;
+  const why = [
+    denials.some((d) => d.reason.includes(NO_APPROVER_ERROR)) ? "this run is unattended and has no approver" : null,
+    denials.some((d) => d.reason.includes(UNAVAILABLE_TOOL_ERROR))
+      ? "this session's execution path cannot provide every declared tool"
+      : null,
+  ].filter((s): s is string => s !== null).join("; ");
+  return `${denials.length} declared tool(s) did not run — treat this result as partial (${why}): ${tools}`;
 }
 
 // Legacy passed skillContext into the system prompt; eve's devx loop
@@ -132,10 +155,14 @@ function buildMessage(opts: RunOnEveOpts): string {
   return context ? `<instruction-context>\n${context}\n</instruction-context>\n\n${opts.prompt}` : opts.prompt;
 }
 
+// Both ways a declared tool can fail to run: refused by the approval gate, and
+// absent from the loop that was asked to run it. Matching only the first made
+// an allowlist the delegated path could not honour completely invisible.
 function denialReason(output: unknown): string | null {
   if (!output || typeof output !== "object") return null;
   const error = (output as { error?: unknown }).error;
-  return typeof error === "string" && error.includes(NO_APPROVER_ERROR) ? error : null;
+  if (typeof error !== "string") return null;
+  return error.includes(NO_APPROVER_ERROR) || error.includes(UNAVAILABLE_TOOL_ERROR) ? error : null;
 }
 
 export async function runOnEve(opts: RunOnEveOpts): Promise<RunOnEveResult> {

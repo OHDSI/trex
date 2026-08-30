@@ -1,5 +1,12 @@
 import { assert, assertEquals } from "jsr:@std/assert";
-import { createSidecarEngine, type PermissionDecision, type SidecarStream, toSdkMessage } from "./sidecar_engine.ts";
+import {
+  createSidecarEngine,
+  type PermissionDecision,
+  type SidecarStream,
+  toSdkMessage,
+  unavailableDelegatedTools,
+} from "./sidecar_engine.ts";
+import { UNAVAILABLE_TOOL_ERROR } from "../../functions/lib/eve_run.ts";
 import type { HookCtx } from "../../../../core/server/agents/eve-shim/types.ts";
 import { createSdkTranslator } from "../../../../core/server/agents/service/engine/events.ts";
 import { subscribe } from "../../../../core/server/agents/service/stream.ts";
@@ -461,4 +468,70 @@ Deno.test("sidecar engine: an undeclared allowlist forwards nothing, leaving the
     scopedSql({ tool_allowlist: [], tool_allowlist_declared: false, workspace_path: "" }),
   );
   assertEquals(allowedTools, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Whole-branch review must-fix 2. The allowlist is devx's tool vocabulary, but
+// on this path it is spent as SDK BUILT-IN names (server.js's `tools` option).
+// CodeSearch, Git*, SearchReplace and every Browser* have no built-in and no
+// MCP equivalent — the sidecar registers only kb/ask — so they simply vanish,
+// and a tool merely ABSENT produces no signal at all. Recorded as denials
+// instead, which is what carries them into devx.agent_results.denials, the
+// plan-status guard and the Problems-tab banner.
+// ---------------------------------------------------------------------------
+
+Deno.test("unavailableDelegatedTools: names the devx tools the SDK's built-in set cannot cover", () => {
+  assertEquals(
+    unavailableDelegatedTools(["Read", "Glob", "Grep", "CodeSearch", "GitDiff", "GitLog", "GitStatus"]),
+    ["CodeSearch", "GitDiff", "GitLog", "GitStatus"],
+  );
+  // Write/Edit ARE built-ins; SearchReplace is devx's own name for the same idea
+  // and is not, so it must not be waved through on resemblance.
+  assertEquals(unavailableDelegatedTools(["Write", "Edit", "SearchReplace"]), ["SearchReplace"]);
+  // An undeclared allowlist restricts nothing, so nothing is missing.
+  assertEquals(unavailableDelegatedTools(undefined), []);
+  // A declared EMPTY allowlist declares no tools — also nothing missing.
+  assertEquals(unavailableDelegatedTools([]), []);
+});
+
+async function publishedDenials(session: string, sql: HookCtx["sql"]): Promise<AgentEvent[]> {
+  const seen: AgentEvent[] = [];
+  const stop = subscribe(session, (e) => seen.push(e));
+  try {
+    await runScoped(session, sql);
+  } finally {
+    stop();
+  }
+  return seen.filter((e) => e.type === "action.result");
+}
+
+Deno.test("sidecar engine: a QA review's browser tools are recorded as denials, not dropped in silence", async () => {
+  const declared = ["BrowserNavigate", "BrowserClick", "BrowserScreenshot", "Read", "Glob", "Grep", "GitDiff"];
+  const results = await publishedDenials(
+    "s-eng-unavailable",
+    scopedSql({ tool_allowlist: declared, tool_allowlist_declared: true, workspace_path: "" }),
+  );
+
+  assertEquals(
+    results.map((e) => (e.data as { result: { toolName: string } }).result.toolName),
+    ["BrowserNavigate", "BrowserClick", "BrowserScreenshot", "GitDiff"],
+  );
+  for (const e of results) {
+    assertEquals((e.data as { status: string }).status, "failed");
+    const output = (e.data as { result: { output: unknown } }).result.output as { error: string };
+    assert(output.error.includes(UNAVAILABLE_TOOL_ERROR), `unrecognisable denial: ${output.error}`);
+  }
+});
+
+Deno.test("sidecar engine: an allowlist this path can fully honour reports nothing", async () => {
+  const results = await publishedDenials(
+    "s-eng-available",
+    scopedSql({ tool_allowlist: ["Read", "Glob", "Grep", "Bash"], tool_allowlist_declared: true, workspace_path: "" }),
+  );
+  assertEquals(results, []);
+});
+
+Deno.test("sidecar engine: an undeclared allowlist reports nothing (it restricts nothing)", async () => {
+  const results = await publishedDenials("s-eng-available-none", scopedSql({ workspace_path: "" }));
+  assertEquals(results, []);
 });

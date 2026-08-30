@@ -89,7 +89,10 @@ Deno.test("resolveWorkspace: a traversal or foreign workspace is rejected and fa
 // A pre-V14 row has no columns to read: the SELECT errors, and the turn must
 // resolve exactly the workspace it does today.
 Deno.test("resolveWorkspace: a pre-migration session resolves the derived workspace, unchanged", async () => {
-  const failing: QueryFn = () => Promise.reject(new Error(`column "workspace_path" does not exist`));
+  // SQLSTATE 42703 (undefined_column) is the ONLY failure read as "nothing
+  // declared"; anything else now fails the turn (session_scope.ts).
+  const failing: QueryFn = () =>
+    Promise.reject(Object.assign(new Error(`column "workspace_path" does not exist`), { code: "42703" }));
   await loadSessionScope("s-rw-premigration", failing);
   assertEquals(
     await resolveWorkspace(info("u-rw-7", { appId: "a1" }, "s-rw-premigration")),

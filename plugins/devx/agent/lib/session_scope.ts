@@ -1,13 +1,9 @@
 // The scope a devx session declares AT CREATION (agents.sessions, V14): the
-// tool allowlist filterTools enforces and the workspace resolveWorkspace /
-// context.ts honour on the model loop, and sidecar_engine.ts applies on the
-// delegated (claude-code) loop, which runs neither of those hooks.
-// Read from the session row, NEVER from ctx.metadata — a
-// restriction the model can restate per turn is one it can widen. Same posture
-// as V13's approver_reachable (store.ts's isApproverReachable).
-//
-// Type-only import, same posture as agent.ts's: erased at build/runtime, so
-// no real dependency on core is created.
+// tool allowlist filterTools enforces and the workspace resolveWorkspace
+// honours on the model loop, and sidecar_engine.ts applies on the delegated
+// (claude-code) loop, which runs neither hook. Read from the session row,
+// NEVER from ctx.metadata — a restriction the model can restate per turn is
+// one it can widen.
 import type { QueryFn } from "../../../../core/server/agents/eve-shim/types.ts";
 import { getRunWorktreePath } from "../../functions/tools/workspace.ts";
 
@@ -57,6 +53,18 @@ function remember(sessionId: string, scope: SessionScope): SessionScope {
   return scope;
 }
 
+// node-postgres surfaces the server's SQLSTATE on the error's `code` (the pool
+// is created in core/server/agents/service/index.ts).
+function pgErrorCode(e: unknown): string | undefined {
+  const code = (e as { code?: unknown } | null | undefined)?.code;
+  return typeof code === "string" ? code : undefined;
+}
+
+/** 42703 = undefined_column: agents.sessions predates V14. */
+export function isUndefinedColumn(e: unknown): boolean {
+  return pgErrorCode(e) === "42703";
+}
+
 export function loadSessionScope(sessionId: string, sql: QueryFn, ctx?: object): Promise<SessionScope> {
   const pin = (s: SessionScope) => {
     if (ctx) byCtx.set(ctx, s);
@@ -76,11 +84,14 @@ export function loadSessionScope(sessionId: string, sql: QueryFn, ctx?: object):
       )
     )
     .then((r) => remember(sessionId, parseSessionScopeRow(r.rows[0])))
-    // A deployment whose agents.sessions predates V14 has no such columns and
-    // errors here. That is "nothing declared" — today's behaviour — and it is
-    // cached, so the whole session does not re-query on every turn.
+    // ONLY the pre-V14 shape (undefined_column) is "nothing declared", and only
+    // that is cached. Any other failure — a connection blip on the first turn —
+    // would otherwise drop the allowlist AND the workspace for the worker's
+    // whole lifetime, so it fails the turn instead: same fail-safe posture as
+    // agent.ts's filterTools throw on a cold snapshot.
     .catch((e) => {
-      console.log(`devx: session scope unreadable for ${sessionId} (${e instanceof Error ? e.message : String(e)}) — treating as nothing declared`);
+      if (!isUndefinedColumn(e)) throw e;
+      console.log(`devx: session ${sessionId} predates V14 (${pgErrorCode(e)}) — treating as nothing declared`);
       return remember(sessionId, NOTHING_DECLARED);
     })
     .finally(() => inFlight.delete(sessionId));
@@ -102,16 +113,12 @@ export function peekSessionScopeForCtx(ctx: object, sessionId: string): SessionS
 
 /**
  * The declared workspace, but only when it is a value devx itself could have
- * produced for THIS user: an isolated run worktree. The app and leaf segments
- * come from the declared path itself and are round-tripped through devx's own
- * generator, so equality (not a prefix test) still rejects `..`, a path outside
- * the managed base dir, and anything shaped like an ensureWorkspace/
- * ensureAppWorkspace result — while the declaration, which is session-scoped,
- * no longer depends on a per-turn metadata.appId that a later turn may omit or
- * change. Only segments sanitizeId leaves untouched can survive the round trip,
- * which is why `.worktrees` (sanitizeId rewrites `.`) can never be an app
- * segment. It matters because the workspace is half of every consent scope key
- * (core/server/agents/service/scope-key.ts).
+ * produced for THIS user: an isolated run worktree. Round-tripping the declared
+ * path through devx's own generator and comparing for equality (not a prefix
+ * test) rejects `..`, anything outside the managed base dir, and anything
+ * shaped like an ensureWorkspace/ensureAppWorkspace result — and it does so
+ * without depending on a per-turn metadata.appId. It matters because the
+ * workspace is half of every consent scope key (service/scope-key.ts).
  */
 export function acceptDeclaredWorkspace(
   declared: string | undefined,

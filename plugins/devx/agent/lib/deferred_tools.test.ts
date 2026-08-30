@@ -17,6 +17,10 @@ import { assert, assertEquals } from "jsr:@std/assert";
 import agent, { DEFERRED_TOOLS_NOTE, PLAN_MODE_TOOLS } from "../agent.ts";
 import { DEFERRED_TOOL_CANDIDATES, rankDeferredTools } from "../tools/ToolSearch.ts";
 import { DEFERRED_TOOLS } from "./deferred_tools.ts";
+import { partitionTools } from "../../../../core/server/agents/service/context/toolsplit.ts";
+import type { HookCtx, QueryFn, ToolDef } from "../../../../core/server/agents/eve-shim/types.ts";
+import { loadSessionScope } from "./session_scope.ts";
+import { REVIEW_TOOLSETS } from "../../functions/routes/review_tools.ts";
 
 const ALWAYS_ON = [
   "Read", "Write", "Edit", "SearchReplace", "Bash", "Grep", "Glob", "CodeSearch",
@@ -145,5 +149,97 @@ Deno.test("the built-in subagents declare their reasoning effort", async () => {
       new URL(`../subagents/${name}/agent.edn`, import.meta.url),
     );
     assert(edn.includes("reasoning-effort"), `${name} should declare :reasoning-effort`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3, whole-branch review must-fix 1. A session that declares an allowlist
+// (routes/review_tools.ts) gets no second chance at a deferred tool: filterTools
+// runs at toolset.ts:914 and deferral at :934, and ToolSearch — the only way
+// back — is itself dropped for not being allowlisted. A QA review would run with
+// Read/Glob/Grep/GitDiff and report "no issues" from static reading alone.
+//
+// The fix is that an explicit allowlist outranks deferral: eve_run.ts's
+// writeSessionScope pre-activates the declared set on agents.sessions
+// (activated_tools), before the turn is posted, so partitionTools keeps exactly
+// those tools. This composes the two real hooks — devx's filterTools and core's
+// partitionTools — over the real tool inventory and asserts, per review type,
+// that the tools the route allowlists are the tools the turn actually gets.
+// Disjointness is deliberately NOT the assertion here: Browser* SHOULD stay
+// deferred for ordinary chats, and pre-activation is what makes that safe.
+const filterToolsHook = agent.filterTools ?? (() => true);
+const A_DEF: ToolDef = { description: "a tool", inputSchema: { type: "object" } };
+
+/** Every devx tool the loader would offer, read off disk like the loader does. */
+async function allDevxToolNames(): Promise<string[]> {
+  const names: string[] = [];
+  for await (const entry of Deno.readDir(new URL("../tools/", import.meta.url))) {
+    if (entry.isFile && entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")) {
+      names.push(entry.name.slice(0, -3));
+    }
+  }
+  return names.sort();
+}
+
+/**
+ * The tool names a turn really ends up with: filterTools (toolset.ts Step 4)
+ * then deferral (Step 6), with the allowlist pre-activated exactly as
+ * writeSessionScope stores it.
+ */
+async function turnToolNames(sessionId: string, allowlist: readonly string[], inventory: string[]): Promise<string[]> {
+  const sql: QueryFn = () =>
+    Promise.resolve({ rows: [{ tool_allowlist: [...allowlist], tool_allowlist_declared: true, workspace_path: "" }] });
+  const ctx: HookCtx = { sessionId, env: () => undefined, sql, metadata: {} };
+  await loadSessionScope(sessionId, sql, ctx);
+
+  const survived: Record<string, true> = {};
+  for (const name of inventory) {
+    if (filterToolsHook(name, A_DEF, ctx)) survived[name] = true;
+  }
+  const { core, activated } = partitionTools(survived, [...allowlist], DEFERRED_TOOLS);
+  return [...core.map(([n]) => n), ...activated.map(([n]) => n)].sort();
+}
+
+Deno.test("every review type's turn gets exactly the tools its route allowlists", async () => {
+  const inventory = await allDevxToolNames();
+  for (const [reviewType, allowlist] of Object.entries(REVIEW_TOOLSETS)) {
+    // Guards the inventory itself: an allowlisted name that is not a devx tool
+    // would otherwise make the comparison below vacuously "missing everywhere".
+    const unknown = allowlist.filter((n) => !inventory.includes(n));
+    assertEquals(unknown, [], `${reviewType} allowlists tools devx does not have: ${unknown.join(", ")}`);
+
+    assertEquals(
+      await turnToolNames(`s-review-${reviewType}`, allowlist, inventory),
+      [...allowlist].sort(),
+      `${reviewType} does not get the tools it declared`,
+    );
+  }
+});
+
+// The specific loss the review found: both browser-driven reviews allowlist six
+// (QA) and five (design) Browser* tools, every one of them deferred.
+Deno.test("the browser-driven reviews keep their whole browser surface", async () => {
+  const inventory = await allDevxToolNames();
+  for (const reviewType of ["qa-test", "design-review"]) {
+    const allowlist = REVIEW_TOOLSETS[reviewType];
+    const browser = allowlist.filter((n) => n.startsWith("Browser"));
+    assert(browser.length >= 5, `${reviewType} should allowlist the browser tools`);
+    const got = new Set(await turnToolNames(`s-browser-${reviewType}`, allowlist, inventory));
+    for (const name of browser) {
+      assert(got.has(name), `${reviewType} lost ${name} to deferral — a browser review with no browser`);
+    }
+  }
+});
+
+// ToolSearch cannot be the safety net: it is not allowlisted (so filterTools
+// drops it), and activation only takes effect on the NEXT turn while a review
+// is a single turn. Stated as a test so a future "just add ToolSearch" fix is
+// recognised as no fix at all.
+Deno.test("no review allowlist relies on ToolSearch to recover a deferred tool", () => {
+  for (const [reviewType, allowlist] of Object.entries(REVIEW_TOOLSETS)) {
+    assert(
+      !allowlist.includes("ToolSearch"),
+      `${reviewType} must not depend on ToolSearch: activation lands on the next turn, and a review has only one`,
+    );
   }
 });

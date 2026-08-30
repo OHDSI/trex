@@ -1341,6 +1341,36 @@ MCP).
 
 ### Known limitations — recorded, not fixed
 
+- **The allowlist is devx's tool VOCABULARY, and on the delegated path it is
+  spent as SDK built-in names.** The two paths do not have the same tool
+  namespace. On the model loop the names are devx's own tools
+  (`plugins/devx/agent/tools/`). On the `claude-code` path the same array
+  becomes the SDK's `tools` option, which names **built-ins** — so `Read`,
+  `Write`, `Edit`, `Bash`, `Glob` and `Grep` carry over, while `CodeSearch`,
+  `GitDiff`, `GitLog`, `GitStatus`, `SearchReplace` and every `Browser*` have
+  no built-in and no MCP equivalent (`fn-claude-code/server.js` registers only
+  the `kb` and `ask` servers). Those tools are simply not there. Nothing is
+  *denied*, so nothing was logged: a `claude-code` security review running 3 of
+  its 7 declared tools was byte-identical, in `devx.agent_results`, to a clean
+  one. `sidecar_engine.ts`'s `unavailableDelegatedTools` now names them up
+  front and publishes one failed `action.result` per tool carrying
+  `eve_run.ts`'s `UNAVAILABLE_TOOL_ERROR`, so they land in `result.denials`,
+  the persisted `denials` column (devx `V21`), the plan-status guard
+  (`agent_run.ts`'s `planStatusAfterRun`) and the Problems-tab banner. The
+  review still runs — it is marked partial rather than refused — so a QA or
+  design review on this provider is a review with no browser and says so.
+- **An allowlisted tool that is also DEFERRED is dropped from the turn
+  entirely**, unless it is pre-activated. `filterTools` is `toolset.ts`'s Step
+  4 and deferred-tool withholding is Step 6, and `ToolSearch` cannot recover
+  the tool inside the same turn: it is not itself allowlisted, and activation
+  is read once per turn before the tool set is built, so it would take effect
+  only on the NEXT turn — while a review is a single turn. Both browser-driven
+  reviews lost their whole browser surface to this. An explicit allowlist is a
+  stronger signal than deferral, which is only a context-size optimisation, so
+  `eve_run.ts`'s `writeSessionScope` writes the declared set into
+  `agents.sessions.activated_tools` in the same statement as the allowlist,
+  before the turn is posted. `Browser*` stays deferred for ordinary chats;
+  pre-activation is what makes that safe.
 - **A declared allowlist naming no MCP tool also denies
   `mcp__ask__ask_question`**, the sidecar's structured elicitation channel
   (registered only on UI/chat turns, not these unattended ones —

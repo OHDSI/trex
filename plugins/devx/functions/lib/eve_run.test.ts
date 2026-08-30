@@ -1,7 +1,7 @@
 // deno test --no-check --allow-all plugins/devx/functions/lib/eve_run.test.ts
 import { assertEquals, assertRejects, assertStringIncludes } from "jsr:@std/assert";
 import type { DevxSseFrame } from "./eve_sse.ts";
-import { bearerFromRequest, denialSummary, NO_APPROVER_ERROR, runOnEve } from "./eve_run.ts";
+import { bearerFromRequest, denialSummary, NO_APPROVER_ERROR, runOnEve, UNAVAILABLE_TOOL_ERROR } from "./eve_run.ts";
 
 interface Call {
   url: string;
@@ -125,7 +125,7 @@ Deno.test("carries appId, mode and the skill context onto the turn — and the s
     skillContext: "You are a security reviewer.",
     allowedTools: ["Read", "Grep"],
     workspacePathOverride: "/w/run-1",
-    sql: () => Promise.resolve({ rows: [] }),
+    sql: () => Promise.resolve({ rows: [{ id: "s-1" }] }),
   });
 
   const turn = JSON.parse(calls[2].body);
@@ -203,14 +203,16 @@ Deno.test("surfaces a create failure rather than starting a turn", async () => {
 // A fake db whose writes land in the SAME ordered log as the eve calls, so
 // "written before the turn was posted" is asserted as an order, not merely as
 // a value that happened to be present by the end.
-function scriptedWithDb(events: unknown[]) {
+function scriptedWithDb(events: unknown[], opts: { updated?: Record<string, unknown>[] } = {}) {
   const log: string[] = [];
   const updates: Array<{ query: string; params: unknown[] }> = [];
   const { fetchImpl, calls } = scripted(events, { log });
+  // The scope UPDATE carries RETURNING id, so the default fake reports the one
+  // row it matched; `updated: []` is the session that no longer exists.
   const sql = (query: string, params: unknown[] = []) => {
     log.push(`sql ${query.trim().split(/\s+/).slice(0, 3).join(" ")}`);
     updates.push({ query, params });
-    return Promise.resolve({ rows: [] });
+    return Promise.resolve({ rows: opts.updated ?? [{ id: "s-1" }] });
   };
   return { fetchImpl, calls, sql, log, updates };
 }
@@ -247,6 +249,41 @@ Deno.test("declares nothing when the caller declared nothing", async () => {
 
   assertEquals(updates.length, 0);
   assertEquals(log.some((l) => l.startsWith("sql")), false);
+});
+
+// Whole-branch review must-fix 1: an explicit allowlist outranks deferral.
+// filterTools runs before deferral (toolset.ts Step 4 then Step 6) and
+// ToolSearch cannot recover a deferred tool inside the same turn, so the
+// declared set is pre-activated on the row in that same statement — otherwise a
+// QA review's six Browser* tools are dropped and it reports "no issues" from
+// static reading alone.
+Deno.test("pre-activates the declared allowlist so deferral cannot drop it inside the turn", async () => {
+  const { fetchImpl, sql, updates } = scriptedWithDb(completedRun);
+  await runOnEve({ ...baseOpts(fetchImpl, () => {}), allowedTools: ["Read", "BrowserNavigate"], sql });
+
+  assertStringIncludes(updates[0].query, "activated_tools");
+  // The same $1 the allowlist is written from: the two cannot drift.
+  assertEquals(updates[0].params[0], ["Read", "BrowserNavigate"]);
+});
+
+Deno.test("declaring only a workspace leaves activated_tools alone", async () => {
+  const { fetchImpl, sql, updates } = scriptedWithDb(completedRun);
+  await runOnEve({ ...baseOpts(fetchImpl, () => {}), workspacePathOverride: "/w/u-1/app-1/.worktrees/run-1", sql });
+
+  // No allowlist declared, so the CASE arm must not overwrite whatever
+  // ToolSearch has activated on this session.
+  assertEquals(updates[0].params[1], false);
+  assertStringIncludes(updates[0].query, "ELSE activated_tools END");
+});
+
+// Zero rows is not an error to Postgres. Without the RETURNING check the turn
+// posts unrestricted into the derived workspace: the ordering is proven, the
+// effect is not.
+Deno.test("refuses to start a turn whose declared scope matched no session row", async () => {
+  const { fetchImpl, sql, calls } = scriptedWithDb(completedRun, { updated: [] });
+  const err = await assertRejects(() => runOnEve({ ...baseOpts(fetchImpl, () => {}), allowedTools: ["Read"], sql }));
+  assertStringIncludes(String(err), "matched no agents.sessions row");
+  assertEquals(calls.length, 1);
 });
 
 Deno.test("refuses to start a turn whose declared scope it cannot write", async () => {
@@ -286,6 +323,53 @@ Deno.test("bearerFromRequest reads the caller's Authorization header, and nothin
   assertEquals(bearerFromRequest(h("bearer jwt-abc")), "jwt-abc");
   assertEquals(bearerFromRequest(h("Basic abc")), undefined);
   assertEquals(bearerFromRequest(h(null)), undefined);
+});
+
+// Whole-branch review must-fix 2: on the delegated (claude-code) path a
+// declared tool with no SDK built-in and no MCP equivalent is never CALLED, so
+// it produces no result of its own. sidecar_engine.ts publishes one carrying
+// UNAVAILABLE_TOOL_ERROR; matching only NO_APPROVER_ERROR made a review that
+// ran 3 of its 7 tools byte-identical to a clean one.
+Deno.test("a declared tool the execution path cannot provide is a denial, not silence", async () => {
+  const { fetchImpl } = scripted([
+    {
+      type: "action.result",
+      data: {
+        turnId: "t1",
+        result: {
+          kind: "tool-result",
+          callId: "unavailable:t1:GitDiff",
+          toolName: "GitDiff",
+          output: { error: `GitDiff ${UNAVAILABLE_TOOL_ERROR} (claude-code)` },
+        },
+        status: "failed",
+      },
+    },
+    { type: "message.completed", data: { turnId: "t1", message: "No issues found.", finishReason: "stop" } },
+    { type: "turn.completed", data: { turnId: "t1", finishReason: "stop" } },
+  ]);
+  const result = await runOnEve(baseOpts(fetchImpl, () => {}));
+
+  assertEquals(result.denials.map((d) => d.toolName), ["GitDiff"]);
+  assertStringIncludes(String(denialSummary(result.denials)), "cannot provide every declared tool");
+});
+
+// An ordinary tool error is still not a denial — a review that hit one bad path
+// must not be reported as having lost its declared toolset.
+Deno.test("an ordinary tool failure is not counted as a denial", async () => {
+  const { fetchImpl } = scripted([
+    {
+      type: "action.result",
+      data: {
+        turnId: "t1",
+        result: { kind: "tool-result", callId: "c1", toolName: "Read", output: { error: "ENOENT: no such file" } },
+        status: "failed",
+      },
+    },
+    { type: "turn.completed", data: { turnId: "t1", finishReason: "stop" } },
+  ]);
+  const result = await runOnEve(baseOpts(fetchImpl, () => {}));
+  assertEquals(result.denials, []);
 });
 
 Deno.test("denialSummary names the refused tools, and is null on a clean run", () => {

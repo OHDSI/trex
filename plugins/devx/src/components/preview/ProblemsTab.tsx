@@ -187,10 +187,11 @@ function ReviewSection({
         <div className="flex items-start gap-2 px-3 py-2.5 border-b bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300">
           <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
           <div className="min-w-0">
-            <p className="text-xs font-medium">Incomplete — some tools were denied</p>
+            <p className="text-xs font-medium">Incomplete — some declared tools did not run</p>
             <p className="text-xs mt-0.5">
-              This review ran unattended, so {[...new Set(review.denials?.map((d) => d.toolName))].join(", ")}
-              {" "}could not run. Treat the result below as partial.
+              {[...new Set(review.denials?.map((d) => d.toolName))].join(", ")}
+              {" "}could not run on this session (denied, or unavailable on this provider&apos;s loop).
+              {" "}Treat the result below as partial.
             </p>
           </div>
         </div>

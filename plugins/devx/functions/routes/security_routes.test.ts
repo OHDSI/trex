@@ -77,7 +77,8 @@ function makeFakeDb(activeProviderRow: Record<string, unknown> | null, order?: s
     // The happy path continues past the gate: no previous review, the session
     // scope write, then the findings insert.
     if (q.includes("SELECT findings")) return { rows: [] };
-    if (q.includes("UPDATE agents.sessions")) return { rows: [] };
+    // RETURNING id — a zero-row answer refuses the turn, so report the match.
+    if (q.includes("UPDATE agents.sessions")) return { rows: [{ id: "s-1" }] };
     if (q.includes("INSERT INTO devx.agent_results")) {
       return { rows: [{ id: "rev-1", created_at: "2026-08-30T00:00:00.000Z" }] };
     }
