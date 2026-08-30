@@ -66,7 +66,7 @@ services:
       - ./functions:/usr/src/functions
       - ./plugins/web/dist:/usr/src/plugins-dev/web/dist
       - ./plugins/notebook/dist:/usr/src/plugins-dev/notebook/dist
-      - ./plugins/prometheus/dist:/usr/src/plugins-dev/prometheus/dist
+      - ./plugins/aithon/dist:/usr/src/plugins-dev/aithon/dist
       - ./plugins/storage:/usr/src/plugins-dev/storage
       - ./plugins/postgrest:/usr/src/plugins-dev/postgrest
       - ./plugins-dev/toy-agent:/usr/src/plugins-dev/toy-agent
@@ -105,5 +105,3 @@ services:
       PGRST_DB_ANON_ROLE: anon
       PGRST_DB_PRE_REQUEST: public.postgrest_pre_request
       PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:8001/trex/rest/v1
-      # Register prometheus in the web shell's top nav (consumed by plugins/web).
-      TREX_WEB_NAV_EXTRA: '[{"path":"/prometheus","label":"Prometheus","plugin":"prometheus"}]'

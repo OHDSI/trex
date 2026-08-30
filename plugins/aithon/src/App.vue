@@ -2,7 +2,7 @@
   <v-app>
     <v-app-bar flat color="surface" height="60" border="b">
       <div class="d-flex align-center px-4" style="gap:10px;font-weight:700;color:rgb(var(--v-theme-primary))">
-        <v-avatar size="26" color="primary"><v-icon icon="mdi-fire" color="white" size="18" /></v-avatar> Prometheus
+        <v-avatar size="26" color="primary"><v-icon icon="mdi-fire" color="white" size="18" /></v-avatar> Aithon
       </div>
       <div class="d-flex align-center ml-6" style="height:100%">
         <RouterLink v-for="n in nav" :key="n.to" :to="n.to" class="nav-link" active-class="nav-link--active">{{ n.label }}</RouterLink>

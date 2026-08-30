@@ -3,7 +3,7 @@ import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import vuetify from "vite-plugin-vuetify";
 
-const uiBasePath = process.env.VITE_UI_BASE_PATH || "/plugins/trex/prometheus";
+const uiBasePath = process.env.VITE_UI_BASE_PATH || "/plugins/trex/aithon";
 
 // Optional same-origin proxy to a real fhir + cql2elm backend (avoids browser CORS).
 // Set VITE_FHIR_PROXY_TARGET=http://<host>:<port> and VITE_FHIR_BASE_URL=/fhir-live to

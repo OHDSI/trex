@@ -46,7 +46,7 @@ plugin loaders.
 | `TREX_POOL_SIZE` | `1024` | Shared DuckDB session pool size (pgwire + the function runtime's `sql()`). Must not exceed `TREX_PG_CONNECTION_LIMIT`. |
 | `TREX_PG_CONNECTION_LIMIT` | `1024` | Cap on real Postgres connections the DuckDB postgres extension opens per attached catalog (e.g. `_config`). Must be `>=` `TREX_POOL_SIZE` and `<=` Postgres `max_connections`. Extension default is 64. |
 | `TREX_POOL_LEASE_TIMEOUT_MS` | `30000` | Bounds the lease wait so an exhausted pool fails the request instead of blocking forever. |
-| `TREX_WEB_NAV_EXTRA` | — | JSON array of extra nav entries injected into the web UI. |
+| `TREX_WEB_NAV_EXTRA` | — | JSON array of extra nav entries (`{path,label,plugin}`) for the web UI, merged on top of the entries plugins declare themselves via `trex.ui.nav`. An entry with the same `path` overrides the declared one. |
 | `ADMIN_EMAIL` | — | Email auto-promoted to `admin` on registration. |
 | `TREX_INITIAL_API_KEY_NAME` | — | Bootstrap API key issued on first start. |
 

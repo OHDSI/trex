@@ -12,7 +12,7 @@ const lifecycles = singleSpaVue({
   handleInstance(app, props: any) {
     app.use(createPinia());
     app.use(vuetify);
-    app.use(createAppRouter(props.basePath || "/plugins/trex/prometheus"));
+    app.use(createAppRouter(props.basePath || "/plugins/trex/aithon"));
   },
 });
 

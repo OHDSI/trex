@@ -1,5 +1,5 @@
 <template>
-  <AtlasPageShell eyebrow="Prometheus" title="Datasets" subtitle="Browse, search and edit FHIR data — pick a dataset to begin.">
+  <AtlasPageShell eyebrow="Aithon" title="Datasets" subtitle="Browse, search and edit FHIR data — pick a dataset to begin.">
     <template #actions>
       <AtlasButton variant="primary" data-new-dataset @click="openNew">＋ New dataset</AtlasButton>
     </template>

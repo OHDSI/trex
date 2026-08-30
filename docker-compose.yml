@@ -44,9 +44,6 @@ services:
     entrypoint: /usr/local/bin/trex-init
     environment:
       TREX_SECRETS_DIR: /shared
-      # Prometheus (FHIR analytics UI) ships in the image under plugins-dev;
-      # this registers it in the web shell's top nav (parity with the dx compose).
-      TREX_WEB_NAV_EXTRA: '[{"path":"/prometheus","label":"Prometheus","plugin":"prometheus"}]'
     volumes:
       - ./secrets:/shared
     restart: "no"

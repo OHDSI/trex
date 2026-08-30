@@ -32,7 +32,7 @@ out/
 # Superpowers brainstorming companion (local-only)
 .superpowers/
 
-# Prometheus dev scratch (local-only)
+# Aithon dev scratch (local-only)
 /*.png
 docker-compose.override.yml
-plugins/prometheus/tsconfig.tsbuildinfo
+plugins/aithon/tsconfig.tsbuildinfo

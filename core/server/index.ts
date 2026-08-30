@@ -33,6 +33,7 @@ import { apiLimiter } from "./middleware/rate-limit.ts";
 import { applyD2eCompat, applyD2eCompatEarly, assertD2eProvisioned, D2E_COMPAT, runD2eBoot, syncD2ePlugins } from "./d2e-compat/index.ts";
 import { parseReadyPort, startBootstrapReadySignal } from "./d2e-compat/bootstrap-ready.ts";
 import { collectProvisionTargets, runProvisionTargets } from "./plugin/provision.ts";
+import { collectNavEntries, mergeNav } from "./plugin/nav.ts";
 import { startNativeWebApi } from "./webapi-native.ts";
 import { handleRealtimeUpgrade, mountRealtime, startRealtimeService, stopRealtimeService } from "./realtime/index.ts";
 
@@ -138,21 +139,24 @@ app.get(`${BASE_PATH}/api/settings/public`, apiLimiter, async (_req, res) => {
   }
 });
 
-// Web shell extension config — env-driven nav items.
-// TREX_WEB_NAV_EXTRA is a JSON array of { path, label, plugin } entries.
+// Web shell extension config — top-nav items as { path, label, plugin }.
 // Each entry adds a top-nav link in the web shell that routes to a single-spa
 // mount of the named plugin (loaded from /plugins/trex/<plugin>/<plugin>-spa.js).
+// Entries come from the registered plugins' own `trex.ui.nav` declarations;
+// TREX_WEB_NAV_EXTRA (a JSON array of the same shape) adds to them and wins on
+// a path collision, so a deployment can still relabel or replace one.
 app.get(`${BASE_PATH}/api/web-config`, apiLimiter, (_req, res) => {
-  let navExtra: unknown[] = [];
+  let envExtra: unknown[] = [];
   const raw = Deno.env.get("TREX_WEB_NAV_EXTRA");
   if (raw) {
     try {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) navExtra = parsed;
+      if (Array.isArray(parsed)) envExtra = parsed;
     } catch (err) {
       console.warn("[web-config] invalid TREX_WEB_NAV_EXTRA:", err);
     }
   }
+  const navExtra = mergeNav(collectNavEntries(Plugins.activeRegistry), envExtra);
   res.json({ navExtra });
 });
 

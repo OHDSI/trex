@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a self-contained TypeScript Deno function in `plugins/prometheus` that serves the mri-vue-lib HTTP contract (config + patientcount + stratified barchart) by auto-generating an MRI config from the dataset's FHIR resources and compiling an IFR→ELM→SQL query against the existing DuckDB FHIR tables.
+**Goal:** Add a self-contained TypeScript Deno function in `plugins/aithon` that serves the mri-vue-lib HTTP contract (config + patientcount + stratified barchart) by auto-generating an MRI config from the dataset's FHIR resources and compiling an IFR→ELM→SQL query against the existing DuckDB FHIR tables.
 
-**Architecture:** New sibling function dir `plugins/prometheus/functions-mri/`, mounted at `/analytics-svc` via a second `trex.functions.api` entry. Request flow: decode `mriquery` (base64+zlib) → IFR model → ELM IR (filter retrieves + stratification axes) → SQL (via a bounded TS compiler that mirrors `plugins/fhir/src/cql/compiler.rs` idioms) → execute via `withConnection` on the same per-dataset DuckDB schema → post-process into MRI response shapes. d2e and the existing prometheus FHIR function are untouched.
+**Architecture:** New sibling function dir `plugins/aithon/functions-mri/`, mounted at `/analytics-svc` via a second `trex.functions.api` entry. Request flow: decode `mriquery` (base64+zlib) → IFR model → ELM IR (filter retrieves + stratification axes) → SQL (via a bounded TS compiler that mirrors `plugins/fhir/src/cql/compiler.rs` idioms) → execute via `withConnection` on the same per-dataset DuckDB schema → post-process into MRI response shapes. d2e and the existing aithon FHIR function are untouched.
 
 **Tech Stack:** Deno (TypeScript, `// @ts-nocheck`), DuckDB JSON functions (`json_extract_string`), `std/assert` Deno tests, `std/encoding` + `DecompressionStream` for zlib. Reuses `functions/fhir/resource_registry.ts`, `functions/sql_safety.ts`, and the `withConnection`/`Conn` pattern from `functions/db.ts`.
 
@@ -12,8 +12,8 @@
 
 ## Conventions (read once)
 
-- **Test runner** (from `plugins/prometheus/`): `deno test --allow-read test/<file>` (the root `deno.json` provides the `std/` import map). Pure-logic tests need no flags; tests that read the FHIR data files need `--allow-read`.
-- **Test file location:** `plugins/prometheus/test/`, named `mri_*_test.ts`, importing from `../functions-mri/...` and `std/assert/mod.ts`.
+- **Test runner** (from `plugins/aithon/`): `deno test --allow-read test/<file>` (the root `deno.json` provides the `std/` import map). Pure-logic tests need no flags; tests that read the FHIR data files need `--allow-read`.
+- **Test file location:** `plugins/aithon/test/`, named `mri_*_test.ts`, importing from `../functions-mri/...` and `std/assert/mod.ts`.
 - **Every new source file** starts with `// @ts-nocheck - Deno edge function`.
 - **SQL string-building only** (DuckDB params are not used here); escape every interpolated literal with `escapeString` from `../functions/sql_safety.ts`.
 - **Schema reference:** `toQualifiedSchema(dbName, datasetId)` → `"memory"."ds1"`; tables are lowercase resource names with columns `_raw` (JSON), `_is_deleted` (BOOL), `id` (VARCHAR).
@@ -51,17 +51,17 @@
 ### Task 1: Manifest mount + function entrypoint
 
 **Files:**
-- Modify: `plugins/prometheus/package.json:24-26`
-- Create: `plugins/prometheus/functions-mri/db.ts`
-- Create: `plugins/prometheus/functions-mri/state.ts`
-- Create: `plugins/prometheus/functions-mri/router.ts`
-- Create: `plugins/prometheus/functions-mri/index.ts`
-- Test: `plugins/prometheus/test/mri_router_test.ts`
+- Modify: `plugins/aithon/package.json:24-26`
+- Create: `plugins/aithon/functions-mri/db.ts`
+- Create: `plugins/aithon/functions-mri/state.ts`
+- Create: `plugins/aithon/functions-mri/router.ts`
+- Create: `plugins/aithon/functions-mri/index.ts`
+- Test: `plugins/aithon/test/mri_router_test.ts`
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// plugins/prometheus/test/mri_router_test.ts
+// plugins/aithon/test/mri_router_test.ts
 // @ts-nocheck
 import { assertEquals } from "std/assert/mod.ts";
 import { parseMriRoute } from "../functions-mri/router.ts";
@@ -98,14 +98,14 @@ Expected: FAIL — `Module not found "../functions-mri/router.ts"`.
 - [ ] **Step 3: Create db.ts and state.ts**
 
 ```ts
-// plugins/prometheus/functions-mri/db.ts
+// plugins/aithon/functions-mri/db.ts
 // @ts-nocheck - Deno edge function
 export { withConnection } from "../functions/db.ts";
 export type { Conn } from "../functions/db.ts";
 ```
 
 ```ts
-// plugins/prometheus/functions-mri/state.ts
+// plugins/aithon/functions-mri/state.ts
 // @ts-nocheck - Deno edge function
 import { ResourceRegistry } from "../functions/fhir/resource_registry.ts";
 
@@ -138,7 +138,7 @@ export function stripMriMount(pathname: string): string {
 - [ ] **Step 4: Create router.ts (parse only; dispatch stub)**
 
 ```ts
-// plugins/prometheus/functions-mri/router.ts
+// plugins/aithon/functions-mri/router.ts
 // @ts-nocheck - Deno edge function
 import { stripMriMount } from "./state.ts";
 
@@ -179,7 +179,7 @@ Expected: PASS (4 tests).
 - [ ] **Step 6: Create index.ts and add the manifest mount**
 
 ```ts
-// plugins/prometheus/functions-mri/index.ts
+// plugins/aithon/functions-mri/index.ts
 // @ts-nocheck - Deno edge function
 import { getMriState } from "./state.ts";
 import { parseMriRoute } from "./router.ts";
@@ -200,7 +200,7 @@ if (import.meta.main) {
 }
 ```
 
-In `plugins/prometheus/package.json`, change the `api` array (lines 24-26) from:
+In `plugins/aithon/package.json`, change the `api` array (lines 24-26) from:
 
 ```json
       "api": [
@@ -220,7 +220,7 @@ to:
 - [ ] **Step 7: Commit**
 
 ```bash
-git add plugins/prometheus/functions-mri plugins/prometheus/test/mri_router_test.ts plugins/prometheus/package.json
+git add plugins/aithon/functions-mri plugins/aithon/test/mri_router_test.ts plugins/aithon/package.json
 git commit -m "feat(mri): scaffold analytics-svc function, routing, manifest mount"
 ```
 
@@ -231,13 +231,13 @@ git commit -m "feat(mri): scaffold analytics-svc function, routing, manifest mou
 ### Task 2: Config mapping types + curated table
 
 **Files:**
-- Create: `plugins/prometheus/functions-mri/config/mapping.ts`
-- Test: `plugins/prometheus/test/mri_mapping_test.ts`
+- Create: `plugins/aithon/functions-mri/config/mapping.ts`
+- Test: `plugins/aithon/test/mri_mapping_test.ts`
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// plugins/prometheus/test/mri_mapping_test.ts
+// plugins/aithon/test/mri_mapping_test.ts
 // @ts-nocheck
 import { assertEquals } from "std/assert/mod.ts";
 import { CURATED_ATTRS } from "../functions-mri/config/mapping.ts";
@@ -264,7 +264,7 @@ Expected: FAIL — module not found.
 - [ ] **Step 3: Create mapping.ts**
 
 ```ts
-// plugins/prometheus/functions-mri/config/mapping.ts
+// plugins/aithon/functions-mri/config/mapping.ts
 // @ts-nocheck - Deno edge function
 
 /** Physical mapping for one MRI attribute → a FHIR resource + JSON path. */
@@ -316,20 +316,20 @@ Expected: PASS (2 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add plugins/prometheus/functions-mri/config/mapping.ts plugins/prometheus/test/mri_mapping_test.ts
+git add plugins/aithon/functions-mri/config/mapping.ts plugins/aithon/test/mri_mapping_test.ts
 git commit -m "feat(mri): config attribute mapping types + curated defaults"
 ```
 
 ### Task 3: Generate MRI config + mapping from the registry
 
 **Files:**
-- Create: `plugins/prometheus/functions-mri/config/generate.ts`
-- Test: `plugins/prometheus/test/mri_generate_test.ts`
+- Create: `plugins/aithon/functions-mri/config/generate.ts`
+- Test: `plugins/aithon/test/mri_generate_test.ts`
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// plugins/prometheus/test/mri_generate_test.ts
+// plugins/aithon/test/mri_generate_test.ts
 // @ts-nocheck
 import { assertEquals, assert } from "std/assert/mod.ts";
 import { generateConfig } from "../functions-mri/config/generate.ts";
@@ -372,7 +372,7 @@ Expected: FAIL — module not found.
 - [ ] **Step 3: Create generate.ts**
 
 ```ts
-// plugins/prometheus/functions-mri/config/generate.ts
+// plugins/aithon/functions-mri/config/generate.ts
 // @ts-nocheck - Deno edge function
 import { AttrMapping, ConfigMapping, CURATED_ATTRS, INTERACTION_NAMES } from "./mapping.ts";
 
@@ -442,21 +442,21 @@ Expected: PASS (2 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add plugins/prometheus/functions-mri/config/generate.ts plugins/prometheus/test/mri_generate_test.ts
+git add plugins/aithon/functions-mri/config/generate.ts plugins/aithon/test/mri_generate_test.ts
 git commit -m "feat(mri): generate MRI config + mapping from FHIR resource types"
 ```
 
 ### Task 4: Config HTTP handlers + wire into router
 
 **Files:**
-- Create: `plugins/prometheus/functions-mri/handlers/config.ts`
-- Modify: `plugins/prometheus/functions-mri/index.ts`
-- Test: `plugins/prometheus/test/mri_config_handler_test.ts`
+- Create: `plugins/aithon/functions-mri/handlers/config.ts`
+- Modify: `plugins/aithon/functions-mri/index.ts`
+- Test: `plugins/aithon/test/mri_config_handler_test.ts`
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// plugins/prometheus/test/mri_config_handler_test.ts
+// plugins/aithon/test/mri_config_handler_test.ts
 // @ts-nocheck
 import { assertEquals, assert } from "std/assert/mod.ts";
 import { buildPresentTypesSql, getMyConfigResponse } from "../functions-mri/handlers/config.ts";
@@ -484,7 +484,7 @@ Expected: FAIL — module not found.
 - [ ] **Step 3: Create handlers/config.ts**
 
 ```ts
-// plugins/prometheus/functions-mri/handlers/config.ts
+// plugins/aithon/functions-mri/handlers/config.ts
 // @ts-nocheck - Deno edge function
 import { Conn } from "../db.ts";
 import { MriState } from "../state.ts";
@@ -551,7 +551,7 @@ export async function handleGetFrontendConfig(configId: string, conn: Conn, stat
 Replace the body of `handle` in `functions-mri/index.ts` with:
 
 ```ts
-// plugins/prometheus/functions-mri/index.ts
+// plugins/aithon/functions-mri/index.ts
 // @ts-nocheck - Deno edge function
 import { getMriState } from "./state.ts";
 import { parseMriRoute } from "./router.ts";
@@ -588,7 +588,7 @@ Expected: PASS (2 tests).
 - [ ] **Step 6: Commit**
 
 ```bash
-git add plugins/prometheus/functions-mri/handlers/config.ts plugins/prometheus/functions-mri/index.ts plugins/prometheus/test/mri_config_handler_test.ts
+git add plugins/aithon/functions-mri/handlers/config.ts plugins/aithon/functions-mri/index.ts plugins/aithon/test/mri_config_handler_test.ts
 git commit -m "feat(mri): config endpoints (getMyConfig/List/FrontendConfig)"
 ```
 
@@ -599,13 +599,13 @@ git commit -m "feat(mri): config endpoints (getMyConfig/List/FrontendConfig)"
 ### Task 5: IFR types
 
 **Files:**
-- Create: `plugins/prometheus/functions-mri/ifr/types.ts`
+- Create: `plugins/aithon/functions-mri/ifr/types.ts`
 - Test: none (pure type declarations; exercised by Task 6/8 tests).
 
 - [ ] **Step 1: Create ifr/types.ts**
 
 ```ts
-// plugins/prometheus/functions-mri/ifr/types.ts
+// plugins/aithon/functions-mri/ifr/types.ts
 // @ts-nocheck - Deno edge function
 
 export interface IfrExpression { type: "Expression"; operator: string; value: string | number; }
@@ -640,20 +640,20 @@ export interface Ifr {
 - [ ] **Step 2: Commit**
 
 ```bash
-git add plugins/prometheus/functions-mri/ifr/types.ts
+git add plugins/aithon/functions-mri/ifr/types.ts
 git commit -m "feat(mri): IFR type model"
 ```
 
 ### Task 6: mriquery decode (base64 + zlib)
 
 **Files:**
-- Create: `plugins/prometheus/functions-mri/mriquery/decode.ts`
-- Test: `plugins/prometheus/test/mri_decode_test.ts`
+- Create: `plugins/aithon/functions-mri/mriquery/decode.ts`
+- Test: `plugins/aithon/test/mri_decode_test.ts`
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// plugins/prometheus/test/mri_decode_test.ts
+// plugins/aithon/test/mri_decode_test.ts
 // @ts-nocheck
 import { assertEquals } from "std/assert/mod.ts";
 import { decodeMriQuery, encodeMriQuery } from "../functions-mri/mriquery/decode.ts";
@@ -680,7 +680,7 @@ Expected: FAIL — module not found.
 - [ ] **Step 3: Create mriquery/decode.ts**
 
 ```ts
-// plugins/prometheus/functions-mri/mriquery/decode.ts
+// plugins/aithon/functions-mri/mriquery/decode.ts
 // @ts-nocheck - Deno edge function
 import { Ifr } from "../ifr/types.ts";
 
@@ -733,7 +733,7 @@ Expected: PASS (2 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add plugins/prometheus/functions-mri/mriquery/decode.ts plugins/prometheus/test/mri_decode_test.ts
+git add plugins/aithon/functions-mri/mriquery/decode.ts plugins/aithon/test/mri_decode_test.ts
 git commit -m "feat(mri): mriquery decode (base64 + deflate, plain-JSON fallback)"
 ```
 
@@ -744,13 +744,13 @@ git commit -m "feat(mri): mriquery decode (base64 + deflate, plain-JSON fallback
 ### Task 7: ELM IR types
 
 **Files:**
-- Create: `plugins/prometheus/functions-mri/elm/types.ts`
+- Create: `plugins/aithon/functions-mri/elm/types.ts`
 - Test: none (types only; exercised by Task 8/9).
 
 - [ ] **Step 1: Create elm/types.ts**
 
 ```ts
-// plugins/prometheus/functions-mri/elm/types.ts
+// plugins/aithon/functions-mri/elm/types.ts
 // @ts-nocheck - Deno edge function
 
 /** Boolean/comparison expression over a single resource's _raw, referencing
@@ -788,20 +788,20 @@ export interface ElmQuery {
 - [ ] **Step 2: Commit**
 
 ```bash
-git add plugins/prometheus/functions-mri/elm/types.ts
+git add plugins/aithon/functions-mri/elm/types.ts
 git commit -m "feat(mri): ELM IR types (MRI-scoped subset + stratification)"
 ```
 
 ### Task 8: IFR → ELM translation
 
 **Files:**
-- Create: `plugins/prometheus/functions-mri/ifr/to_elm.ts`
-- Test: `plugins/prometheus/test/mri_to_elm_test.ts`
+- Create: `plugins/aithon/functions-mri/ifr/to_elm.ts`
+- Test: `plugins/aithon/test/mri_to_elm_test.ts`
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// plugins/prometheus/test/mri_to_elm_test.ts
+// plugins/aithon/test/mri_to_elm_test.ts
 // @ts-nocheck
 import { assertEquals } from "std/assert/mod.ts";
 import { ifrToElm, valueExprFor } from "../functions-mri/ifr/to_elm.ts";
@@ -858,7 +858,7 @@ Expected: FAIL — module not found.
 - [ ] **Step 3: Create ifr/to_elm.ts**
 
 ```ts
-// plugins/prometheus/functions-mri/ifr/to_elm.ts
+// plugins/aithon/functions-mri/ifr/to_elm.ts
 // @ts-nocheck - Deno edge function
 import { Ifr, IfrFilterCard, IfrAttribute, IfrBoolean } from "./types.ts";
 import { AttrMapping, ConfigMapping } from "../config/mapping.ts";
@@ -953,20 +953,20 @@ Expected: PASS (3 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add plugins/prometheus/functions-mri/ifr/to_elm.ts plugins/prometheus/test/mri_to_elm_test.ts
+git add plugins/aithon/functions-mri/ifr/to_elm.ts plugins/aithon/test/mri_to_elm_test.ts
 git commit -m "feat(mri): IFR → ELM translation (filters + patient-level axes)"
 ```
 
 ### Task 9: ELM → SQL compiler
 
 **Files:**
-- Create: `plugins/prometheus/functions-mri/elm/compiler.ts`
-- Test: `plugins/prometheus/test/mri_compiler_test.ts`
+- Create: `plugins/aithon/functions-mri/elm/compiler.ts`
+- Test: `plugins/aithon/test/mri_compiler_test.ts`
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// plugins/prometheus/test/mri_compiler_test.ts
+// plugins/aithon/test/mri_compiler_test.ts
 // @ts-nocheck
 import { assert, assertEquals } from "std/assert/mod.ts";
 import { compileCount, compileBarchart, binExpr } from "../functions-mri/elm/compiler.ts";
@@ -1024,7 +1024,7 @@ Expected: FAIL — module not found.
 - [ ] **Step 3: Create elm/compiler.ts**
 
 ```ts
-// plugins/prometheus/functions-mri/elm/compiler.ts
+// plugins/aithon/functions-mri/elm/compiler.ts
 // @ts-nocheck - Deno edge function
 import { escapeString } from "../../functions/sql_safety.ts";
 import { ElmQuery, ElmExpr, ElmRetrieve } from "./types.ts";
@@ -1094,21 +1094,21 @@ Expected: PASS (4 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add plugins/prometheus/functions-mri/elm/compiler.ts plugins/prometheus/test/mri_compiler_test.ts
+git add plugins/aithon/functions-mri/elm/compiler.ts plugins/aithon/test/mri_compiler_test.ts
 git commit -m "feat(mri): ELM→SQL compiler (count, EXISTS filters, stratified group-by + binning)"
 ```
 
 ### Task 10: patientcount handler + wire into router
 
 **Files:**
-- Create: `plugins/prometheus/functions-mri/handlers/patientcount.ts`
-- Modify: `plugins/prometheus/functions-mri/index.ts`
-- Test: `plugins/prometheus/test/mri_patientcount_test.ts`
+- Create: `plugins/aithon/functions-mri/handlers/patientcount.ts`
+- Modify: `plugins/aithon/functions-mri/index.ts`
+- Test: `plugins/aithon/test/mri_patientcount_test.ts`
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// plugins/prometheus/test/mri_patientcount_test.ts
+// plugins/aithon/test/mri_patientcount_test.ts
 // @ts-nocheck
 import { assertEquals } from "std/assert/mod.ts";
 import { buildPatientCountResponse } from "../functions-mri/handlers/patientcount.ts";
@@ -1126,7 +1126,7 @@ Expected: FAIL — module not found.
 - [ ] **Step 3: Create handlers/patientcount.ts**
 
 ```ts
-// plugins/prometheus/functions-mri/handlers/patientcount.ts
+// plugins/aithon/functions-mri/handlers/patientcount.ts
 // @ts-nocheck - Deno edge function
 import { Conn } from "../db.ts";
 import { MriState } from "../state.ts";
@@ -1182,7 +1182,7 @@ Expected: PASS (1 test).
 - [ ] **Step 6: Commit**
 
 ```bash
-git add plugins/prometheus/functions-mri/handlers/patientcount.ts plugins/prometheus/functions-mri/index.ts plugins/prometheus/test/mri_patientcount_test.ts
+git add plugins/aithon/functions-mri/handlers/patientcount.ts plugins/aithon/functions-mri/index.ts plugins/aithon/test/mri_patientcount_test.ts
 git commit -m "feat(mri): patientcount endpoint (IFR→ELM→SQL→count)"
 ```
 
@@ -1193,13 +1193,13 @@ git commit -m "feat(mri): patientcount endpoint (IFR→ELM→SQL→count)"
 ### Task 11: barchart post-processing (fill missing combinations)
 
 **Files:**
-- Create: `plugins/prometheus/functions-mri/postprocess/barchart.ts`
-- Test: `plugins/prometheus/test/mri_postprocess_test.ts`
+- Create: `plugins/aithon/functions-mri/postprocess/barchart.ts`
+- Test: `plugins/aithon/test/mri_postprocess_test.ts`
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// plugins/prometheus/test/mri_postprocess_test.ts
+// plugins/aithon/test/mri_postprocess_test.ts
 // @ts-nocheck
 import { assertEquals } from "std/assert/mod.ts";
 import { assembleBarchart } from "../functions-mri/postprocess/barchart.ts";
@@ -1235,7 +1235,7 @@ Expected: FAIL — module not found.
 - [ ] **Step 3: Create postprocess/barchart.ts**
 
 ```ts
-// plugins/prometheus/functions-mri/postprocess/barchart.ts
+// plugins/aithon/functions-mri/postprocess/barchart.ts
 // @ts-nocheck - Deno edge function
 
 interface AxisMeta { id: string; kind: "text" | "num"; binSize?: number; }
@@ -1315,21 +1315,21 @@ Expected: PASS (1 test).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add plugins/prometheus/functions-mri/postprocess/barchart.ts plugins/prometheus/test/mri_postprocess_test.ts
+git add plugins/aithon/functions-mri/postprocess/barchart.ts plugins/aithon/test/mri_postprocess_test.ts
 git commit -m "feat(mri): barchart post-processing (fill missing combos, response shape)"
 ```
 
 ### Task 12: barchart handler + wire into router
 
 **Files:**
-- Create: `plugins/prometheus/functions-mri/handlers/barchart.ts`
-- Modify: `plugins/prometheus/functions-mri/index.ts`
-- Test: `plugins/prometheus/test/mri_barchart_handler_test.ts`
+- Create: `plugins/aithon/functions-mri/handlers/barchart.ts`
+- Modify: `plugins/aithon/functions-mri/index.ts`
+- Test: `plugins/aithon/test/mri_barchart_handler_test.ts`
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// plugins/prometheus/test/mri_barchart_handler_test.ts
+// plugins/aithon/test/mri_barchart_handler_test.ts
 // @ts-nocheck
 import { assert, assertEquals } from "std/assert/mod.ts";
 import { axisLabels } from "../functions-mri/handlers/barchart.ts";
@@ -1354,7 +1354,7 @@ Expected: FAIL — module not found.
 - [ ] **Step 3: Create handlers/barchart.ts**
 
 ```ts
-// plugins/prometheus/functions-mri/handlers/barchart.ts
+// plugins/aithon/functions-mri/handlers/barchart.ts
 // @ts-nocheck - Deno edge function
 import { Conn } from "../db.ts";
 import { MriState } from "../state.ts";
@@ -1416,7 +1416,7 @@ Expected: PASS (all MRI tests green).
 - [ ] **Step 7: Commit**
 
 ```bash
-git add plugins/prometheus/functions-mri/handlers/barchart.ts plugins/prometheus/functions-mri/index.ts plugins/prometheus/test/mri_barchart_handler_test.ts
+git add plugins/aithon/functions-mri/handlers/barchart.ts plugins/aithon/functions-mri/index.ts plugins/aithon/test/mri_barchart_handler_test.ts
 git commit -m "feat(mri): stratified barchart endpoint (IFR→ELM→SQL→assembled response)"
 ```
 
@@ -1427,7 +1427,7 @@ git commit -m "feat(mri): stratified barchart endpoint (IFR→ELM→SQL→assemb
 ### Task 13: End-to-end handler test with an in-memory DuckDB-style conn fake
 
 **Files:**
-- Test: `plugins/prometheus/test/mri_e2e_test.ts`
+- Test: `plugins/aithon/test/mri_e2e_test.ts`
 
 > This test exercises the full path `handle(req)` → SQL strings, using a fake `Conn`
 > that records SQL and returns canned rows, so it runs without a live DuckDB. It
@@ -1437,7 +1437,7 @@ git commit -m "feat(mri): stratified barchart endpoint (IFR→ELM→SQL→assemb
 - [ ] **Step 1: Write the test**
 
 ```ts
-// plugins/prometheus/test/mri_e2e_test.ts
+// plugins/aithon/test/mri_e2e_test.ts
 // @ts-nocheck
 import { assert, assertEquals } from "std/assert/mod.ts";
 import { handlePatientCount } from "../functions-mri/handlers/patientcount.ts";
@@ -1506,14 +1506,14 @@ Expected: PASS (2 tests).
 - [ ] **Step 3: Commit**
 
 ```bash
-git add plugins/prometheus/test/mri_e2e_test.ts
+git add plugins/aithon/test/mri_e2e_test.ts
 git commit -m "test(mri): end-to-end handler tests (count + barchart, fake conn)"
 ```
 
 ### Task 14: Live-DB smoke verification (manual, documented)
 
 **Files:**
-- Create: `plugins/prometheus/docs/MRI-VERIFY.md`
+- Create: `plugins/aithon/docs/MRI-VERIFY.md`
 
 > No automated live-DB test here (the existing function suite has no DuckDB fixture
 > harness either). Instead, document a repeatable manual smoke test, run it once, and
@@ -1524,7 +1524,7 @@ git commit -m "test(mri): end-to-end handler tests (count + barchart, fake conn)
 ```markdown
 # MRI backend — live smoke test
 
-Prereq: a running trex instance with the prometheus plugin mounted and a dataset `ds1`
+Prereq: a running trex instance with the aithon plugin mounted and a dataset `ds1`
 seeded with a few Patients (with `birthDate`, `gender`) and Conditions
 (`subject.reference = "Patient/<id>"`, `code.coding[0].code`).
 
@@ -1550,7 +1550,7 @@ seeded with a few Patients (with `birthDate`, `gender`) and Conditions
 - [ ] **Step 3: Commit**
 
 ```bash
-git add plugins/prometheus/docs/MRI-VERIFY.md
+git add plugins/aithon/docs/MRI-VERIFY.md
 git commit -m "docs(mri): live smoke-test procedure + recorded output"
 ```
 

@@ -130,7 +130,7 @@ Both `compileBarchart` and `assembleBarchart` need to receive the full attribute
 
 ### Prerequisites
 
-- A running trex instance with the prometheus plugin loaded.
+- A running trex instance with the aithon plugin loaded.
 - Dataset ID `ds1` registered in trex.
 - DuckDB schema for `ds1` seeded with:
   - `patient` table: rows with `id`, `_raw` containing at least `birthDate` (e.g. `"1990-01-01"`) and `gender` (e.g. `"male"` / `"female"`), `_is_deleted = false`.
@@ -144,7 +144,7 @@ Both `compileBarchart` and `assembleBarchart` need to receive the full attribute
 
 ### Check 1 — getMyConfig
 
-Verify the prometheus plugin returns a valid analytics config for `ds1`.
+Verify the aithon plugin returns a valid analytics config for `ds1`.
 
 ```bash
 curl -s \

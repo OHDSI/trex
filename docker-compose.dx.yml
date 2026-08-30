@@ -212,8 +212,9 @@ services:
       PGRST_DB_ANON_ROLE: anon
       PGRST_DB_PRE_REQUEST: public.postgrest_pre_request
       PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:9001/trex/rest/v1
-      # Register devx and prometheus in the web shell's top nav (consumed by plugins/web).
-      TREX_WEB_NAV_EXTRA: '[{"path":"/devx","label":"Code","plugin":"devx"},{"path":"/prometheus","label":"Prometheus","plugin":"prometheus"}]'
+      # Register devx in the web shell's top nav (consumed by plugins/web). The
+      # aithon entry needs no env — it ships as the plugin's own trex.ui.nav.
+      TREX_WEB_NAV_EXTRA: '[{"path":"/devx","label":"Code","plugin":"devx"}]'
     healthcheck:
       # /trex/api/ready returns 200 only after auth keys are written to the DB,
       # which is a stronger readiness signal than auth/v1/health.
