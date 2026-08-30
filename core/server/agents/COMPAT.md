@@ -1205,6 +1205,213 @@ or `sessions.unattended`) sidecar session:
 An **attended** delegated turn does *not* see hard and soft the same way —
 see "Two tiers: hard and soft" above for exactly how they diverge.
 
+## devx's last two legacy consumers: security review and autonomous runs
+
+trex/devx-only — no eve equivalent to diverge from; this documents how two
+callers now reach the session API described above, not a wire-level
+divergence. Security/code/QA/design/docs-update review (`plugins/devx/
+functions/routes/security_routes.ts`'s `runAgentReview`) and autonomous
+agent runs (`plugins/devx/functions/index.ts`'s `POST /agent-runs/:id/start`,
+via the extracted `plugins/devx/functions/lib/agent_run.ts`) used to run on
+devx's legacy ai-sdk loop with a synthetic chat id and `auto_approve: true`
+— bypassing consent entirely, because nothing was ever waiting to click
+approve anyway. Both now run through `plugins/devx/functions/lib/
+eve_run.ts`'s `runOnEve` as real eve sessions created with
+`{ unattended: true }` and, deliberately, no `approverReachable`: `eve_run.ts`'s
+own comment states neither consumer has a human watching a gate.
+
+### What "unattended, no approver" means concretely
+
+Per "Precedence" above: a **soft** escalate match (`DeleteFile`,
+`Bash:rm|curl|wget|chmod|chown`) still **allows** on an unattended session —
+a review or an autonomous coder can still delete a file or shell out to
+`rm`/`curl` freely. A **hard** match (`GitPush`, `ExecuteSQL`, `CronCreate`,
+`CronDelete`, `RestartApp`, and on the sidecar path, a `Bash` command keying
+on `sudo|dd|ssh|scp|psql|crontab|git:push|git:subtree`) hits rule 2:
+`approverReachable` is false (never set), so the outcome is **deny**, reason
+`no-approver` — not a gate, not a park-then-deny, an immediate refusal. Read
+`approval-policy.ts` for the current authoritative list; this section only
+names it, it doesn't own it.
+
+**Migration path for a consumer that genuinely needs a hard-tier tool: give
+it a real approver, never an exemption.** Either bind the session to a
+channel (`agents.channel_sessions` — a channel session is always attended,
+`channelBound` implies an approver) or run it the way claw does: a plain
+native session that a relay watches and forwards gates from (claw's
+`postApprovalGates`), declaring `approverReachable: true` only because
+something really is subscribed and answering. Do not add an escalate
+exemption for these tools, and do not claim `approverReachable: true`
+without a real subscriber — the signal only ever turns a `deny` into a
+`gate`; a false claim just parks the turn for the approval deadline (30
+minutes) before it denies anyway, since nobody was ever going to click it.
+
+### Session-scoped tool allowlist and workspace (`V14__session_tool_scope.sql`)
+
+Migration `core/server/agents/migrations/V14__session_tool_scope.sql` adds
+three columns to `agents.sessions`: `tool_allowlist TEXT[]`,
+`tool_allowlist_declared BOOLEAN`, `workspace_path TEXT`. Three, not two,
+deliberately: an *empty* declared allowlist and *no* declaration must not
+share a representation, or a session that legitimately declares "no tools"
+reads back as "no restriction at all" — a silent, total inversion of what it
+said. `tool_allowlist_declared` is written as `Array.isArray(allowedTools)`
+(`eve_run.ts`'s `writeSessionScope`), so `null`/`undefined` (never declared)
+and `[]` (declared empty) stay distinguishable; `workspace_path` uses `''`
+as its own "not declared" sentinel instead of a fourth boolean, since an
+empty string is otherwise not a value any workspace resolver would produce.
+
+Both are read **once, at session creation**, by `runOnEve` (`UPDATE
+agents.sessions SET tool_allowlist = …, tool_allowlist_declared = …,
+workspace_path = … WHERE id = $4`, placed between the session create and the
+first turn POST) — never per-turn, and never from a turn's `metadata`.
+`plugins/devx/agent/lib/session_scope.ts`'s `loadSessionScope` reads the row
+back exactly once per session per worker (a small bounded cache) and every
+enforcement point (`filterTools`, `resolveWorkspace`, `sidecar_engine.ts`)
+consults that cached snapshot, never the live column. This is deliberate,
+not an optimization detail: a value read from `ctx.metadata` on every turn
+is a value the model can restate and widen turn over turn; a value pinned
+once at session creation cannot be talked out of by anything that happens
+inside the turn.
+
+The workspace is accepted only by round-tripping the declared path through
+devx's own worktree generator (`session_scope.ts`'s
+`acceptDeclaredWorkspace`, calling `getRunWorktreePath(userId, app, leaf)`
+and requiring byte-equality with the declared string, not a prefix check) —
+never by pattern-matching the string. That matters because the workspace is
+half of every consent scope key (`core/server/agents/service/
+scope-key.ts:221-225`): an accepted-but-wrong workspace wouldn't just point
+tools at the wrong directory, it would re-point which stored `always`/
+`never` consent a tool call is checked against — i.e. it would be a consent
+bypass, not just a path bug. A rejected value (`..` traversal, another
+user's or app's worktree, a bare `ensureWorkspace` result, a trailing slash,
+a NUL) logs and falls back to the normally-derived workspace rather than
+erroring the turn.
+
+### Enforcement differs by execution path — read this before touching either
+
+**Model loop.** `AgentConfig.filterTools` (devx's `agent.ts`'s `filterTools`)
+and `AgentConfig.resolveWorkspace` (`agent.ts`'s `resolveWorkspace`) are
+ordinary core hooks, invoked via `buildSdkTools`/`resolveInstructions`
+before the model ever sees a tool list — the same mechanism divergences
+11/12 already document. `filterTools` reads the allowlist snapshot
+synchronously (`peekSessionScopeForCtx`) and drops any tool not named in it;
+an empty allowlist drops everything, including the `agent`/`skill`
+built-ins. `resolveWorkspace` returns the declared, validated workspace in
+place of the derived one.
+
+**Delegated (`claude-code` sidecar) turns go through neither hook.**
+`service/engine/delegate.ts`'s `runDelegatedTurn` (see "External engines"
+above) calls neither `resolveInstructions` nor `buildSdkTools` — there is no
+eve-built tool set for `filterTools` to filter and no eve-built system
+prompt for `resolveWorkspace`'s result to feed. `plugins/devx/agent/lib/
+sidecar_engine.ts` therefore loads the session scope itself (folded into its
+own `Promise.all`) and enforces both hooks' intent by hand:
+- **Workspace:** resolved the same way `agent.ts`'s `resolveWorkspace` would
+  (`acceptDeclaredWorkspace(scope.workspace, userId) ?? (appId ?
+  ensureAppWorkspace : ensureWorkspace)`) and passed to the SDK as `cwd` via
+  `workspacePathOverride`.
+- **Tool allowlist:** checked as the *first* thing inside
+  `resolvePermission`, the function wired as the SDK's `canUseTool`
+  callback — **ahead of** `runApprovalGate`, so no stored `always` consent
+  and no human clicking approve can override a restriction the model loop
+  would have enforced by dropping the tool outright.
+
+**The SDK trap, stated so nobody reaches for the wrong option twice:** in
+`@anthropic-ai/claude-agent-sdk`, `allowedTools` is the **auto-approve**
+list, not a restriction — the SDK's own types say so ("To restrict which
+tools are available, use the `tools` option instead", pinned against the
+vendored 0.3.214 types' `sdk.d.ts:1341-1348`). Passing the allowlist as
+`allowedTools` to "restrict" the sidecar would have **waived the gate** for
+exactly the tools this mechanism exists to gate — the opposite of the
+intent. The fix threads the allowlist as the SDK's `tools` option instead
+(`sidecar_engine.ts` → `streamClaudeCodeChat` → `fn-claude-code/server.js`'s
+`query()` opts): `tools: []` is literally zero built-ins available to the
+model (`sdk.d.ts:1398-1404`), and a non-empty list drops every unlisted
+built-in from the model's context entirely, including the ones the SDK
+auto-approves in `default` permission mode (`Read`/`Glob`/`Grep`) and which
+therefore never even reach `canUseTool`.
+
+**What `tools` does not cover: MCP tools.** The SDK documents `tools` as
+governing built-ins only; the top-level `Options.disallowedTools` does not
+carry the `mcp__server`/`mcp__*` server-scoped specs that the (different)
+`AgentDefinition.disallowedTools` does. So an MCP tool — devx's `kb`/`ask`
+servers among them — is restricted **only** by the `resolvePermission`/
+`canUseTool` check, never by the `tools` option; both layers exist and are
+kept, precisely because each covers what the other cannot (built-ins vs.
+MCP).
+
+### Known limitations — recorded, not fixed
+
+- **A declared allowlist naming no MCP tool also denies
+  `mcp__ask__ask_question`**, the sidecar's structured elicitation channel
+  (registered only on UI/chat turns, not these unattended ones —
+  `agent.ts`'s `askToolAvailable`/`claude_code_agent.ts`'s tool wiring). Not
+  a new gap introduced here, but the migration is the first place it bites:
+  security-review and autonomous-run allowlists name concrete tool names,
+  never `mcp__ask__ask_question`, so it is denied like anything else
+  unlisted. The mitigating fact: both consumers are unattended sessions with
+  no human at the keyboard, so an elicitation call could not have succeeded
+  anyway — an immediate denial is strictly better than the multi-minute
+  round trip a question nobody can answer would otherwise cost.
+- **Nested `subagent_runs` child rows are gone.** eve's stream vocabulary has
+  no `subagent.*` events (see "What we ignore entirely" below) — a subagent
+  call is folded into the parent's own `actions.requested`/`action.result`
+  pair, invisible as a separate entity (`service/events.ts` excludes
+  `subagent.*` from the vocabulary this runtime emits). devx's legacy loop
+  used to create a child `devx.subagent_runs` row per nested call for the
+  UI's own nested-progress display; that bridge has no eve counterpart, so
+  it is gone for both migrated consumers. The irony worth recording: an
+  autonomous **plan** run's own prompt (`agent_run.ts`'s `buildRunPrompt`)
+  explicitly instructs the model to use subagent-driven execution — "Do not
+  ask which execution strategy to use — use subagent-driven execution" — so
+  this is exactly the run type whose internal structure now goes dark to an
+  observer.
+- **Per-review `max_steps` is gone.** The legacy loop capped each review
+  type individually (20 for security/code review, 30 for QA and
+  docs-update, 25 for design). `maxSteps` on eve is a `defineAgent`-time
+  constant, not a per-turn value; devx's own agent config hardcodes
+  `maxSteps: DEFAULT_MAX_STEPS` (100, `functions/coder_context.ts`), and
+  there is no runtime hook through which a per-review value could still
+  reach it. This is an over-budget, not an under-budget, so nothing
+  truncates early — but a QA review that used to stop at 30 steps can now
+  run to 100 before eve's own loop cuts it off, a real cost/latency change
+  even though nothing breaks.
+- **A parallel tool-call batch produces no devx SSE frame at all.**
+  `plugins/devx/functions/lib/eve_sse.ts`'s `toDevxSse` maps
+  `actions.requested` to `tool_call_start` only for exactly one action; with
+  zero or two-or-more simultaneous tool calls it returns `null` rather than
+  picking one or synthesizing a merged frame — devx's wire format has no
+  lossless single-frame form for a batch, and narrowing to "the first call"
+  would silently hide the others from the stream. The tool calls still
+  execute and their `action.result`s still persist to `agents.steps`; only
+  the live SSE narration of the request going out is missing for that
+  batch.
+
+### Denials are now durable
+
+A run whose tools were refused for want of an approver is no longer
+indistinguishable, after the fact, from a run that simply found nothing.
+Three places record it:
+- A **plan run** whose result carried any denial is left at
+  `devx.plans.status = 'accepted'` rather than advanced to `'implemented'`
+  (`agent_run.ts`'s `planStatusAfterRun` — `accepted` is already the
+  pre-implementation state in the existing status vocabulary, so no
+  migration was needed for this one).
+- A **review's** denials are persisted alongside its findings in
+  `devx.agent_results.denials` (migration `plugins/devx/migrations/
+  V21__agent_result_denials.sql`, `JSONB NOT NULL DEFAULT '[]'`), written by
+  the same call that writes the findings row and read back by
+  `getLatestReview` — so a page reload still shows it, not just the live
+  stream.
+- The **review UI** (`ProblemsTab`'s `ReviewSection`) renders one banner
+  across all five review types whenever `denials` is non-empty.
+
+Why this matters, stated plainly: before this, a review that found zero
+problems because eve refused to let it run `git push`/`psql`/whatever it
+needed was byte-identical in the database to a review that genuinely
+inspected everything and found nothing wrong. A denial banner is the only
+thing that tells those two states apart on reload, days later, without
+re-reading the live stream.
+
 ## Child-process environment allowlist
 
 trex-only (eve has no equivalent — this is about what a *host tool's own
