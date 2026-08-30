@@ -177,6 +177,10 @@ UI plugins serve static files and register menu items in the web UI.
           "dir": "dist"
         }
       ],
+      "nav": {
+        "path": "/my-plugin",
+        "label": "My Plugin"
+      },
       "uiplugins": {
         "sidebar": [
           {
@@ -202,6 +206,10 @@ UI plugins serve static files and register menu items in the web UI.
 - **\`routes\`** — Static file serving. Each entry maps a URL path prefix to a directory:
   - \`path\` (or \`source\`) — URL prefix (mounted at \`PLUGINS_BASE_PATH + path\`)
   - \`dir\` (or \`target\`) — directory in the plugin containing static files
+- **\`nav\`** — Top-nav entry in the web shell, added as soon as the plugin is installed.
+  \`path\` is the shell route, \`label\` the link text; the shell single-spa mounts the
+  plugin from \`/plugins/trex/<plugin>/<plugin>-spa.js\`. \`TREX_WEB_NAV_EXTRA\` adds
+  further entries and overrides a declared one with the same \`path\`.
 - **\`uiplugins\`** — Menu item definitions. Keys are menu categories (e.g. \`"sidebar"\`).
   Values are arrays of menu item objects with \`route\`, \`label\`, \`icon\`, and optional
   \`children\`. Items are merged with existing entries by route — matching routes update
