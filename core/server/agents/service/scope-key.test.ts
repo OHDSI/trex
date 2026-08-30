@@ -130,6 +130,15 @@ Deno.test("deriveScopeKey treats an unresolved workspace as its own bucket, not 
   assertEquals(unresolved, deriveScopeKey("Write", { path: "src/index.ts" }));
 });
 
+// Postgres `text` rejects any C0 control byte (0x00-0x1F), so the sentinel
+// must not introduce one — a real workspace path never does either.
+Deno.test("deriveScopeKey's unresolved-workspace sentinel contains no control byte", () => {
+  const unresolved = deriveScopeKey("Write", { path: "src/index.ts" });
+  for (const ch of unresolved) {
+    assert(ch >= " " && ch <= "~", `control byte in scope key: ${JSON.stringify(unresolved)}`);
+  }
+});
+
 // approval-policy.ts's matchEscalate splits the WHOLE scopeKey on "+" and
 // looks for an exact token. The workspace component must land as its OWN
 // token, not fused onto the action's first executable — otherwise a

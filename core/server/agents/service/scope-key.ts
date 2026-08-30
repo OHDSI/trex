@@ -187,10 +187,11 @@ function scopeAction(toolName: string, input: unknown): string {
   return "";
 }
 
-// NUL can't appear in a POSIX path, so this bucket never collides with a
-// real workspace or the pre-workspace unprefixed key (a raw NUL byte in the
-// source would make tooling treat this file as binary, hence the escape).
-const UNRESOLVED_WORKSPACE = "\u0000unresolved-workspace";
+// Must contain no NUL (Postgres' `text` type rejects it outright, and this
+// key is stored/queried via store.createApproval/getToolConsent) and must
+// not be a value ensureWorkspace/ensureAppWorkspace could ever produce (an
+// absolute filesystem path), so it can never collide with a real workspace.
+const UNRESOLVED_WORKSPACE = "(unresolved)";
 
 // `workspace` is resolved by the CALLER (AgentConfig.resolveWorkspace) and
 // handed in already-resolved, keeping this pure/sync. Glued with the same
