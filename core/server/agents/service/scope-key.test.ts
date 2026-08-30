@@ -1,5 +1,6 @@
 import { assert, assertEquals, assertNotEquals } from "jsr:@std/assert";
 import { bashExecutable, deriveScopeKey, normalizePath } from "./scope-key.ts";
+import { matchEscalate, parseEscalateList } from "./approval-policy.ts";
 
 Deno.test("bashExecutable strips the directory and lowercases", () => {
   assertEquals(bashExecutable("/usr/bin/npm test"), "npm");
@@ -147,4 +148,50 @@ Deno.test("deriveScopeKey's unresolved-workspace sentinel contains no control by
 Deno.test("the workspace component never corrupts an escalate-floor token", () => {
   const key = deriveScopeKey("Bash", { command: "sudo id" }, "/workspace/app-a");
   assert(key.split("+").includes("sudo"), key);
+});
+
+// A multiplexer's subcommand is part of the action, not decoration: the
+// escalate floor has to stop `git push` while leaving the read-only git
+// commands an unattended coder runs constantly completely alone. Nothing else
+// in the key can express that — matchEscalate compares whole `+` parts.
+Deno.test("bash scope key: git carries its subcommand so push is distinguishable from status", () => {
+  assertEquals(deriveScopeKey("Bash", { command: "git push --force origin main" }, WS), `${WS}+git:push`);
+  assertEquals(deriveScopeKey("Bash", { command: "git status" }, WS), `${WS}+git:status`);
+  assertEquals(deriveScopeKey("Bash", { command: "git log --oneline -5" }, WS), `${WS}+git:log`);
+  // A value-taking global flag's argument is not the subcommand.
+  assertEquals(deriveScopeKey("Bash", { command: "git -C /repo push" }, WS), `${WS}+git:push`);
+  assertEquals(deriveScopeKey("Bash", { command: "git -c user.name=x commit -m hi" }, WS), `${WS}+git:commit`);
+  // `--flag=value` consumes nothing extra.
+  assertEquals(deriveScopeKey("Bash", { command: "git --git-dir=/r/.git push" }, WS), `${WS}+git:push`);
+  // Bare `git` has no subcommand to carry.
+  assertEquals(deriveScopeKey("Bash", { command: "git" }, WS), `${WS}+git`);
+});
+
+Deno.test("bash scope key: the subcommand survives chaining and one level of shell wrapping", () => {
+  assertEquals(deriveScopeKey("Bash", { command: "cd /app && git push" }, WS), `${WS}+cd+git:push`);
+  assertEquals(deriveScopeKey("Bash", { command: `bash -lc "git push origin main"` }, WS), `${WS}+git:push`);
+});
+
+Deno.test("bash scope key: only listed multiplexers carry a subcommand", () => {
+  // npm/cargo/docker are NOT in SUBCOMMAND_TOOLS: adding one changes every
+  // stored consent key for it, so it must be a deliberate edit, not a default.
+  assertEquals(deriveScopeKey("Bash", { command: "cargo build --release" }, WS), `${WS}+cargo`);
+  assertEquals(deriveScopeKey("Bash", { command: "npm test" }, WS), `${WS}+npm`);
+});
+
+Deno.test("escalate floor: the shell equivalents of the hard devx tools are hard too", () => {
+  const list = parseEscalateList(undefined);
+  const hard = (command: string) =>
+    matchEscalate(list, "Bash", deriveScopeKey("Bash", { command }, WS));
+  // An external engine only ever presents Bash, so without these the hard tier
+  // (!GitPush/!ExecuteSQL/!CronCreate/!CronDelete) would exist only on the
+  // model loop and an unattended sidecar turn could force-push.
+  assertEquals(hard("git push --force origin main"), "hard");
+  assertEquals(hard("psql -c 'drop table users'"), "hard");
+  assertEquals(hard("crontab -r"), "hard");
+  // ...and the read-only/build commands claw depends on stay unmatched.
+  assertEquals(hard("git status"), null);
+  assertEquals(hard("git diff HEAD~1"), null);
+  assertEquals(hard("cargo build"), null);
+  assertEquals(hard("npm test"), null);
 });

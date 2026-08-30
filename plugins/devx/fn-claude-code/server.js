@@ -12,6 +12,12 @@ import { seedResponse, authKey, getCached, setCached } from "./models_cache.js";
 const modelsCache = new Map(); // authKey -> { models, expires }
 
 const PORT = 4322;
+// MUST match core/server/agents/service/approval-gate.ts's own 1_800_000ms
+// deadline (this is plain Node and cannot import that constant). A shorter
+// window here silently truncates the longer one: canUseTool would already have
+// denied by the time a human's approval lands, and nothing reads the decision
+// file after that. The 30 minutes is measured, not arbitrary — see that file.
+const PERMISSION_WAIT_MS = 30 * 60 * 1000;
 
 // Make the devx skills (brainstorming, writing-plans, etc.) invocable by the
 // agent. The claude-agent-sdk only discovers skills from disk via
@@ -203,7 +209,7 @@ const server = http.createServer(async (req, res) => {
         };
 
         const startTime = Date.now();
-        while (Date.now() - startTime < 5 * 60 * 1000) {
+        while (Date.now() - startTime < PERMISSION_WAIT_MS) {
           if (signal.aborted) return deny("Turn aborted");
           // Race the poll tick against the abort signal so a cancelled turn stops
           // immediately. Named handler + explicit removal on both branches, since

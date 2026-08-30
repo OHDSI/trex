@@ -88,11 +88,35 @@ interface ProviderRow {
 // createModel (:41-119), minus the Bedrock JSON-credential unpacking and the
 // OpenAI-compatible client construction itself — those become core's job
 // (model.ts's resolveModelSpec/buildModel) once we hand back a ModelSpec.
+// This agent authors no escalate override (the deployment list stands).
+// Declared once because BOTH loops must read the same value: defineAgent's
+// `escalate` feeds handler.ts's resolveEscalate for the model loop, and
+// lib/sidecar_engine.ts's gate needs it for the delegated one.
+const AUTHORED_ESCALATE: string | undefined = undefined;
+
+// resolveEngine and resolveModel both need the row, and BOTH run on every
+// turn — so without this the information_schema probe plus the
+// provider_configs/settings select would run twice per turn for every devx
+// user, including the vast majority whose turns are never delegated. Cached on
+// the request's own HookCtx object, exactly as turnHooks caches devx.hooks
+// below: one entry per request, collected with the request. The promise (not
+// its value) is cached so two concurrent hooks share one round trip.
+const providerRowCache = new WeakMap<object, Promise<ProviderRow | undefined>>();
+
 // The active provider row, or undefined when the user configured none.
 // Extracted so resolveEngine below picks the SAME row resolveModel does — a
 // second, differently-ordered lookup could route a turn to the sidecar while
 // the model hook read a different provider.
-async function readProviderRow(ctx: HookCtx, userId: string): Promise<ProviderRow | undefined> {
+function readProviderRow(ctx: HookCtx, userId: string): Promise<ProviderRow | undefined> {
+  let p = providerRowCache.get(ctx);
+  if (!p) {
+    p = selectProviderRow(ctx, userId);
+    providerRowCache.set(ctx, p);
+  }
+  return p;
+}
+
+async function selectProviderRow(ctx: HookCtx, userId: string): Promise<ProviderRow | undefined> {
   // Probe before selecting the encrypted columns — see provider_key.ts's
   // assertProviderConfigEncryptionMigrated header comment.
   await assertProviderConfigEncryptionMigrated(ctx.sql);
@@ -128,7 +152,7 @@ async function resolveEngine(ctx: HookCtx): Promise<AgentEngine | undefined> {
   if (!ctx.userId) return undefined;
   const row = await readProviderRow(ctx, ctx.userId);
   if (row?.provider !== "claude-code") return undefined;
-  return createSidecarEngine(ctx);
+  return createSidecarEngine(ctx, { escalate: AUTHORED_ESCALATE });
 }
 
 async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
@@ -729,6 +753,7 @@ export default defineAgent({
   maxSteps: DEFAULT_MAX_STEPS,
   resolveModel,
   resolveEngine,
+  escalate: AUTHORED_ESCALATE,
   filterTools,
   buildInstructions,
   resolveWorkspace,

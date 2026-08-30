@@ -151,22 +151,38 @@ async function readSettings(sql: HookCtx["sql"], userId: string): Promise<Settin
   return (r.rows[0] as SettingsRow | undefined) ?? {};
 }
 
+// `escalate` is the agent's AUTHORED override (AgentConfig.escalate), which
+// handler.ts:63 passes to the model loop and which nothing here can read off
+// the LoadedAgent — agent.ts supplies it, from the same constant it declares
+// to defineAgent, so the two loops cannot drift. The two approval timings are
+// test seams, exactly as they are on toolset.ts's ToolBuildCtx: a test that
+// asserts "this must NOT gate" has to fail fast rather than park for the
+// production 30 minutes.
+export interface SidecarEngineDeps {
+  stream?: SidecarStream;
+  escalate?: string;
+  approvalPollMs?: number;
+  approvalTimeoutMs?: number;
+}
+
 /**
  * Builds the per-request engine. Bound to `ctx` (sql/userId/env/metadata) the
  * way resolveModel's ModelSpec is, which is what keeps the switch per-account.
  */
-export function createSidecarEngine(ctx: HookCtx, deps: { stream?: SidecarStream } = {}): AgentEngine {
+export function createSidecarEngine(ctx: HookCtx, deps: SidecarEngineDeps = {}): AgentEngine {
   return {
     name: SIDECAR_ENGINE_NAME,
-    run: (turn: EngineTurn) => runSidecarTurn(ctx, deps.stream, turn),
+    run: (turn: EngineTurn) => runSidecarTurn(ctx, deps, turn),
   };
 }
 
 async function* runSidecarTurn(
   ctx: HookCtx,
-  injected: SidecarStream | undefined,
+  deps: SidecarEngineDeps,
   turn: EngineTurn,
 ): AsyncGenerator<SdkOutMessage> {
+  const injected = deps.stream;
+  const authoredEscalate = deps.escalate;
   // Dynamic, matching functions/index.ts's own two call sites: the sidecar
   // module is only pulled in for an account that actually runs on it, so it
   // cannot break agent load for every other provider.
@@ -184,7 +200,12 @@ async function* runSidecarTurn(
   // The same workspace authoredTool keys a stored consent on (agent.ts's
   // resolveWorkspace) — a grant for one app must not cover another.
   const workspace = appId ? await ensureAppWorkspace(userId, appId) : await ensureWorkspace(userId);
-  const escalate = resolveEscalateFor(undefined, parseEscalateList(ctx.env("AGENTS_ESCALATE_TOOLS")), agentName);
+  const escalate = resolveEscalateFor(authoredEscalate, parseEscalateList(ctx.env("AGENTS_ESCALATE_TOOLS")), agentName);
+  // handler.ts:978 does exactly this before handing `unattended` to the tool
+  // set: a channel-bound session never writes the unattended column
+  // (spawn.ts's own note), so reading the column alone would gate every Write
+  // and Bash on a claw coder session and park it on a human who is not there.
+  const noHuman = unattended || channelBound;
 
   // THE re-pointing (Task 6): the sidecar's permission request is decided by
   // eve's gate against this turn's own row, not by devx's
@@ -206,9 +227,11 @@ async function* runSidecarTurn(
       userId,
       plugin,
       agentName,
-      unattended,
+      unattended: noHuman,
       channelBound,
       escalate,
+      approvalPollMs: deps.approvalPollMs,
+      approvalTimeoutMs: deps.approvalTimeoutMs,
       signal: turn.signal,
     });
     // The sidecar re-runs the tool with updatedInput, so it must get the

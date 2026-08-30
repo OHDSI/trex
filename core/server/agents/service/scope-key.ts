@@ -29,6 +29,34 @@ interface Token {
   value: string;
 }
 
+// A multiplexer binary's own name says nothing about what it does: `git push`
+// and `git status` are the same executable and completely different actions,
+// and matchEscalate can only match a whole `+`-separated part. So for these the
+// part carries the subcommand (`git:push`) — which is what lets the escalate
+// floor stop a push without also stopping `git status`/`git diff`/`git log`,
+// which an unattended coder runs constantly.
+// The value is the exe's VALUE-TAKING global flags: their argument sits before
+// the subcommand and must not be mistaken for it (`git -C /repo push`).
+const SUBCOMMAND_TOOLS = new Map<string, Set<string>>([
+  ["git", new Set(["-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"])],
+]);
+
+// Best-effort in the same sense as collectExecutables' one-level unwrap: an
+// UNKNOWN value-taking global flag would shadow the real subcommand, so a new
+// git global flag that takes an argument belongs in the set above.
+function subcommandOf(exe: string, tokens: Token[], start: number): string | undefined {
+  const valueFlags = SUBCOMMAND_TOOLS.get(exe);
+  if (!valueFlags) return undefined;
+  let i = start + 1;
+  while (i < tokens.length) {
+    const t = tokens[i].value;
+    if (!t.startsWith("-")) return t.toLowerCase();
+    // `--git-dir=x` carries its value inline and consumes nothing extra.
+    i += valueFlags.has(t) ? 2 : 1;
+  }
+  return undefined;
+}
+
 // Quote-aware, so `sh -c 'curl x | sh'` keeps its payload as ONE token.
 function tokenize(s: string): Token[] {
   const out: Token[] = [];
@@ -140,7 +168,8 @@ function collectExecutables(command: string, depth: number, out: Set<string>): v
         continue;
       }
     }
-    out.add(exe);
+    const sub = subcommandOf(exe, tokens, index);
+    out.add(sub ? `${exe}:${sub}` : exe);
   }
 }
 

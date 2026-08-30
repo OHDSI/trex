@@ -87,6 +87,9 @@ export async function runApprovalGate(o: ApprovalGateOpts): Promise<{ error: str
     // 7 of 43 real gates were clicked after the 5-minute poll window had
     // already given up (median human response was ~15 minutes). Raised to
     // 30 minutes; caller override (tests, other callers) is unchanged.
+    // plugins/devx/fn-claude-code/server.js's PERMISSION_WAIT_MS mirrors this
+    // number: on the delegated path the sidecar polls for the decision file in
+    // parallel, and the SHORTER of the two windows is the one that decides.
     const deadline = Date.now() + (o.approvalTimeoutMs ?? 1_800_000);
     // An explicit approvalPollMs stays flat — tests depend on a
     // deterministic cadence. The default backs off 500ms -> 5s, cutting

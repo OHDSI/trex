@@ -16,6 +16,8 @@ const TURN = "t-eng-1";
 function fakeSql(over: Record<string, unknown[]> = {}) {
   return (sql: string, _params: unknown[] = []) => {
     if (sql.includes("FROM agents.sessions")) {
+      // gateContext and store.isUnattended both read this row, exactly as
+      // they do in production.
       return Promise.resolve({ rows: over.session ?? [{ plugin: "devx", agent: "coder", unattended: false }] });
     }
     if (sql.includes("FROM devx.settings")) return Promise.resolve({ rows: over.settings ?? [{ model: "sonnet" }] });
@@ -57,7 +59,10 @@ function fakeStream(
 }
 
 async function drain(ctx: HookCtx, stream: SidecarStream) {
-  const engine = createSidecarEngine(ctx, { stream });
+  // Short deadline on purpose: a test asserting "this must NOT gate" would
+  // otherwise park for the production 30 minutes when it regresses, turning a
+  // failure into a hang.
+  const engine = createSidecarEngine(ctx, { stream, approvalPollMs: 1, approvalTimeoutMs: 150 });
   const translate = createSdkTranslator();
   const events: Array<{ type: string; data: unknown }> = [];
   for await (const m of engine.run({ sessionId: SESSION, turnId: TURN, prompt: "do it" })) {
@@ -161,4 +166,94 @@ Deno.test("sidecar engine: events with no eve counterpart are dropped rather tha
   for (const type of ["step", "subagent_start", "questionnaire", "consent_request", "done"]) {
     assertEquals(toSdkMessage({ type }, SESSION), null);
   }
+});
+
+// ---------------------------------------------------------------------------
+// The unattended path. This is claw's whole working mode, and it is the half
+// the first cut of this file never exercised: fakeSql always said
+// unattended:false, so "an unattended coder runs Write and Bash without a
+// human" was asserted nowhere.
+// ---------------------------------------------------------------------------
+
+const UNATTENDED = [{ plugin: "devx", agent: "coder", unattended: true }];
+
+// Runs one permission request and reports both the decision the sidecar got
+// and whether a human was asked (an eve gate always announces itself first).
+async function decide(
+  sqlOver: Record<string, unknown[]>,
+  permission: { id: string; toolName: string; input: Record<string, unknown> },
+) {
+  const seen: AgentEvent[] = [];
+  const unsubscribe = subscribe(SESSION, (e) => seen.push(e));
+  try {
+    const { stream, decisions } = fakeStream([], { permission });
+    await drain(hookCtx(fakeSql(sqlOver)), stream);
+    return { decision: decisions[0], gated: seen.filter((e) => e.type === "input.requested").length };
+  } finally {
+    unsubscribe();
+  }
+}
+
+Deno.test("sidecar engine: an unattended turn writes files without parking on a human", async () => {
+  const { decision, gated } = await decide({ session: UNATTENDED }, {
+    id: "p-u1",
+    toolName: "Write",
+    input: { file_path: "/w/src/main.rs", content: "fn main() {}" },
+  });
+  assertEquals(decision, { behavior: "allow", updatedInput: { file_path: "/w/src/main.rs", content: "fn main() {}" } });
+  assertEquals(gated, 0);
+});
+
+Deno.test("sidecar engine: a channel-bound session counts as unattended even though its column says otherwise", async () => {
+  // spawn.ts: a channel session never writes agents.sessions.unattended, so
+  // reading the column alone would gate every build command on a claw coder.
+  const { decision, gated } = await decide(
+    { session: [{ plugin: "devx", agent: "coder", unattended: false }], channel: [{ ok: 1 }] },
+    { id: "p-u2", toolName: "Bash", input: { command: "cargo build --release" } },
+  );
+  assertEquals(decision.behavior, "allow");
+  assertEquals(gated, 0);
+});
+
+Deno.test("sidecar engine: read-only and build commands stay ungated for an unattended turn", async () => {
+  for (const command of ["git status", "git diff HEAD~1", "git log --oneline -5", "cargo build", "npm test"]) {
+    const { decision, gated } = await decide({ session: UNATTENDED }, {
+      id: `p-ok-${command}`,
+      toolName: "Bash",
+      input: { command },
+    });
+    assertEquals(decision.behavior, "allow", `${command} must stay ungated`);
+    assertEquals(gated, 0, `${command} must not park on a human`);
+  }
+});
+
+Deno.test("sidecar engine: an unattended turn cannot push, run psql or touch cron without a human", async () => {
+  for (
+    const command of [
+      "git push --force origin main",
+      "cd /w && git push",
+      'bash -lc "git push origin main"',
+      "git -C /w/repo push",
+      "psql -c 'drop table users'",
+      "crontab -r",
+    ]
+  ) {
+    const { decision } = await decide({ session: UNATTENDED }, {
+      id: `p-no-${command}`,
+      toolName: "Bash",
+      input: { command },
+    });
+    assertEquals(decision.behavior, "deny", `${command} must not run unattended`);
+  }
+});
+
+Deno.test("sidecar engine: a channel-bound push is asked rather than refused outright", async () => {
+  // The hard tier denies an unattended session but GATES a channel-bound one:
+  // claw has somewhere to put the question.
+  const { decision, gated } = await decide(
+    { session: [{ plugin: "devx", agent: "coder", unattended: false }], channel: [{ ok: 1 }], decision: [{ decision: "approve" }] },
+    { id: "p-u3", toolName: "Bash", input: { command: "git push origin main" } },
+  );
+  assertEquals(decision.behavior, "allow");
+  assertEquals(gated, 1);
 });

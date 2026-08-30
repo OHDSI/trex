@@ -25,8 +25,17 @@ export interface ApprovalPolicyInput {
   escalate: EscalateList;
 }
 
+// The `!Tool` entries name DEVX TOOLS. An external engine (the claude-code
+// sidecar) has no such tools — it does the same things through `Bash` — so
+// every hard devx entry that has a shell equivalent needs a Bash scope beside
+// it, or the floor exists only on the model loop: `git:push` for GitPush
+// (scope-key.ts's SUBCOMMAND_TOOLS is what makes that distinguishable from
+// `git status`), `psql` for ExecuteSQL, `crontab` for CronCreate/CronDelete.
+// RestartApp has no shell equivalent — it drives the process manager through
+// devx's own duckdb functions, which a sidecar shell cannot reach.
 export const DEFAULT_ESCALATE =
-  "!GitPush,!ExecuteSQL,!CronCreate,!CronDelete,!RestartApp,!Bash:sudo|dd|ssh|scp," +
+  "!GitPush,!ExecuteSQL,!CronCreate,!CronDelete,!RestartApp," +
+  "!Bash:sudo|dd|ssh|scp|psql|crontab|git:push," +
   "DeleteFile,Bash:rm|curl|wget|chmod|chown";
 
 // Parsed once. toolset.ts falls back to this when a caller passes no list;
