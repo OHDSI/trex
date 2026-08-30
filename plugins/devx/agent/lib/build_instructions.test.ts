@@ -57,6 +57,11 @@ function fakeHookCtx(overrides: Partial<HookCtx> & { aiRules?: string | null } =
       if (query.includes("FROM devx.skills")) {
         return Promise.resolve({ rows: [] });
       }
+      // buildInstructions also primes the session's V14 scope (session_scope.ts),
+      // the snapshot the synchronous filterTools reads. Nothing declared here.
+      if (query.includes("FROM agents.sessions")) {
+        return Promise.resolve({ rows: [] });
+      }
       throw new Error(`unexpected query: ${query}`);
     },
     ...rest,

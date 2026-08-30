@@ -38,6 +38,7 @@ import {
 import { toDevxCtx } from "./context.ts";
 import { constructLocalAgentPrompt, DEFAULT_AI_RULES } from "../../functions/prompts.ts";
 import agentConfig from "../agent.ts";
+import { loadSessionScope } from "./session_scope.ts";
 
 const AGENT_DIR = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
@@ -51,6 +52,10 @@ Deno.env.set("DEVX_WORKSPACE_DIR", SCRATCH);
 const agent = await loadAgent(AGENT_DIR);
 const buildInstructions = agentConfig.buildInstructions!;
 const filterTools = agentConfig.filterTools!;
+
+// filterTools reads the session's V14 scope from the snapshot buildInstructions
+// primes; calling the hook directly means priming it here. Nothing declared.
+await loadSessionScope("s-1", () => Promise.resolve({ rows: [] }));
 
 function fakeHookCtx(overrides: Partial<HookCtx> = {}): HookCtx {
   return {

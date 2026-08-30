@@ -19,6 +19,8 @@ import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
 import { toDevxCtx, wrap } from "./context.ts";
 import type { LegacyToolDef } from "./context.ts";
 import type { ToolContext } from "../../../../core/server/agents/eve-shim/types.ts";
+import { getRunWorktreePath } from "../../functions/tools/workspace.ts";
+import { loadSessionScope } from "./session_scope.ts";
 
 // Redirect workspace.ts's DEFAULT_WORKSPACE_DIR to a scratch dir for the
 // duration of this test file, so tests don't write into the shared
@@ -71,6 +73,34 @@ Deno.test("toDevxCtx: workspacePath uses ensureAppWorkspace when metadata carrie
   assertEquals(devxCtx.workspacePath, `${SCRATCH}/u-2/app-9`);
   assert((await Deno.stat(devxCtx.workspacePath)).isDirectory);
   assertEquals(devxCtx.appId, "app-9");
+});
+
+// resolveWorkspace decides the consent scope key; THIS decides where the
+// turn's file tools actually write. An autonomous run's isolated worktree is
+// only isolated if both agree, so both go through acceptDeclaredWorkspace.
+Deno.test("toDevxCtx: an accepted declared workspace is where the tools run, not the app workspace", async () => {
+  const declared = getRunWorktreePath("u-wt-1", "app-wt", "run-3");
+  await loadSessionScope("s-ctx-declared", () => Promise.resolve({ rows: [{ workspace_path: declared }] }));
+  const ctx = fakeToolContext({
+    sessionId: "s-ctx-declared",
+    userId: "u-wt-1",
+    metadata: { mode: "build", chatId: "c-wt", appId: "app-wt" },
+    sql: () => Promise.resolve({ rows: [{ ok: true }] }),
+  });
+  const devxCtx = await toDevxCtx(ctx as ToolContext & { sql: NonNullable<ToolContext["sql"]> });
+  assertEquals(devxCtx.workspacePath, declared);
+});
+
+Deno.test("toDevxCtx: a declared workspace devx could not have produced is rejected, tools stay in the app workspace", async () => {
+  await loadSessionScope("s-ctx-declared-bad", () => Promise.resolve({ rows: [{ workspace_path: "/etc" }] }));
+  const ctx = fakeToolContext({
+    sessionId: "s-ctx-declared-bad",
+    userId: "u-wt-2",
+    metadata: { mode: "build", chatId: "c-wt", appId: "app-wt" },
+    sql: () => Promise.resolve({ rows: [{ ok: true }] }),
+  });
+  const devxCtx = await toDevxCtx(ctx as ToolContext & { sql: NonNullable<ToolContext["sql"]> });
+  assertEquals(devxCtx.workspacePath, `${SCRATCH}/u-wt-2/app-wt`);
 });
 
 Deno.test("toDevxCtx: send routes through evectx.emit, defaulting the event name to 'devx'", async () => {
