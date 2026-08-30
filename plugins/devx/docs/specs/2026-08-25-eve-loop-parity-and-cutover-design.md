@@ -266,11 +266,22 @@ running its *own* agentic loop — own tools, own skills from `~/.claude/skills`
 would mean delegating an entire turn to an external engine: a new execution
 backend in core, not a provider adapter. Out of scope.
 
-**Consequence: the legacy loop is not being retired.** It is the permanent home
-for sidecar (claude-code) users. Prompt equivalence (§5) is therefore an
-ongoing invariant, not a transitional concern — which is why the skills listing
-and mode handling are fixed in the shared `buildCoderContext` rather than only
-on the eve side.
+**Consequence, as understood at the time: the legacy loop would not be
+retired** — it would be the permanent home for sidecar (claude-code) users,
+and prompt equivalence (§5) would be an ongoing invariant rather than a
+transitional concern, which is why the skills listing and mode handling were
+fixed in the shared `buildCoderContext` rather than only on the eve side.
+
+**This claim is retired.** `2026-08-30-one-loop-program-design.md`'s Phase 2
+("eve hosts the sidecar") does exactly what the "eve cannot host the sidecar"
+paragraph above says is out of scope: it delegates a whole turn to the
+claude-code SDK as an external engine
+(`core/server/agents/service/engine/`, `AgentConfig.resolveEngine`), so
+`claude-code` accounts run on eve too and the legacy loop stops being
+sidecar users' sole home. See `core/server/agents/COMPAT.md`'s "External
+engines (delegated turns)" section for what that backend does and does not
+preserve, and the later design for the cutover sequencing this implies for
+§5's equivalence invariant.
 
 ### 8. Migration
 

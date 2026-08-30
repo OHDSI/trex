@@ -768,22 +768,49 @@ destination]` pair), case-insensitively.
 A leading `!` marks an entry **hard**; its absence marks it **soft**
 (`approval-policy.ts`'s `parseEntries`). Both tiers refuse a sticky `always`
 grant (see "Precedence" below) — under a shared bot identity, neither can be
-bought off with one click. They differ only in what an **unattended**
-session (no human watching, see above) gets on a match: hard still denies
-outright (or gates, if channel-bound — no exception either way); soft
-**allows** it. Concretely, this is what lets an unattended coding agent run
-`rm -rf node_modules` or `curl` with nobody watching, while `sudo`, `ssh`,
-`GitPush` and `ExecuteSQL` still require a human every time, attended or not.
-An attended session sees no difference between the tiers — both still gate.
+bought off with one click. They differ in what an **unattended** session (no
+human watching, see above) gets on a match: hard still denies outright (or
+gates, if channel-bound — no exception either way, `approval-policy.ts:134-135`);
+soft **allows** it. Concretely, this is what lets an unattended coding agent
+run `rm -rf node_modules` or `curl` with nobody watching, while `sudo`,
+`ssh`, `GitPush` and `ExecuteSQL` are refused outright on a non-channel-bound
+session, attended or not.
+
+**An attended session does NOT see the tiers the same way, and this is easy
+to get wrong**: a soft match still gates an attended session (a human can
+approve), but a hard match **denies** it outright, with no approve button at
+all — `resolveApproval`'s hard branch (`approval-policy.ts:134-135`) checks
+only `channelBound`, never `unattended`, so a non-channel-bound attended
+session is treated exactly like a non-channel-bound unattended one: deny,
+because there is no channel to ask on. Only a channel-bound session gets
+`gate` on a hard match. This is a real, user-visible behaviour change from
+this phase's Bash scopes below, and it affects **both** execution paths, not
+only the new sidecar engine: before them, an attended session running `git
+push`/`psql`/`crontab` through the model loop's own `Bash` tool matched no
+hard entry, so it fell through to `gate` — a dashboard user could approve it.
+Now that those three sit in the hard tier, the identical attended,
+non-channel-bound call gets `deny` instead: that approve button is gone for
+those specific commands.
 
 Default (`DEFAULT_ESCALATE`):
 
 ```
-!GitPush,!ExecuteSQL,!CronCreate,!CronDelete,!RestartApp,!Bash:sudo|dd|ssh|scp,DeleteFile,Bash:rm|curl|wget|chmod|chown
+!GitPush,!ExecuteSQL,!CronCreate,!CronDelete,!RestartApp,!Bash:sudo|dd|ssh|scp|psql|crontab|git:push|git:subtree,DeleteFile,Bash:rm|curl|wget|chmod|chown
 ```
 
 i.e. hard: `GitPush`, `ExecuteSQL`, `CronCreate`, `CronDelete`, `RestartApp`,
-`Bash:sudo|dd|ssh|scp`; soft: `DeleteFile`, `Bash:rm|curl|wget|chmod|chown`.
+`Bash:sudo|dd|ssh|scp|psql|crontab|git:push|git:subtree`; soft: `DeleteFile`,
+`Bash:rm|curl|wget|chmod|chown`. `git:subtree` is escalated as a whole
+subcommand (not split further into `subtree push` vs. `subtree add/split/
+pull`) because `git subtree push` is itself a push and the extra precision
+isn't worth it for a subcommand an unattended coder essentially never runs —
+see `approval-policy.ts`'s own comment for the full reasoning. The Bash
+additions beyond `sudo|dd|ssh|scp` (`psql`/`crontab`/`git:push`/`git:subtree`)
+exist to give the `claude-code` sidecar's
+`Bash`-only tool surface the same hard floor the model loop's `ExecuteSQL`/
+`CronCreate`/`CronDelete`/`GitPush` tool names already had — see "External
+engines" below for why a tool-name-based floor needed them, and note above
+for the attended-session consequence of adding them.
 
 Unset uses that default. An **explicitly empty string** is a deliberate opt-out
 (no floor at all). A value that parses to nothing (every entry malformed, or a
@@ -840,7 +867,7 @@ x"'` keys on `sh`, not `rm`). Treat the floor as a guard rail on an agent's own
 mistakes; a genuinely adversarial prompt is a sandbox problem, not a scope-key
 problem.
 
-Two accepted limitations, both recorded rather than fixed:
+Accepted limitations, recorded rather than fixed:
 
 - **Scope keys carry no workspace or app component.** An `always` granted on
   `src/a.ts` in one app also covers `src/a.ts` in another app the same user
@@ -855,6 +882,14 @@ Two accepted limitations, both recorded rather than fixed:
 - Path keys are matched against the same `+`-split, so a path containing a
   literal `+` (a file named `a+b.ts`) can over-match a listed scope — again,
   toward more escalation.
+- **The Bash scope key for a multiplexer executable now carries its
+  subcommand** (`git` → `git:push`/`git:status`/…, see "External engines"
+  below), which is a different string from the coarse `git` key this runtime
+  used before. A sticky consent recorded against the coarse key does not
+  automatically apply to the finer one — same shape of mismatch as the
+  case-sensitivity point above, just introduced by this phase rather than
+  pre-existing. How that affects rows recorded before this change is handled
+  elsewhere in this codebase, not documented in this section.
 
 ### Precedence
 
@@ -895,6 +930,236 @@ already decided, the gate's turn no longer running) keeps its prior behaviour:
 202. That fall-through is load-bearing — eve's SDK sends `{inputResponses,
 message}` in ONE body, so 400ing a stale decision would discard the message
 with it and every retry of that body would 400 again.
+
+## External engines (delegated turns)
+
+trex-only capability — eve's own runtime has no concept of handing a turn to
+something other than its own model loop. `AgentConfig.resolveEngine`
+(`eve-shim/types.ts`) is called on every turn/chat request, same posture as
+`resolveModel`/`buildInstructions`: a rejecting hook fails the turn rather
+than falling back to `runner.ts`'s loop, which would run on the wrong
+credentials and the wrong tools. Resolving `undefined` runs the model loop as
+usual — this is what makes external-engine delegation a per-account switch,
+not a global one, and `resolveModel` is **not** consulted for a delegated
+turn at all: the engine holds its own credentials.
+
+The first (and, as of this phase, only) engine is the **claude-code sidecar**
+(`plugins/devx/agent/lib/sidecar_engine.ts`) — a Node server wrapping the
+Claude Agent SDK, which runs its own agentic loop with its own tools (`Read`,
+`Write`, `Edit`, `Glob`, `Grep`, `Bash`, and whatever else the SDK ships).
+devx's `agent.ts`'s `resolveEngine` returns it only for a `provider ===
+"claude-code"` row; every other provider resolves `undefined` and is
+unaffected.
+
+### What changes about turn execution
+
+`service/engine/delegate.ts`'s `runDelegatedTurn` replaces `runner.ts`'s
+`streamText` loop entirely for a delegated turn: instead of eve driving the
+model over eve's own tool set, the whole turn is handed to `engine.run(...)`,
+and `service/engine/events.ts`'s translator maps what comes back — a stream
+of `SDKMessage` variants (assistant text, `tool_use`, `tool_result`, the
+terminal `result` message, a `compact_boundary`, a `permission_denied`) — onto
+eve's `AgentEvent` vocabulary, dropping everything eve has no counterpart for
+(session bootstrap, streaming partials, subagent/hook/plugin progress, …).
+A delegated turn still persists the same `agents.steps` row kinds a
+`runner.ts` turn does (`text`, `tool-call`, `tool-result`, `finish`, `error`)
+— the dashboard, `/stream`, claw's transport and `history.ts`'s replay all
+read whichever path wrote them, so this is not optional parity, it is the
+contract `delegate.ts`'s own header comment states.
+
+### Hooks a delegated turn structurally cannot honour
+
+The engine owns its own loop — there is no per-step hook point inside it for
+eve to call into. A delegated turn honours exactly two `AgentConfig` hooks:
+`buildUserMessage` (applied to the prompt before it's handed to `engine.run`,
+`delegate.ts:56`) and `onTurnEnd` (called once the text is persisted,
+`delegate.ts:197-207`, identical posture to `runner.ts`'s own call: errors
+logged and swallowed, never called for a failed turn). It does **not**, and
+structurally **cannot**, honour `buildInstructions`, `filterTools`,
+`onToolCall`, `onToolResult`, or `onCompact` — there is no eve-built system
+prompt for the engine to receive, no eve tool set for `filterTools` to
+filter, no `authoredTool` call site for `onToolCall`/`onToolResult` to
+intercept, and no eve-side compaction to hook (see below). An agent author
+who configures one of these five expecting it to apply to sidecar turns will
+see it silently do nothing on that path: nothing throws and nothing warns,
+because from `delegate.ts`'s point of view the hook was never in scope to
+call in the first place.
+
+### Compaction is skipped for a delegated turn, deliberately
+
+`handler.ts`'s pre-turn compaction block is gated on `!engine && priorTurns.length
+> 0` — a resolved engine skips it outright, for two independent reasons,
+either sufficient on its own:
+
+- **There is nothing for it to shorten.** `DelegatedTurnOpts` carries no
+  `history` field at all, unlike `RunTurnOpts` — the sidecar resumes its own
+  SDK transcript across turns, so eve's assembled history never reaches the
+  engine. Summarizing it would shorten something nothing reads.
+- **It would have to run through `resolveModel`, which a `claude-code`
+  account has none for.** Compaction's summarizer needs a `ModelSpec` to
+  call. A `claude-code` provider row authenticates the sidecar with a Claude
+  Code OAuth token, not an Anthropic API key, so synthesizing a `ModelSpec`
+  for it would leave `apiKey: undefined` — which `buildModel`
+  (`model.ts:52-73`) backfills from the operator's own `ANTHROPIC_API_KEY`.
+  That is a cross-tenant credential substitution, the exact failure mode
+  `resolveModel` guards against everywhere else in this codebase, which is
+  why devx's `agent.ts`'s `resolveModel` still throws `"sidecar providers use
+  the legacy endpoint"` for `claude-code` rather than ever returning
+  something usable (`agent.ts:194-206`) — this throw is now unreachable on
+  the delegating path (the engine is picked before `resolveModel` would run),
+  but stays in place because `/chat` has no engine switch and can still
+  reach it. Without this skip, `maybeCompact`'s own catch-and-drop fallback
+  would silently start dropping the oldest turns from eve's record of the
+  session for no benefit.
+
+### `usage.lastStepInputTokens` is absent on a delegated turn
+
+`delegate.ts`'s `turn.completed` handling persists the engine's `usage`
+verbatim but never sets `lastStepInputTokens` — the engine reports one
+**cumulative** total for the whole delegated turn, where that field
+specifically means "the final model step's own prefill", which
+`store.ts`'s `getLastTurnUsage` reads as an approximation of how full the
+context window is. `getLastTurnUsage` returns `null` when the field is
+absent rather than falling back to the summed total (by design — pinned by
+`store.test.ts`'s "never falls back to the SUMMED inputTokens" case), and a
+consumer chaining off that with `??` (`compact.ts:155`) falls through to the
+**estimate** path (`estimateTokens` over the assembled messages), not to
+zero. Concretely: a delegated session's next compaction decision (once it
+returns to the model loop) is made from an estimate, not the sidecar's own
+reported number — it does not read as "no context has been used yet."
+
+### The `"(completed)"` placeholder, and its one latent trap
+
+The sidecar streams its own devx-flavoured SSE (`chunk`, `tool_call_start`,
+`tool_call_end`, …) rather than raw SDK messages, and `fn-claude-code/server.js`
+emits `tool_call_end` with a hardcoded `result: "(completed)"`
+(`server.js:284,341`) — it never threads a tool's real output back onto that
+event. `sidecar_engine.ts`'s `toSdkMessage` turns that into a `tool_result`
+block whose `content` is the literal string `"(completed)"`, and
+`events.ts`'s `translateToolResult` reads `block.content` (there is no
+`tool_use_result` on this synthesized message to prefer instead) — so every
+sidecar tool call persists an `agents.steps` row of kind `tool-result` whose
+`output` is `"(completed)"`, never the tool's actual result.
+
+This is harmless today: the model never sees the placeholder, because the
+sidecar resumes its own SDK transcript — which holds the real tool outputs —
+and never re-reads eve's persisted steps. The legacy `/stream` path behaves
+identically (same `server.js` code), so this is not a regression this phase
+introduced.
+
+**The trap:** if that account is later switched from `claude-code` to a real
+model provider, `history.ts`'s `assembleHistory` (`history.ts:85`) replays
+every persisted `tool-result` step straight into the model's message list —
+including, for every prior sidecar tool call, the literal string
+`"(completed)"` in place of whatever that tool actually returned. There is no
+detection or warning for this. Treat it as a known limitation of switching a
+session's provider away from `claude-code` after it has run turns on the
+sidecar, not something this phase closes.
+
+### The tool-input mapping, and why an unmapped tool gates rather than fails
+
+Every sidecar tool call is gated by eve's approval machinery before it runs —
+`sidecar_engine.ts`'s `resolvePermission` is wired as the SDK's `canUseTool`
+callback, so it sees **every** tool call the SDK is about to make, not only
+ones a devx author marked `needsApproval`. To decide, it has to derive the
+same `scopeKey` a native devx call would (`scope-key.ts`'s `deriveScopeKey`,
+which reads devx's own field names — `path`, `command`, …) — so
+`engine/tool-input.ts`'s `toDevxToolInput` first renames the SDK's field
+names onto devx's shape, for the six tools devx itself authors natively
+(`Read`, `Write`, `Edit`, `Glob`, `Grep`, `Bash`). Field renames only, no
+execution semantics: a field with no mapped target (the SDK `Bash` tool's
+`timeout`, `Read`'s `offset`/`limit`, `Edit`'s `replace_all`, …) is dropped
+rather than guessed at.
+
+An SDK tool name this table has never been taught (or input that isn't a
+plain object) passes through **unmapped** rather than throwing —
+`toDevxToolInput` returns the bare SDK name with no renamed fields.
+`scope-key.ts`'s `scopeAction` then returns `""` for a name/shape it doesn't
+recognize — the same defensive default it already uses for malformed input on
+a *known* tool. That empty scope can't match a scoped escalate entry, so the
+call falls through `resolveApproval`'s precedence to whatever the
+bare-unmatched-tool rule decides: **gate** for an attended session,
+**allow** for an unattended one (rules 5/6 in "Precedence" above) — never a
+crash, and never a silent grant to an attended human's session. Gating an
+unrecognized shape is the safe default: failing the call outright would break
+every future SDK tool this table hasn't caught up to yet, and silently
+granting it would be worse.
+
+`suggestions` — the SDK's own "always allow this tool for the rest of the
+session" signal on a permission response — is **deliberately unmapped**.
+`sidecar_engine.ts`'s `PermissionDecision` type has no `suggestions` variant
+at all (`{behavior:"allow", updatedInput}` or `{behavior:"deny", message}`
+only), and `resolvePermission` always returns `updatedInput: req.input` on
+allow, never a `suggestions` array. Eve's own sticky-consent mechanism
+(`always`/`never`, divergence 13) is the single place that decision is
+allowed to live, keyed on `(user_id, plugin, agent, tool, scope)`; honouring
+the SDK's `suggestions` would let it grant a standing consent eve's own store
+never recorded and eve's own gate can't revoke — `fn-claude-code/server.js`'s
+own `canUseTool` comment states the same reasoning for the legacy path
+("`suggestions` … is left unused — it could grant more than agreed").
+
+### Why a tool-name-based escalate policy needed a Bash subcommand scope
+
+`AGENTS_ESCALATE_TOOLS`'s default hard entries are written against **devx
+tool names** — `!GitPush`, `!ExecuteSQL`, `!CronCreate`, `!CronDelete`,
+`!RestartApp` — because that is what the model loop's own tool set calls
+them. The sidecar has no `GitPush` tool: it has `Bash`, and it runs `git
+push` (or `psql`, or `crontab`) through it like any other shell command. So
+before this phase, every one of those hard entries matched **nothing** on a
+delegated turn — an unattended sidecar session could run `git push --force`
+where an unattended model-loop session hard-denied the equivalent `GitPush`
+call outright. A policy is only as good as its ability to recognize the same
+capability however it is reached.
+
+The fix (`scope-key.ts`'s `SUBCOMMAND_TOOLS`) makes the `Bash` scope carry
+the subcommand for an allowlist of multiplexer executables — today just
+`git` — so the key is `git:push`, not bare `git`: `bashScopeKey` walks past
+the executable's value-taking global flags (`-C`, `--git-dir`, …, so `git -C
+/repo push` still keys on `push`) to find the first non-flag token.
+`DEFAULT_ESCALATE` now reads
+`!Bash:sudo|dd|ssh|scp|psql|crontab|git:push|git:subtree`
+— `git:push` (and `git:subtree`, whose own `push` subcommand is a push too)
+sits in the hard tier beside `psql` (`ExecuteSQL`'s shell equivalent) and
+`crontab` (`CronCreate`/`CronDelete`'s), so all three are now
+blocked identically from either execution path (with the attended-session
+consequence described above, under "Two tiers: hard and soft"). `git
+status`/`git diff`/`git log` key on bare `git`, which matches nothing in the
+list, so an unattended coder can still read the repo freely. `RestartApp` has
+no shell equivalent at all — it drives the process manager through devx's own
+DuckDB functions, which a sidecar's `Bash` genuinely cannot reach — so that
+entry stays inert on the delegated path, not from a gap in the mapping but
+because there is nothing to map.
+
+**The general lesson, stated plainly: a policy written against tool names
+loses its teeth the moment a different execution path names the same
+capability differently.** Any future engine that presents its own tool
+vocabulary needs the same audit this one got — check every hard/soft entry
+against what that engine actually calls things, not just what the model loop
+calls them. (A Bash scope key's subcommand-awareness is now also part of the
+sticky-consent key — see "Accepted limitations" below for the one
+consent-scoping consequence that follows from it.)
+
+### What an unattended delegated turn can, and cannot, do
+
+Same precedence as any other gated call (see "Precedence" above), applied
+through the Bash-subcommand-aware scope keys above. Concretely, on the
+default escalate list, an **unattended** (no human watching — channel-bound
+or `sessions.unattended`) sidecar session:
+
+- **Can** run `Read`/`Write`/`Edit`/`Glob`/`Grep` freely, and `Bash` for
+  anything not listed below — including the soft-tier `rm`/`curl`/`wget`/
+  `chmod`/`chown` (soft allows on an unattended match).
+- **Cannot** run `git push` or `git subtree` (anything keying `git:push` or
+  `git:subtree`), `psql`, `crontab`, or a command keying on
+  `sudo`/`dd`/`ssh`/`scp` — the hard tier denies these outright for a
+  non-channel-bound session regardless of `unattended` (see
+  above), and gates them (parks for a human) only when channel-bound. No
+  sticky `always` consent can buy back either tier.
+- Any SDK tool name outside the six devx maps runs through the gate above
+  unrecognized: it allows when unattended, same as any other unmatched call.
+
+An **attended** delegated turn does *not* see hard and soft the same way —
+see "Two tiers: hard and soft" above for exactly how they diverge.
 
 ## Child-process environment allowlist
 
