@@ -392,7 +392,19 @@ export function mountD2eRoutes(app: Express): void {
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: params.toString(),
       });
-      const data = await r.json();
+      // Not every response is JSON: a rate-limited request comes back as plain
+      // text, and parsing it unconditionally turned a 429 the caller could act
+      // on into an opaque 500 that named nothing.
+      const body = await r.text();
+      let data: unknown;
+      try {
+        data = JSON.parse(body);
+      } catch {
+        data = { error: r.ok ? "invalid_response" : "upstream_error", error_description: body };
+      }
+      if (!r.ok) {
+        console.error(`[d2e-compat] /oauth/token: identity provider returned ${r.status}: ${body}`);
+      }
       (res as any).status(r.ok ? 200 : r.status).json(data);
     } catch (e) {
       console.error(`[d2e-compat] /oauth/token error: ${e}`);
