@@ -1,0 +1,2 @@
+# Build output — rebuilt by `npm run build` (prepack, Dockerfile aithon-builder, CI)
+dist/

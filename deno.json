@@ -1,4 +1,4 @@
 {
-  "workspace": ["./core", "./plugins/runtime", "./plugins/prometheus", "./plugins/postgrest", "./integration-tests/realtime_js_e2e"],
+  "workspace": ["./core", "./plugins/runtime", "./plugins/aithon", "./plugins/postgrest", "./integration-tests/realtime_js_e2e"],
   "nodeModulesDir": "auto"
 }

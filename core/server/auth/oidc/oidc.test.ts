@@ -68,6 +68,31 @@ Deno.test("a client with no stored secret is public", () => {
   assertEquals(isPublicClient({ ...client, clientSecretHash: "salt:hash" }), false);
 });
 
+Deno.test("a service token names the client as its own subject", () => {
+  // A client_credentials token has no user behind it. Relying parties tell one
+  // apart from a user's token by sub === client_id, so that equality is the
+  // contract, not an incidental detail of how the claims are built.
+  const client = { clientId: "d2e-webapi", name: "D2E WebAPI" };
+
+  const claims = buildIdTokenClaims(
+    {
+      id: client.clientId,
+      email: "",
+      name: client.name,
+      role: "service",
+      appRoles: [],
+    },
+    { issuer: "https://example.test/trex", audience: client.clientId, scopes: [] },
+  );
+
+  assertEquals(claims.sub, client.clientId);
+  assertEquals(claims.aud, client.clientId);
+  assertEquals(claims.sub, claims.aud);
+  // No user stands behind it, so it carries no application roles to authorize with.
+  assertEquals(claims.trex_role, "service");
+  assertEquals(claims.app_metadata.trex_role, "service");
+});
+
 Deno.test("claims carry the role and honour the requested scopes", () => {
   const user = {
     id: "11111111-1111-1111-1111-111111111111",

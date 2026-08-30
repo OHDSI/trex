@@ -1,13 +1,13 @@
-# MRI-vue-lib-compatible analytics backend (new prometheus function)
+# MRI-vue-lib-compatible analytics backend (new aithon function)
 
 **Date:** 2026-06-16
 **Status:** Approved design — ready for implementation plan
-**Repo/area:** `trex` → `plugins/prometheus`
+**Repo/area:** `trex` → `plugins/aithon`
 
 ## 1. Goal
 
 Add an **mri-vue-lib-compatible analytics backend** as a **new Deno function** inside
-`plugins/prometheus`, so the existing MRI (Medical Research Insights) Vue frontend
+`plugins/aithon`, so the existing MRI (Medical Research Insights) Vue frontend
 (`vue-mri-ui-lib`) can run cohort/stratification analytics directly against FHIR data
 stored in trex's DuckDB-backed FHIR server.
 
@@ -23,9 +23,9 @@ The new function:
 ## 2. Constraints (hard)
 
 - **No changes to d2e** (`../d2e`, `../alp-data-node`, `vue-mri-ui-lib`).
-- **No changes** to the existing prometheus FHIR function (`plugins/prometheus/functions`).
+- **No changes** to the existing aithon FHIR function (`plugins/aithon/functions`).
 - **No changes** to the Rust `plugins/fhir` engine or `plugins/cql2elm`.
-- All new code lives in a **sibling function directory** within `plugins/prometheus`.
+- All new code lives in a **sibling function directory** within `plugins/aithon`.
 
 ## 3. Background (why this shape)
 
@@ -33,15 +33,15 @@ Two relevant facts established during exploration:
 
 - The working **ELM→SQL compiler is Rust-only** (`plugins/fhir/src/cql/compiler.rs`,
   reachable via the native `fhir` extension's embedded HTTP server `$cql`; CQL→ELM is
-  the separate `cql2elm` DuckDB extension). The Deno prometheus function's `$cql` route
+  the separate `cql2elm` DuckDB extension). The Deno aithon function's `$cql` route
   is a stub ("handler not implemented") — only a CQL *editor UI* exists in TS
-  (`src/screens/CqlEditor.vue`). See `plugins/prometheus/docs/CQL-BACKEND.md`.
+  (`src/screens/CqlEditor.vue`). See `plugins/aithon/docs/CQL-BACKEND.md`.
 - The MRI frontend is **config-driven** and talks to an `analytics-svc`-style HTTP
   contract (`getMyConfig`, `patientcount`, `barchart`), sending a compressed
   filter+axis "bookmark" (IFR) and expecting a stratified result grid back.
 
 **Decision:** rather than depend on the Rust HTTP engine, the new function is
-**fully self-contained TypeScript** — IFR→ELM→SQL in TS — so the prometheus plugin
+**fully self-contained TypeScript** — IFR→ELM→SQL in TS — so the aithon plugin
 owns the whole MRI path. The TS compiler is a **bounded port** of the Rust compiler:
 only the ELM subset our own IFR→ELM translator emits, plus new stratification.
 
@@ -51,7 +51,7 @@ separate FAST IR.
 
 ## 4. Architecture & components
 
-New function directory `plugins/prometheus/functions-mri/` (sibling to `functions/`),
+New function directory `plugins/aithon/functions-mri/` (sibling to `functions/`),
 mounted via a second entry in `package.json` → `trex.functions.api`:
 
 ```json
@@ -215,9 +215,9 @@ GET /analytics-svc/api/services/population/json/barchart?mriquery=…
 
 | Artifact | Path |
 |---|---|
-| Existing prometheus FHIR function | `plugins/prometheus/functions/{index,router,db,state}.ts` |
-| FHIR resource registry (reuse) | `plugins/prometheus/functions/fhir/resource_registry.ts` |
-| Plugin manifest | `plugins/prometheus/package.json` (`trex.functions.api`) |
+| Existing aithon FHIR function | `plugins/aithon/functions/{index,router,db,state}.ts` |
+| FHIR resource registry (reuse) | `plugins/aithon/functions/fhir/resource_registry.ts` |
+| Plugin manifest | `plugins/aithon/package.json` (`trex.functions.api`) |
 | Rust ELM→SQL compiler (port source) | `plugins/fhir/src/cql/compiler.rs`, `elm_types.rs` |
 | Rust measure (population COUNT example) | `plugins/fhir/src/handlers/measure.rs` |
 | MRI frontend request builder | `../d2e-ui2/apps/vue-mri-ui-lib/src/store/modules/bookmark.ts` |
