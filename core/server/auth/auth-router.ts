@@ -964,4 +964,52 @@ router.put("/admin/users/:id", apiLimiter, async (req, res) => {
   }
 });
 
+// DELETE /admin/users/:id is the GoTrue-compatible admin delete. Removing the
+// account is what lets the same address be registered again afterwards, so a
+// caller that deletes a user and recreates it under the same name succeeds
+// rather than colliding with the account left behind.
+router.delete("/admin/users/:id", apiLimiter, async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) {
+      res.status(401).json({ error: "not_authenticated" });
+      return;
+    }
+
+    const token = authHeader.slice(7);
+    const claims = await verifyAccessToken(token);
+    if (!claims) {
+      res.status(401).json({ error: "not_authenticated" });
+      return;
+    }
+
+    // service_role bypasses RLS/admin checks (Supabase convention).
+    const callerRole = claims.app_metadata?.trex_role;
+    const isServiceRole = claims.role === "service_role";
+    if (callerRole !== "admin" && !isServiceRole) {
+      res.status(403).json({ error: "forbidden", error_description: "Admin access required" });
+      return;
+    }
+
+    const user = await fetchUserById(req.params.id);
+    if (!user) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+
+    // Sessions, credentials and tokens are all ON DELETE CASCADE from the user
+    // row, so removing it takes the account's refresh tokens with it rather than
+    // leaving any able to mint access tokens for a user that no longer exists.
+    await pool.query(
+      `DELETE FROM trexdb."user" WHERE id = $1`,
+      [user.id],
+    );
+
+    res.status(200).json({});
+  } catch (err) {
+    console.error("[auth] admin delete-user error:", err);
+    res.status(500).json({ error: "server_error", error_description: "Internal server error" });
+  }
+});
+
 export { router as authRouter };
