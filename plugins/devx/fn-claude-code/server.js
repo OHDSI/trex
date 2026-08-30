@@ -171,7 +171,6 @@ const server = http.createServer(async (req, res) => {
         systemPrompt: systemPrompt || undefined,
         maxTurns: maxTurns || 100,
         model: model || "sonnet",
-        permissionMode: "bypassPermissions",
         cwd: cwd || undefined,
         mcpServers: {
           kb: kbMcpServer,
@@ -186,6 +185,49 @@ const server = http.createServer(async (req, res) => {
 
       const resumeId = chatSessions.get(sessionKey);
       if (resumeId) opts.resume = resumeId;
+
+      // Ask permission before running a tool. Same file-based round trip as
+      // onElicitation below: write a request file, emit an SSE event, poll for
+      // a decision file, deny on timeout. `suggestions` (the SDK's own "always
+      // allow") is deliberately left unused — mapping it to sticky consent is a
+      // separate decision that could grant more than the human agreed to.
+      opts.canUseTool = async (toolName, input, { signal }) => {
+        const id = crypto.randomUUID();
+        const requestFile = `/tmp/.claude-permission-${id}.json`;
+        const decisionFile = `/tmp/.claude-permission-${id}.decision`;
+
+        fs.writeFileSync(requestFile, JSON.stringify({ toolName, input }));
+        sendSSE(res, "permission", { id, toolName, input });
+
+        const deny = (message) => {
+          try { fs.unlinkSync(requestFile); } catch {}
+          return { behavior: "deny", message };
+        };
+
+        const startTime = Date.now();
+        while (Date.now() - startTime < 5 * 60 * 1000) {
+          if (signal.aborted) return deny("Turn aborted");
+          // Race the poll tick against the abort signal so a cancelled turn
+          // stops immediately instead of waiting out the remaining interval.
+          const aborted = await new Promise((resolve) => {
+            const t = setTimeout(() => resolve(false), 500);
+            signal.addEventListener("abort", () => { clearTimeout(t); resolve(true); }, { once: true });
+          });
+          if (aborted) return deny("Turn aborted");
+          try {
+            if (fs.existsSync(decisionFile)) {
+              const decision = JSON.parse(fs.readFileSync(decisionFile, "utf8"));
+              try { fs.unlinkSync(decisionFile); } catch {}
+              try { fs.unlinkSync(requestFile); } catch {}
+              if (decision.behavior === "allow") {
+                return { behavior: "allow", updatedInput: decision.updatedInput || input };
+              }
+              return { behavior: "deny", message: decision.message || "Denied by user" };
+            }
+          } catch {}
+        }
+        return deny("Permission request timed out");
+      };
 
       // Handle elicitations (clarifying questions) via file-based signaling
       // The Node.js server writes the question, sends SSE event, polls for answer
