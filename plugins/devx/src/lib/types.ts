@@ -34,11 +34,9 @@ export const CHAT_MODES: { id: ChatMode; label: string; description: string }[] 
 // stored credential cannot be derived client-side — the server computes it
 // from the raw key before masking (functions/auth_shape.ts). Display-only:
 // shown alongside key_status/is_plaintext so the Settings UI can tell the
-// user what kind of credential is on file. NOT a loop gate — only
-// provider === "claude-code" forces the legacy loop (useEffectiveLoop.ts);
-// IAM-shaped bedrock credentials are simply unsupported and error at
-// agent.ts's resolveModel. Absent on older server builds (optional
-// everywhere it appears).
+// user what kind of credential is on file. IAM-shaped bedrock credentials
+// are simply unsupported and error at agent.ts's resolveModel. Absent on
+// older server builds (optional everywhere it appears).
 export type AuthShape = "bearer" | "iam" | "plain" | "none";
 
 export interface DevxSettings {
@@ -69,10 +67,6 @@ export interface DevxSettings {
   max_steps?: number;
   max_tool_steps?: number;
   auto_fix_problems?: boolean;
-  // task-u1 (V11__loop_flag.sql): per-user coexistence flag between the
-  // legacy AI-SDK loop and the ported eve/agents runtime. Defaults to
-  // 'legacy' server-side (DB column default) when unset/absent.
-  loop?: "legacy" | "agents";
   // V13: per-user git author identity (commit signing lives in
   // devx.integrations, see GitSigningStatus).
   git_author_name?: string;

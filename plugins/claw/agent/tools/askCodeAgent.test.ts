@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "jsr:@std/assert";
-import askCodeAgentTool, { askCore, routeCodeTurn, type CodeTurnOutcome, type TransportDeps } from "./askCodeAgent.ts";
+import askCodeAgentTool, { askCore, providerFromSettings, routeCodeTurn, type CodeTurnOutcome, type TransportDeps } from "./askCodeAgent.ts";
 import type { CodeTurnArgs } from "../lib/code-stream.ts";
 import type { TokioClient } from "../lib/code-session.ts";
 import type { MirrorDeps } from "../lib/chat-mirror.ts";
@@ -271,27 +271,27 @@ function fakeClient(): TokioClient {
   return { req: () => Promise.resolve(new Response("{}", { status: 200 })) };
 }
 
-Deno.test("routeCodeTurn calls the legacy transport for a claude-code account", async () => {
-  const seenLegacy: CodeTurnArgs[] = [];
+Deno.test("routeCodeTurn calls the eve transport for a claude-code account too", async () => {
+  const seenEve: unknown[] = [];
   const deps: TransportDeps = {
-    getProvider: () => Promise.resolve("claude-code"),
-    runLegacy: (args) => {
-      seenLegacy.push(args);
-      return Promise.resolve({ chatId: "chat-1", replyText: "ok" });
+    runLegacy: () => {
+      throw new Error("must not call legacy — eve hosts the sidecar since phase 2");
     },
-    runEve: () => {
-      throw new Error("must not call eve for a claude-code account");
+    runEve: (_client, runArgs) => {
+      seenEve.push(runArgs);
+      return Promise.resolve({ codeSessionId: "sess-1", replyText: "ok", nextCursor: 2, reason: "completed", pending: [] });
     },
+    getClient: () => fakeClient(),
   };
   const out = await routeCodeTurn(baseArgs(), 0, deps);
   assertEquals(out.replyText, "ok");
-  assertEquals(seenLegacy.length, 1);
+  assertEquals(out.transport, "eve");
+  assertEquals(seenEve.length, 1);
 });
 
 Deno.test("routeCodeTurn calls the eve transport for a non-claude-code account", async () => {
   const seenEve: unknown[] = [];
   const deps: TransportDeps = {
-    getProvider: () => Promise.resolve("anthropic"),
     runLegacy: () => {
       throw new Error("must not call legacy for an anthropic account");
     },
@@ -317,26 +317,40 @@ Deno.test("routeCodeTurn calls the eve transport for a non-claude-code account",
   assertEquals((seenEve[0] as { startCursor: number }).startCursor, 3);
 });
 
-Deno.test("routeCodeTurn falls back to legacy when the provider fetch fails", async () => {
-  const seenLegacy: CodeTurnArgs[] = [];
-  const deps: TransportDeps = {
-    getProvider: () => Promise.reject(new Error("settings fetch failed: 500")),
-    runLegacy: (args) => {
-      seenLegacy.push(args);
-      return Promise.resolve({ chatId: "chat-1", replyText: "ok" });
-    },
-    runEve: () => {
-      throw new Error("must not call eve when the provider is unreadable");
-    },
-  };
-  const out = await routeCodeTurn(baseArgs(), 0, deps);
-  assertEquals(out.replyText, "ok");
-  assertEquals(seenLegacy.length, 1);
+// The transport no longer depends on the account's provider, so a turn must not
+// read devx settings to pick one — reading them first is what deadlocked a
+// fresh deployment (the read threw on the `null` body of a missing row, and the
+// only code that CREATES that row ran after it).
+Deno.test("routeCodeTurn reads no settings before the turn — nothing to fail, nothing to fall back from", async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (() => {
+    throw new Error("must not read devx settings to choose a transport");
+  }) as typeof fetch;
+  try {
+    const out = await routeCodeTurn(baseArgs(), 0, {
+      ensureProvider: () => Promise.resolve(),
+      runLegacy: () => {
+        throw new Error("must not call legacy");
+      },
+      runEve: () =>
+        Promise.resolve({ codeSessionId: "sess-1", replyText: "ok", nextCursor: 1, reason: "completed", pending: [] }),
+      getClient: () => fakeClient(),
+    });
+    assertEquals(out.transport, "eve");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+Deno.test("providerFromSettings tolerates the null body a missing devx.settings row returns", () => {
+  assertEquals(providerFromSettings(null), undefined);
+  assertEquals(providerFromSettings({}), undefined);
+  assertEquals(providerFromSettings({ provider: 7 }), undefined);
+  assertEquals(providerFromSettings({ provider: "claude-code" }), "claude-code");
 });
 
 Deno.test("routeCodeTurn refuses attachments with no appId on the eve transport instead of silently dropping them", async () => {
   const deps: TransportDeps = {
-    getProvider: () => Promise.resolve("anthropic"),
     runEve: () => {
       throw new Error("must not reach the coder — attachments would be silently dropped");
     },
@@ -349,7 +363,6 @@ Deno.test("routeCodeTurn refuses attachments with no appId on the eve transport 
 Deno.test("routeCodeTurn allows attachments through on eve when an appId is present", async () => {
   const seenEve: unknown[] = [];
   const deps: TransportDeps = {
-    getProvider: () => Promise.resolve("anthropic"),
     runEve: (_client, runArgs) => {
       seenEve.push(runArgs);
       return Promise.resolve({ codeSessionId: "sess-1", replyText: "ok", nextCursor: 1, reason: "completed", pending: [] });
@@ -363,13 +376,63 @@ Deno.test("routeCodeTurn allows attachments through on eve when an appId is pres
 
 Deno.test("routeCodeTurn throws when eve is chosen but Trex.req is unavailable", async () => {
   const deps: TransportDeps = {
-    getProvider: () => Promise.resolve("anthropic"),
     runEve: () => {
       throw new Error("must not call eve with no client");
     },
     getClient: () => null,
   };
   await assertRejects(() => routeCodeTurn(baseArgs(), 0, deps), Error, "Trex.req unavailable");
+});
+
+// CLAW_CODER_PROVIDER used to be asserted only inside the legacy runCodeTurn;
+// with everything on eve, an unasserted pin would be silently ignored and a
+// live verification would run against settings nobody wrote.
+Deno.test("routeCodeTurn asserts the pinned coder provider BEFORE the eve turn", async () => {
+  const order: string[] = [];
+  const deps: TransportDeps = {
+    ensureProvider: (userId) => {
+      order.push(`ensure:${userId}`);
+      return Promise.resolve();
+    },
+    runEve: () => {
+      order.push("eve");
+      return Promise.resolve({ codeSessionId: "sess-1", replyText: "ok", nextCursor: 1, reason: "completed", pending: [] });
+    },
+    getClient: () => fakeClient(),
+  };
+  await routeCodeTurn(baseArgs(), 0, deps);
+  assertEquals(order, ["ensure:u1", "eve"]);
+});
+
+// Routing claude-code to eve must not bypass the create-body flag: without it
+// the hard escalate tier reads the session as unapprovable and the ship step's
+// `git push` is DENIED outright rather than relayed to the channel.
+Deno.test("a claude-code session opened through the eve transport declares approverReachable", async () => {
+  const reqs: { url: string; init: { method: string; body?: string } }[] = [];
+  const client: TokioClient = {
+    req(url, init) {
+      reqs.push({ url, init });
+      if (url.includes("/pending-approval")) return Promise.resolve(Response.json({ pending: null }));
+      if (init.method === "POST") return Promise.resolve(Response.json({ sessionId: "code-1" }));
+      const events = [
+        { type: "message.completed", data: { message: "shipped" } },
+        { type: "turn.completed", data: {} },
+      ].map((e) => JSON.stringify(e)).join("\n") + "\n";
+      return Promise.resolve(new Response(events, { headers: { "content-type": "application/x-ndjson" } }));
+    },
+  };
+  // No runEve stub: this drives code-session.ts's real runCodeTurn.
+  const out = await routeCodeTurn(baseArgs(), 0, {
+    runLegacy: () => {
+      throw new Error("must not call legacy for a claude-code account");
+    },
+    getClient: () => client,
+  });
+  assertEquals(out.transport, "eve");
+  assertEquals(out.replyText, "shipped");
+  const create = reqs.find((r) => r.init.method === "POST");
+  assert(create, "expected a session create POST");
+  assertEquals(JSON.parse(create.init.body ?? "{}").approverReachable, true);
 });
 
 // --- devx-UI mirroring: eve turns only, never legacy ------------------------
@@ -524,4 +587,86 @@ Deno.test("askCodeAgent's message input description does not regress toward rela
 Deno.test("instructions.md still has the Talking to the coder section", async () => {
   const text = await Deno.readTextFile(new URL("../instructions.md", import.meta.url));
   assertStringIncludes(text, "## Talking to the coder");
+});
+
+// --- session-restart notice -------------------------------------------------
+// The 404 self-heal (code-session.ts) fires on every thread open at the moment
+// claw's coder moves to eve. Without a word in the channel it looks exactly
+// like a coder that inexplicably forgot the conversation.
+
+// Captures Discord POSTs made through the global fetch. The mirror has its own
+// injected fetch, so anything caught here is a channel post.
+function captureDiscordPosts() {
+  const posts: string[] = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = ((_url: string | URL | Request, init?: RequestInit) => {
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (typeof body.content === "string") posts.push(body.content);
+    return Promise.resolve(new Response(JSON.stringify({ id: "m1" }), { status: 200 }));
+  }) as typeof fetch;
+  return { posts, restore: () => { globalThis.fetch = real; } };
+}
+
+const quietMirror: MirrorDeps = {
+  mintToken: () => Promise.resolve("tok"),
+  ensureChat: () => Promise.resolve("devx-chat-1"),
+  fetch: (() => Promise.resolve(new Response("{}", { status: 200 }))) as typeof fetch,
+};
+
+Deno.test("askCore tells the channel when the coder session had to be restarted", async () => {
+  const sql = fakeSqlMerging();
+  const cap = captureDiscordPosts();
+  Deno.env.set("DISCORD_BOT_TOKEN", "bot-token");
+  try {
+    await askCore(
+      sql.fn,
+      { sessionId: "s1", userId: "u1", channelId: "chan-1" },
+      { message: "go" },
+      stubEveTurnWithTransport({ restarted: true }),
+      quietMirror,
+    );
+  } finally {
+    cap.restore();
+    Deno.env.delete("DISCORD_BOT_TOKEN");
+  }
+  assertEquals(cap.posts.length, 1);
+  assertStringIncludes(cap.posts[0], "previous coding session is no longer available");
+  assertStringIncludes(cap.posts[0], "lost the context");
+});
+
+Deno.test("an ordinary turn says nothing — the notice is not a generic warning", async () => {
+  const sql = fakeSqlMerging();
+  const cap = captureDiscordPosts();
+  Deno.env.set("DISCORD_BOT_TOKEN", "bot-token");
+  try {
+    await askCore(
+      sql.fn,
+      { sessionId: "s1", userId: "u1", channelId: "chan-1" },
+      { message: "go" },
+      stubEveTurnWithTransport(), // no restart: a normal create/continue
+      quietMirror,
+    );
+  } finally {
+    cap.restore();
+    Deno.env.delete("DISCORD_BOT_TOKEN");
+  }
+  assertEquals(cap.posts, []);
+});
+
+Deno.test("a restart with no channel to post to still returns the turn", async () => {
+  const sql = fakeSqlMerging();
+  const cap = captureDiscordPosts();
+  try {
+    const out = await askCore(
+      sql.fn,
+      { sessionId: "s1", userId: "u1" }, // no channelId
+      { message: "go" },
+      stubEveTurnWithTransport({ restarted: true, replyText: "done" }),
+      quietMirror,
+    );
+    assertEquals(out.reply, "done");
+  } finally {
+    cap.restore();
+  }
+  assertEquals(cap.posts, []);
 });

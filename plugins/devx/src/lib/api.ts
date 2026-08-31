@@ -186,14 +186,14 @@ export interface ActiveProviderConfig {
   auth_shape?: "bearer" | "iam" | "plain" | "none";
 }
 
-// task-u1: mirrors plugins/devx/agent/agent.ts's resolveModel fallback chain
-// (active devx.provider_configs row, else the legacy devx.settings row, else
-// "anthropic") so the UI can gate claude-code away from the agents
-// loop BEFORE ever calling /chat — resolveModel throws for that
-// provider (eve/agents has no sidecar-process equivalent), which /chat
-// surfaces as a bare uncaught 500, not a parseable error. Read-only; never
-// used for anything security-sensitive, same posture as the server-side
-// fallback it mirrors. Also carries `auth_shape` (final-007 review finding
+// ORPHANED with useEffectiveLoop.ts, its only caller: the UI no longer gates
+// claude-code away from the agents loop (eve hosts the sidecar as an engine,
+// and /chat answers a parseable 501 rather than an uncaught 500 for an
+// engine-backed agent). Kept only for the deferred legacy-loop deletion — see
+// core/server/agents/COMPAT.md. Mirrors plugins/devx/agent/agent.ts's
+// resolveModel fallback chain (active devx.provider_configs row, else the
+// legacy devx.settings row, else "anthropic"). Read-only; never used for
+// anything security-sensitive. Also carries `auth_shape` (final-007 review finding
 // #4 + merge-gate re-review): a non-secret, display-only credential-shape
 // hint, NOT a loop gate — IAM-shaped bedrock credentials are an unsupported
 // configuration that resolveModel throws a clear, actionable error for

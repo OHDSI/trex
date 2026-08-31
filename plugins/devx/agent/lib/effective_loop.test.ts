@@ -1,120 +1,83 @@
-// Characterization tests for src/hooks/effectiveLoop.ts's
-// resolveEffectiveLoop (task-7, R9 controller ruling): pins the EXISTING
-// routing decision that gates plugins/devx/src/hooks/useEffectiveLoop.ts
-// ahead of V17__loop_default_agents.sql flipping devx.settings.loop's
-// default to 'agents'. devx has no vitest/RTL/jsdom setup, so this lives
-// here (agent/lib/) rather than as a component test — this directory's
-// suite invocation is the one that runs against devx frontend/functions
-// code via relative imports, same as auth_shape.test.ts.
+// Characterization tests for the client-side loop router that Phase 4 Task 2
+// deleted (src/hooks/effectiveLoop.ts, src/hooks/useEffectiveLoop.ts). Task 1
+// proved a delegated agent's turn never reaches resolveModel on the session
+// route devx actually uses, and Task 1b closed the one remaining hole in
+// eve's /chat route — so the reason effectiveLoop.ts gave for forcing the
+// claude-code provider onto the legacy loop no longer applies to devx, and
+// there is no other provider-specific case left to route around.
 //
-// Must pass unmodified against CURRENT logic: if any case here fails, the
-// routing assumption the whole eve-loop cutover rests on is wrong.
+// devx has no vitest/RTL/jsdom, so ChatPanel.tsx (React/JSX, "@/..." aliases)
+// cannot be imported into this Deno suite — the same constraint that put the
+// original tests in this file rather than next to the component. Reading its
+// source text is the established substitute in this codebase (see
+// functions/provider_support.test.ts's agent-provider-allowlist test and
+// functions/git_identity.test.ts).
 //
-// Only provider === "claude-code" (the sidecar) is forced to legacy.
-// IAM-shaped bedrock credentials used to be a second forced-legacy case; the
-// owner decided that configuration is simply unsupported rather than worth
-// implementing, so it was removed from this gate — an IAM-shaped bedrock
-// user now resolves to "agents" like everyone else and fails loudly at
-// agent.ts's resolveModel instead.
-import { assert, assertEquals } from "jsr:@std/assert";
-import {
-  resolveEffectiveLoop,
-  SETTINGS_FETCH_FAILED,
-  stateForLoading,
-  stateForSettingsFailure,
-  type EffectiveLoop,
-} from "../../src/hooks/effectiveLoop.ts";
+// Must pass unmodified against CURRENT ChatPanel.tsx: if any case here
+// fails, either the router survived (Task 2 is incomplete) or ChatPanel
+// stopped rendering AgentsChatPanel for a claude-code account, which is
+// exactly the regression this file exists to catch.
+import { assert, assertEquals, assertMatch, assertStrictEquals } from "jsr:@std/assert";
 
-Deno.test("resolveEffectiveLoop: loop='agents' + anthropic -> 'agents'", () => {
-  assertEquals(resolveEffectiveLoop({ loop: "agents", provider: "anthropic" }), "agents");
+const CHAT_PANEL_URL = new URL("../../src/components/ChatPanel.tsx", import.meta.url);
+
+async function readChatPanelSource(): Promise<string> {
+  return await Deno.readTextFile(CHAT_PANEL_URL);
+}
+
+Deno.test("ChatPanel: the two-loop router is gone — no reference to useEffectiveLoop or effectiveLoop", async () => {
+  const src = await readChatPanelSource();
+  assertEquals(src.includes("useEffectiveLoop"), false, "useEffectiveLoop.ts was deleted; nothing should still import it");
+  assertEquals(src.includes("effectiveLoop"), false, "effectiveLoop.ts was deleted; nothing should still import it");
 });
 
-// The sidecar is a different execution engine, not a model provider: eve's
-// resolveModel throws for it. These users must never reach /chat.
-Deno.test("resolveEffectiveLoop: loop='agents' + claude-code -> 'legacy' (forced)", () => {
-  assertEquals(resolveEffectiveLoop({ loop: "agents", provider: "claude-code" }), "legacy");
+// A claude-code account is the one case the old router forced onto the
+// legacy loop. With the router gone, ChatPanel must render AgentsChatPanel
+// unconditionally, so there is no branch left for provider to affect at all.
+Deno.test("ChatPanel: renders AgentsChatPanel unconditionally — a claude-code account reaches it like any other", async () => {
+  const src = await readChatPanelSource();
+  assertEquals(src.includes("claude-code"), false, "no provider-specific branch should remain in ChatPanel");
+  assertEquals(src.includes("LegacyChatPanel"), false, "the legacy branch was removed, not just made unreachable");
+
+  // The exported ChatPanel function's body is a single AgentsChatPanel
+  // return with no conditional in between — proves "unconditional", not
+  // just "AgentsChatPanel is mentioned somewhere in the file".
+  const fn = src.match(/export function ChatPanel\(props: ChatPanelProps\) \{([\s\S]*?)\n\}/);
+  assert(fn, "could not find the exported ChatPanel function");
+  const body = fn[1];
+  assertEquals(/\bif\s*\(/.test(body), false, "ChatPanel's body must contain no branching — every provider takes the same path");
+  assertMatch(body.trim(), /^return <AgentsChatPanel\b/, "ChatPanel must return AgentsChatPanel directly");
 });
 
-// Inverted expectation (was 'legacy' (forced) before this decision): the
-// owner ruled IAM-shaped bedrock credentials are simply unsupported rather
-// than worth routing around, so this gate no longer branches on auth shape
-// at all. An IAM-shaped bedrock user now resolves to 'agents' like every
-// other non-claude-code provider and fails loudly at agent.ts's resolveModel
-// instead of being silently routed to the legacy loop.
-Deno.test("resolveEffectiveLoop: loop='agents' + bedrock/iam -> 'agents' (IAM bedrock is unsupported, not routed away)", () => {
-  assertEquals(resolveEffectiveLoop({ loop: "agents", provider: "bedrock" }), "agents");
+// Phase 3 built loading/error states into useEffectiveLoop specifically so a
+// failed settings fetch could not silently degrade to a loop choice. That
+// machinery is legitimate to delete only if nothing else needs settings
+// before render. AgentsChatPanel (src/components/AgentsChatPanel.tsx) takes
+// chatId/mode/appId as props and its data hook, useAgentsChat
+// (src/hooks/useAgentsChat.ts), never calls api.getSettings or
+// api.getActiveProviderConfig — grep confirms zero hits. Settings were fetched
+// for exactly one purpose: choosing a loop. With that choice gone, so is the
+// state machine — this test pins that ChatPanel no longer gates on a
+// loading/error status before rendering.
+Deno.test("ChatPanel: no settings-fetch loading/error gate remains — nothing downstream needs settings before render", async () => {
+  const src = await readChatPanelSource();
+  for (const token of ["loading", "SETTINGS_FETCH_FAILED", "Couldn't load chat settings", "loopState"]) {
+    assertEquals(src.includes(token), false, `ChatPanel should no longer reference "${token}"`);
+  }
 });
 
-Deno.test("resolveEffectiveLoop: loop='agents' + bedrock/bearer -> 'agents'", () => {
-  assertEquals(resolveEffectiveLoop({ loop: "agents", provider: "bedrock" }), "agents");
-});
-
-Deno.test("resolveEffectiveLoop: loop='legacy' -> 'legacy' regardless of provider", () => {
-  assertEquals(resolveEffectiveLoop({ loop: "legacy", provider: "anthropic" }), "legacy");
-  assertEquals(resolveEffectiveLoop({ loop: "legacy", provider: "claude-code" }), "legacy");
-  assertEquals(resolveEffectiveLoop({ loop: "legacy", provider: "bedrock" }), "legacy");
-});
-
-// R13: an ABSENT loop value means the user has no devx.settings row at all
-// (provider_config_routes.ts lets a user be fully configured through
-// devx.provider_configs alone), so the DB column default is what applies —
-// and V17__loop_default_agents.sql set that to 'agents'. Treating absent as
-// legacy was the fourth hard-coded-default site and would have left every
-// such user behind at cutover.
-Deno.test("resolveEffectiveLoop: missing/undefined loop -> 'agents' (matches V17's new DB column default)", () => {
-  assertEquals(resolveEffectiveLoop({ loop: undefined, provider: "anthropic" }), "agents");
-  assertEquals(resolveEffectiveLoop({ loop: null, provider: "anthropic" }), "agents");
-  assertEquals(resolveEffectiveLoop({ loop: "", provider: "anthropic" }), "agents");
-});
-
-// The claude-code gate still applies to a no-row user — absent does not mean
-// "force agents", it means "take the default", which the sidecar gate then
-// overrides exactly as it does for an explicit 'agents'. bedrock (any auth
-// shape) is not gated, so it takes the default like anthropic/openai/google.
-Deno.test("resolveEffectiveLoop: missing loop + claude-code -> 'legacy' (provider gate still wins)", () => {
-  assertEquals(resolveEffectiveLoop({ loop: undefined, provider: "claude-code" }), "legacy");
-  assertEquals(resolveEffectiveLoop({ loop: undefined, provider: "bedrock" }), "agents");
-});
-
-// An explicit value that is neither 'legacy' nor 'agents' cannot exist while
-// the CHECK constraint stands, but must not be read as "absent" if it ever
-// does — only a genuinely missing value takes the default.
-Deno.test("resolveEffectiveLoop: an explicit unknown loop value -> 'legacy', not the default", () => {
-  assertEquals(resolveEffectiveLoop({ loop: "something-else", provider: "anthropic" }), "legacy");
-});
-
-// Corrected R13 (task-4): a failed settings/provider FETCH is a browser
-// concern, not a turn — there is nothing to guess a loop for. Silently
-// defaulting to "legacy" only worked because legacy accepted every
-// provider, a property Phase 4 removes. useEffectiveLoop's `.catch` now
-// sets this sentinel instead of resolving to any loop; the UI renders it as
-// a retryable error.
-Deno.test("a failed settings fetch resolves to neither loop, unlike an absent settings row", () => {
-  assertEquals(SETTINGS_FETCH_FAILED, "settings-fetch-failed");
-  assertEquals(resolveEffectiveLoop({ loop: undefined, provider: "anthropic" }), "agents");
-  // The sentinel must not collide with, or be assignable in place of, a real
-  // EffectiveLoop value — a failed fetch must not resolve to any loop.
-  const loops: EffectiveLoop[] = ["legacy", "agents"];
-  assert(!loops.includes(SETTINGS_FETCH_FAILED as unknown as EffectiveLoop), "the sentinel must not be a valid EffectiveLoop value");
-});
-
-// task-4 must-fix: pins the shape useEffectiveLoop.ts's catch/loading
-// branches are required to build via these two functions rather than
-// inline literals. This does NOT exercise the React effect (devx has no
-// RTL/vitest/jsdom) — a hook that stopped calling stateForSettingsFailure()
-// and wrote `{ status: "resolved", loop: "legacy" }` inline instead would
-// still pass this suite. It only guarantees the values these functions are
-// allowed to hand back are never a resolved loop.
-Deno.test("stateForSettingsFailure: yields 'error', never a resolved loop", () => {
-  const result = stateForSettingsFailure();
-  assertEquals(result, { status: "error" });
-  assert(result.status !== "resolved", "a failed fetch must not resolve to a loop");
-  assert(!("loop" in result), "the failure state must carry no loop field");
-});
-
-Deno.test("stateForLoading: yields 'loading', never a resolved loop", () => {
-  const result = stateForLoading();
-  assertEquals(result, { status: "loading" });
-  assert(result.status !== "resolved", "loading must not resolve to a loop");
-  assert(!("loop" in result), "the loading state must carry no loop field");
+// The old files themselves must be gone, not just unreferenced — an orphaned
+// hook whose only remaining job is to return a constant is exactly what this
+// task was told not to leave behind.
+Deno.test("effectiveLoop.ts and useEffectiveLoop.ts no longer exist", async () => {
+  for (const name of ["effectiveLoop.ts", "useEffectiveLoop.ts"]) {
+    const url = new URL(`../../src/hooks/${name}`, import.meta.url);
+    let stat: Deno.FileInfo | undefined;
+    try {
+      stat = await Deno.stat(url);
+    } catch (err) {
+      assert(err instanceof Deno.errors.NotFound, `unexpected error checking ${name}: ${err}`);
+    }
+    assertStrictEquals(stat, undefined, `${name} should have been deleted, not left behind`);
+  }
 });

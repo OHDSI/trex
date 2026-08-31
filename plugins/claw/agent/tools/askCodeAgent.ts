@@ -14,7 +14,7 @@
 // metadata.appId. Once the session exists the stored app wins; a different
 // `app` mid-task is ignored (one task = one thread = one app).
 import { defineTool } from "eve/tools";
-import { apiBase, mintToken, runCodeTurn as runLegacyTurn, type CodeTurnArgs } from "../lib/code-stream.ts";
+import { apiBase, assertCoderProvider, mintToken, runCodeTurn as runLegacyTurn, type CodeTurnArgs } from "../lib/code-stream.ts";
 import { runCodeTurn as runEveTurn, type PendingApproval, type TokioClient, type TurnEnd } from "../lib/code-session.ts";
 import { tokioClientFromGlobal } from "../lib/tokio.ts";
 import { chooseCoderTransport } from "../lib/code-route.ts";
@@ -35,6 +35,9 @@ export interface CodeTurnOutcome {
   nextCursor?: number;
   reason?: TurnEnd;
   pending?: PendingApproval[];
+  // The coder's stored session was gone and the turn ran on a fresh one (see
+  // code-session.ts's 404 branch) — the thread's earlier context is lost.
+  restarted?: boolean;
   // Set only by routeCodeTurn's real branches (absent from existing test
   // stubs by design). Eve turns need mirroring into devx.chats/devx.messages
   // for UI visibility (chat-mirror.ts); the legacy transport already writes
@@ -62,23 +65,34 @@ export function effectiveUserId(ctxUserId: string | undefined, env: (k: string) 
   return fromEnv || undefined;
 }
 
+// GET /settings answers a bare `null` for an account with no devx.settings
+// row (index.ts:1355) — a fresh deployment, not an error — so this must never
+// index into the body blind.
+export function providerFromSettings(body: unknown): string | undefined {
+  const provider = (body as { provider?: unknown } | null)?.provider;
+  return typeof provider === "string" ? provider : undefined;
+}
+
 // Reads the coder account's provider the SAME way code-stream.ts's
 // ensureCoderProvider does (mint the same access token, GET the devx-api
 // settings mount) rather than inventing a second path to the same data.
-async function fetchCoderProvider(userId: string): Promise<string | undefined> {
+// NOT on the turn path any more: the transport no longer depends on the
+// provider, so a turn must not mint, fetch, or fail for a value nothing reads.
+// Kept as the other half of chooseCoderTransport's rollback — restoring
+// per-provider routing means restoring this call — and deleted with it.
+export async function fetchCoderProvider(userId: string): Promise<string | undefined> {
   const token = await mintToken(userId);
   const res = await fetch(`${apiBase()}/settings`, { headers: { authorization: `Bearer ${token}` } });
   if (!res.ok) throw new Error(`coder settings fetch failed: ${res.status}`);
-  const body = (await res.json()) as { provider?: unknown };
-  return typeof body.provider === "string" ? body.provider : undefined;
+  return providerFromSettings(await res.json().catch(() => null));
 }
 
-// Injected so routeCodeTurn's provider-based branch can be exercised in tests
-// without ever invoking mintToken/Trex.req (mintToken's dynamic import only
-// resolves inside a staged worker — see code-stream.ts's header — and
-// Trex.req does not exist outside one either).
+// Injected so routeCodeTurn can be exercised in tests without ever invoking
+// mintToken/Trex.req (mintToken's dynamic import only resolves inside a staged
+// worker — see code-stream.ts's header — and Trex.req does not exist outside
+// one either).
 export interface TransportDeps {
-  getProvider?: (userId: string) => Promise<string | undefined>;
+  ensureProvider?: (userId: string) => Promise<void>;
   runLegacy?: (args: CodeTurnArgs) => Promise<CodeTurnOutcome>;
   runEve?: typeof runEveTurn;
   getClient?: () => TokioClient | null;
@@ -91,21 +105,15 @@ export async function routeCodeTurn(
   startCursor: number,
   deps: TransportDeps = {},
 ): Promise<CodeTurnOutcome> {
-  const getProvider = deps.getProvider ?? fetchCoderProvider;
+  const ensureProvider = deps.ensureProvider ?? assertCoderProvider;
   const runLegacy = deps.runLegacy ?? runLegacyTurn;
   const runEve = deps.runEve ?? runEveTurn;
   const getClient = deps.getClient ?? tokioClientFromGlobal;
 
-  let transport: ReturnType<typeof chooseCoderTransport>;
-  try {
-    transport = chooseCoderTransport(await getProvider(args.userId));
-  } catch (e) {
-    // Mirrors effectiveLoop.ts's SETTINGS_FETCH_FAILURE_LOOP: an unreadable
-    // provider might be the sidecar, which eve cannot host, so an unknown
-    // configuration degrades to the transport that works for every provider.
-    console.error("claw: coder provider fetch failed, defaulting to legacy transport:", e);
-    transport = "legacy";
-  }
+  // Nothing is read to decide this: every provider runs on eve (code-route.ts),
+  // and the account's settings row may not even exist yet on a fresh
+  // deployment — assertCoderProvider below is what creates it.
+  const transport = chooseCoderTransport();
   if (transport === "legacy") return { ...(await runLegacy(args)), transport: "legacy" };
 
   // devx's buildUserMessage (agent.ts:583) materializes attachments only when
@@ -116,6 +124,11 @@ export async function routeCodeTurn(
   }
   const client = getClient();
   if (!client) throw new Error("askCodeAgent: Trex.req unavailable for the eve transport");
+  // Before the turn, not after: devx resolves the engine per turn from the
+  // account's settings, so a deployment-pinned provider has to be written
+  // first. The legacy transport asserted it inline and nothing routes there
+  // now — without this call CLAW_CODER_PROVIDER would be silently inert.
+  await ensureProvider(args.userId);
   const onProgress = args.onProgress;
   const result = await runEve(client, {
     codeSessionId: args.chatId,
@@ -135,6 +148,7 @@ export async function routeCodeTurn(
     nextCursor: result.nextCursor,
     reason: result.reason,
     pending: result.pending,
+    restarted: result.restarted,
     transport: "eve",
   };
 }
@@ -197,6 +211,22 @@ export async function askCore(
     eventCursor: outcome.nextCursor ?? 0,
     appId,
   });
+  // A restart is invisible from the channel otherwise: the coder simply stops
+  // remembering the thread, which reads as a bug. Same posting mechanism as the
+  // heartbeat and the approval gates, and a Discord failure must not fail the
+  // turn — the coder's work is already done by here.
+  if (outcome.restarted && ctx.channelId) {
+    const botToken = Deno.env.get("DISCORD_BOT_TOKEN");
+    if (botToken) {
+      await postChannelMessage(fetch, {
+        botToken,
+        channelId: ctx.channelId,
+        content:
+          "Note: the previous coding session is no longer available, so this ran on a fresh one. " +
+          "The coder has lost the context from earlier in this thread — I will re-state whatever it needs from here.",
+      }).catch((e) => console.error("claw: failed to post the coder session-restart notice:", e));
+    }
+  }
   // Eve turns never touch devx.chats/devx.messages themselves (see
   // chat-mirror.ts) — mirror this turn so the devx UI shows it, same as the
   // legacy transport already does server-side. Never for legacy: that would

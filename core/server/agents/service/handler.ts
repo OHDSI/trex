@@ -1852,6 +1852,18 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // cached — resolveModelForTurn/resolveInstructions apply
       // config.resolveModel/buildInstructions when configured.
       const hookCtx = buildHookCtx(deps, sessionId, body.metadata, bearerToken, createdBy);
+      // Refused, not delegated: a delegated turn carries no history and resumes
+      // the ENGINE's transcript from a durable session id, which /chat — new
+      // session per request, history from the client — has not (COMPAT.md).
+      // Before resolveModel, whose throw for a sidecar account WAS the 500.
+      const engine = await resolveEngineForTurn(agent, hookCtx);
+      if (engine) {
+        const error = `this agent runs on the "${engine.name}" engine, which POST /chat cannot execute: ` +
+          `a delegated turn resumes the engine's own transcript from a durable session id, and /chat ` +
+          `creates a new session per request. Use the session API instead.`;
+        await store.finishTurn(turn.id, "failed", error).catch((e) => console.error("agents: chat persist failed:", e));
+        return json({ error, engine: engine.name, use: "POST /eve/v1/session" }, 501);
+      }
       const model = deps.model ?? await resolveModelForTurn(agent.config, hookCtx);
       const system = await resolveInstructions(agent, body.metadata, hookCtx);
       // ai@6's convertToModelMessages is async (Promise<ModelMessage[]>) —

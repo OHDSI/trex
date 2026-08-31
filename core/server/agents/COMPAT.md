@@ -324,9 +324,36 @@ live-tail by event shape.
     supports both. devx's GET `/provider-configs` and `/settings` responses
     mask `api_key`, so the shape cannot be detected client-side — the server
     derives a non-secret `auth_shape` hint from the unmasked key
-    (`plugins/devx/functions/auth_shape.ts`) and `useEffectiveLoop.ts` forces
-    `bedrock` + `auth_shape === "iam"` users onto the legacy loop before
-    `/chat` is ever called; the `resolveModel` throw is the backstop.
+    (`plugins/devx/functions/auth_shape.ts`) purely for **display**
+    (`GET /settings`/`GET /provider-configs` attach it so the frontend can
+    show what kind of credential is on file) — it was NEVER a routing
+    signal, on either loop. Verified against the deleted router itself
+    (`git show 0c1fdb5b^:plugins/devx/src/hooks/effectiveLoop.ts`):
+    `resolveEffectiveLoop`'s `providerForcesLegacy` checked only
+    `provider === "claude-code"`, and its own header said so in as many
+    words — *"IAM-shaped bedrock credentials are NOT routed here: that
+    configuration is simply unsupported … A user on bedrock with IAM-shaped
+    credentials resolves to 'agents' like any other provider and hits
+    agent.ts's resolveModel throw."* `agent.ts`'s own comment confirms the
+    same thing from the other side: hitting that throw is *"the NORMAL
+    path for a user on IAM-shaped bedrock creds"*. So provider-based
+    routing changed nothing for this configuration — it hit the throw
+    before Phase 4 Task 2 and it hits the same throw after.
+    **What DID change, and is worth recording accurately: the explicit
+    `devx.settings.loop` flag was the actual escape hatch**, not the
+    provider check. Before Task 2, a user could deliberately set
+    `loop: "legacy"` and get routed to the legacy AI-SDK loop, whose
+    `createModel` supported both bearer-token and IAM-shaped bedrock auth
+    — so an IAM user who knew to opt in had a working path. Task 2 made
+    routing unconditional (deleting the router that read the flag) and
+    Task 4 retired the flag itself (`PUT`/`GET /settings` no longer
+    read or write it), so that opt-out is gone: there is no longer any
+    configuration that reaches the legacy loop's IAM support, deliberate
+    or otherwise. `resolveModel`'s throw fires on the agents loop's own
+    session route like any other rejecting model hook — `runner.ts`'s
+    turn loop turns it into an ordinary `turn.failed`/`session.failed`
+    pair (`runner.ts:175-178`), not a crash — but it is now unconditional
+    for this configuration rather than avoidable by an explicit setting.
 17. **`onTurnEnd`/`buildUserMessage` turn-lifecycle hooks (Task 3)** are also
     additive `AgentConfig` fields real eve's `defineAgent` doesn't define —
     eve silently ignores unknown fields, so an agent directory using them
@@ -991,6 +1018,30 @@ A delegated turn still persists the same `agents.steps` row kinds a
 read whichever path wrote them, so this is not optional parity, it is the
 contract `delegate.ts`'s own header comment states.
 
+### `POST /chat` refuses an engine-backed agent rather than delegating
+
+`/chat` is the stateless UIMessage route: history comes from the client, and
+the `agents.sessions` row it creates is minted per request and never read
+back. A delegated turn is the opposite shape — `DelegatedTurnOpts`/`EngineTurn`
+carry no history at all, because the engine resumes its OWN transcript keyed
+on eve's session id (the sidecar passes it straight through as `chatId`,
+`sidecar_engine.ts:293`). Delegating on `/chat` would therefore hand the
+engine a fresh session on every request and answer each message with no
+memory of the conversation the client just sent — silently.
+
+So the route resolves the engine (before any model resolution) and, if one
+comes back, fails the turn and answers
+`501 {error, engine, use: "POST /eve/v1/session"}`. Before this it fell
+through to `resolveModel`, whose throw for a sidecar provider surfaced as a
+bare, unparseable 500 — the behaviour
+`plugins/devx/src/hooks/effectiveLoop.ts` used to route around. An agent
+whose `resolveEngine` answers `undefined` is unaffected: `/chat` streams from
+the model loop exactly as before. Same posture as this route's
+`buildSpawnCapabilities(..., false, ...)`, which refuses a detached child
+spawn outright rather than orphaning one, and for the same reason: a
+capability that needs a revisitable session cannot be served by a session
+that is never revisited.
+
 ### Hooks a delegated turn structurally cannot honour
 
 The engine owns its own loop — there is no per-step hook point inside it for
@@ -1030,9 +1081,10 @@ either sufficient on its own:
   why devx's `agent.ts`'s `resolveModel` still throws `"sidecar providers use
   the legacy endpoint"` for `claude-code` rather than ever returning
   something usable (`agent.ts:194-206`) — this throw is now unreachable on
-  the delegating path (the engine is picked before `resolveModel` would run),
-  but stays in place because `/chat` has no engine switch and can still
-  reach it. Without this skip, `maybeCompact`'s own catch-and-drop fallback
+  both live routes (`startTurn` picks the engine before `resolveModel` would
+  run, and `/chat` refuses an engine-backed agent up front, see below), but
+  stays in place as the backstop for any caller that resolves a model without
+  first resolving an engine. Without this skip, `maybeCompact`'s own catch-and-drop fallback
   would silently start dropping the oldest turns from eve's record of the
   session for no benefit.
 
@@ -1204,6 +1256,141 @@ or `sessions.unattended`) sidecar session:
 
 An **attended** delegated turn does *not* see hard and soft the same way —
 see "Two tiers: hard and soft" above for exactly how they diverge.
+
+## The legacy AI-SDK loop: migrated in full, deletion deferred
+
+Phase 4 of `docs/superpowers/specs/2026-08-30-one-loop-program-design.md` set
+out to delete devx's legacy (pre-eve) AI-SDK loop. It did not get there: the
+deletion task's own safety grep found the plan's inventory was wrong and
+**blocked before deleting anything**. What actually shipped is a migration —
+every client that used to be able to reach the legacy loop now goes through
+the agents loop instead — plus this section, which is the record for
+whoever runs the deletion next.
+
+**What changed.** The devx browser now uses the agents loop for every
+provider, `claude-code` included — the two-loop client router
+(`src/hooks/effectiveLoop.ts`/`useEffectiveLoop.ts`, which used to pick
+per-provider) is deleted outright, not merely unreachable. claw's coder now
+routes every provider, `claude-code` included, to the eve transport
+(`chooseCoderTransport` in `plugins/claw/agent/lib/code-route.ts` is now a
+constant function returning `"eve"`); its legacy client path
+(`code-stream.ts`'s `runCodeTurn`/`streamTurn`, reached via `runLegacy`) is
+left in the tree but unreachable — deliberately, as the one-line rollback
+until live verification lands. `/chat` now refuses an engine-backed agent
+with a parseable `501` (see "`POST /chat` refuses an engine-backed agent
+rather than delegating" above) instead of the uncaught `500` it used to
+produce; that fix (Task 1b) is *why* nothing broke when the browser's
+two-loop router was deleted out from under it. And the loop flag itself is
+retired: `PUT`/`GET /settings` no longer read or write `loop`, and
+`SettingsPage.tsx`'s "Chat Engine (experimental)" toggle is gone.
+
+**Flipping transports strands stored session ids, so the eve transport now
+self-heals.** `claw.orchestration.code_session_id` holds a devx chat id on the
+legacy transport and an eve session id on eve, with no discriminator — so every
+Discord thread open at deploy time carried an id the eve session route answers
+`404` for (`handler.ts:1642`). `code-session.ts`'s `runCodeTurn` now treats that
+one status on the continue call as "this id is gone": it logs, opens a fresh
+session ONCE (same create body, `approverReachable` included), and restarts the
+cursor at 0 because the new session has no history, and reports the restart up
+to `askCore`, which posts a plain note to the Discord thread — the coder losing
+the conversation is otherwise indistinguishable from a bug. A second failure
+throws like any other. This also covers a pruned session or a restored database, not just
+the migration.
+
+**`devx.settings.loop` (the column) is deliberately still there.** Dropping
+a column is not something a rollback can undo, and the code that used to
+repopulate it was removed in the same branch that stopped reading it — so a
+drop now would be one-way with no fallback if anything upstream still
+expected the column to exist. It is inert: nothing reads it, nothing writes
+it, and its `NOT NULL DEFAULT 'agents'` means every INSERT still satisfies
+the constraint without naming it. Safe to drop in a later, deliberate
+migration; not this branch's job.
+
+### Why `/chat` refuses an engine-backed agent instead of delegating to it
+
+Worth restating here as an architectural boundary, not just a bug fix,
+because it is the kind of thing a future "just make it work" patch would
+get wrong. A delegated turn carries only a `prompt` — the engine resumes
+its *own* transcript, keyed on eve's session id (the sidecar sees it as
+`chatId`, `sidecar_engine.ts:293`) — while `/chat` mints a session per
+request that is never read back and takes its history from the client on
+every call. Those are incompatible shapes: delegating a `/chat` request
+would hand the engine a fresh session each time and answer every message
+with no memory of the ones before it — silently, behind a `200`. The `501`
+is the honest failure; a delegated `/chat` would be a silent one.
+
+### The corrected deletion target list
+
+The original plan's file inventory was wrong in three ways, all caught by
+the grep gate before anything was touched. Anyone re-attempting the
+deletion should start from this list, not the plan's:
+
+- **`plugins/devx/functions/claude_code_agent.ts` is NOT legacy-exclusive
+  and must never be deleted.** `plugins/devx/agent/lib/sidecar_engine.ts:201`
+  imports its `streamClaudeCodeChat`, reached from `plugins/devx/agent/
+  agent.ts:152`'s `resolveEngine` — this file IS the Phase 2 sidecar bridge,
+  not a legacy-loop artifact. `plugins/devx/functions/routes/
+  claude_code_models_routes.ts:2` also imports `ensureClaudeCodeServer` from
+  it, for a live route.
+- **`plugins/devx/functions/tools/spawn_agent.ts` is NOT legacy-exclusive
+  and must never be deleted.** Live via `tools/registry.ts:56,147` →
+  `TOOL_DEFINITIONS` → `GET /tools` (`routes/provider_routes.ts:39`) and via
+  eve's own `plugins/devx/agent/tools/ToolSearch.ts:27`.
+- **`resolveConsent` is dead; `clearPendingConsents` is live.** Both live in
+  `plugins/devx/functions/agent.ts` and share one import at `index.ts:11`.
+  `resolveConsent`'s only route (`POST /chats/:id/consent`) has no remaining
+  client — the browser's consent flow now posts to eve's
+  `${AGENTS_SESSION_URL}/:id/approval` instead. `clearPendingConsents` is
+  called from `index.ts:983`, inside the still-live `/chats/:id/stream`
+  route's `cancel()` — it dies with that route, not before it.
+- **`runsUnattended` is live** — one call site, `index.ts:523`, inside
+  `POST /chats/:id/stream`. It also dies with that route, not before.
+
+What the deletion actually covers, once its precondition (below) is met:
+`plugins/devx/functions/agent.ts` (`streamAgentChat`, `resolveConsent`,
+`clearPendingConsents`, `runsUnattended`), the `/chats/:id/stream` route
+itself, and the now-orphaned
+`plugins/devx/src/hooks/useMessages.ts` and
+`plugins/devx/src/components/chat/MessagesList.tsx` — note that second
+path: the original plan named `src/components/MessagesList.tsx`, which is
+wrong, the file lives under `components/chat/`. Also orphaned by
+`useEffectiveLoop.ts`'s deletion, with zero remaining callers anywhere:
+`getActiveProviderConfig`, `getActiveProvider` and the `ActiveProviderConfig`
+type (`plugins/devx/src/lib/api.ts:181,201,209`) — the hook was their only
+consumer. On the claw side: `chooseCoderTransport`, `routeCodeTurn`'s
+`runLegacy` branch and `TransportDeps.runLegacy`, `CodeTurnOutcome.transport`,
+`fetchCoderProvider`/`providerFromSettings`, and `code-stream.ts`'s
+`runCodeTurn`/`streamTurn`.
+
+**Precondition, stated plainly: this deletion happens only after a real
+coding task has been verified end to end through Discord on the eve
+transport.** Nothing above is time-sensitive or blocking on its own — the
+unreachable legacy code paths cost nothing at rest — so there is no reason
+to delete before that verification, and the grep gate that blocked Task 3
+the first time is proof the inventory is easy to get wrong under pressure.
+
+**`fetchCoderProvider` is no longer called on the turn path.** An earlier
+draft of this section called its extra mint+GET "an efficiency item to fold
+in later"; that was wrong on two counts. It was not merely wasteful — it ran
+*before* `assertCoderProvider`, and `GET /settings` answers a bare `null` for
+an account with no `devx.settings` row (`index.ts:1355`), so on a fresh
+deployment it threw a raw `TypeError` on every turn, and the only code that
+creates the row sat behind it. A permanent deadlock, not an inefficiency.
+The read is gone from `routeCodeTurn` (the transport no longer depends on the
+provider, so a turn must not mint, fetch, or fail for a value nothing reads),
+and `providerFromSettings` now tolerates the null body. The function itself
+stays, unused, as the other half of `chooseCoderTransport`'s rollback: putting
+per-provider routing back means putting this call back, so it must be correct
+when that happens. Both die together in the deletion.
+
+**One code-side cleanup to fold in as well:** `plugins/devx/functions/
+auth_shape.ts`'s header comment still describes `useEffectiveLoop.ts`
+branching on `auth_shape` for routing purposes — it never did (see the
+IAM-shaped-credentials note above), and the file it names no longer exists
+at all. Left uncorrected here deliberately: this hand-off is
+documentation-only, `auth_shape.ts` is code, and a comment fix there is a
+one-line change that belongs in the same branch as the rest of this
+deletion, not stapled onto a docs commit.
 
 ## devx's last two legacy consumers: security review and autonomous runs
 

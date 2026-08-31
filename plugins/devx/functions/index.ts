@@ -1348,7 +1348,7 @@ Deno.serve(async (req: Request) => {
       const result = await sql(
         `SELECT id, user_id, provider, model, api_key, api_key_encrypted, api_key_iv, base_url, ai_rules,
                 auto_approve, max_steps, max_tool_steps, auto_fix_problems,
-                loop, git_author_name, git_author_email, created_at, updated_at
+                git_author_name, git_author_email, created_at, updated_at
          FROM devx.settings WHERE user_id = $1`,
         [userId],
       );
@@ -1430,15 +1430,6 @@ Deno.serve(async (req: Request) => {
         console.warn(`[devx] PUT /settings: ignoring the api_key it was sent because ${keyWrite.reason} — keeping the stored credential`);
       }
       const hasApiKeyUpdate = keyWrite.apply;
-      // task-u1 (V11__loop_flag.sql): same "only touch it if the caller
-      // actually sent it" posture as api_key above. SettingsPage.tsx now
-      // sends `loop` on every save, but any OTHER caller of this endpoint
-      // (or an older cached frontend bundle) that omits it must not
-      // silently reset a user's flag back to the column default.
-      if (body.loop !== undefined && body.loop !== "legacy" && body.loop !== "agents") {
-        return Response.json({ error: "loop must be 'legacy' or 'agents'" }, { status: 400, headers: corsHeaders });
-      }
-      const hasLoopUpdate = body.loop !== undefined;
       // Git author identity (V13): same "only touch it if sent" posture. Light
       // validation only — git itself accepts nearly anything, but cap length
       // and require an @ so an obvious paste error fails loud.
@@ -1461,8 +1452,13 @@ Deno.serve(async (req: Request) => {
       // into the VALUES list.
       const keyFields = await writeProviderKeyFields(keyWrite.apply ? keyWrite.plaintext : null);
       const result = await sql(
-        `INSERT INTO devx.settings (user_id, provider, model, api_key, api_key_encrypted, api_key_iv, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, loop, git_author_name, git_author_email)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13, 'agents'), $14, $15)
+        // loop is deliberately absent from both the column list and SET
+        // clause: the `loop` column (V11/V17, NOT NULL DEFAULT 'agents') is
+        // intentionally left in the settings schema unwritten, not dropped —
+        // a new row picks up the column DEFAULT, an existing row keeps
+        // whatever it already has.
+        `INSERT INTO devx.settings (user_id, provider, model, api_key, api_key_encrypted, api_key_iv, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, git_author_name, git_author_email)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          ON CONFLICT (user_id) DO UPDATE SET
            provider = EXCLUDED.provider,
            model = EXCLUDED.model,
@@ -1475,12 +1471,11 @@ Deno.serve(async (req: Request) => {
            max_steps = EXCLUDED.max_steps,
            max_tool_steps = EXCLUDED.max_tool_steps,
            auto_fix_problems = EXCLUDED.auto_fix_problems,
-           loop = ${hasLoopUpdate ? "EXCLUDED.loop" : "devx.settings.loop"},
            git_author_name = ${hasGitNameUpdate ? "EXCLUDED.git_author_name" : "devx.settings.git_author_name"},
            git_author_email = ${hasGitEmailUpdate ? "EXCLUDED.git_author_email" : "devx.settings.git_author_email"},
            updated_at = NOW()
-         RETURNING id, user_id, provider, model, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, loop, git_author_name, git_author_email, created_at, updated_at`,
-        [userId, body.provider, body.model, keyFields.api_key, keyFields.api_key_encrypted, keyFields.api_key_iv, body.base_url || null, body.ai_rules || null, body.auto_approve ?? false, body.max_steps ?? DEFAULT_MAX_STEPS, body.max_tool_steps ?? 10, body.auto_fix_problems ?? false, body.loop ?? null, body.git_author_name || null, body.git_author_email || null],
+         RETURNING id, user_id, provider, model, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, git_author_name, git_author_email, created_at, updated_at`,
+        [userId, body.provider, body.model, keyFields.api_key, keyFields.api_key_encrypted, keyFields.api_key_iv, body.base_url || null, body.ai_rules || null, body.auto_approve ?? false, body.max_steps ?? DEFAULT_MAX_STEPS, body.max_tool_steps ?? 10, body.auto_fix_problems ?? false, body.git_author_name || null, body.git_author_email || null],
       );
       // Re-sync existing repos so a changed identity takes effect immediately.
       if (hasGitNameUpdate || hasGitEmailUpdate) {

@@ -83,6 +83,12 @@ export interface TurnResult {
   reason: TurnEnd;
   /** Non-empty only when reason is "input-requested". */
   pending: PendingApproval[];
+  /**
+   * The stored session id was unknown to the server and this turn ran on a
+   * fresh session instead — so the coder has none of the earlier history.
+   * Set only on that path, never on an ordinary create.
+   */
+  restarted?: boolean;
 }
 
 interface StreamArgs {
@@ -182,29 +188,48 @@ export async function runCodeTurn(
   // denied outright instead of asked. See approval-policy.ts.
   const createBody = JSON.stringify({ ...turnBody, approverReachable: true });
 
-  // 1) Start (create) or continue the turn.
-  let codeSessionId = args.codeSessionId;
-  if (!codeSessionId) {
+  const createSession = async (): Promise<string> => {
     const res = await client.req(`${CODE_BASE}/eve/v1/session`, { method: "POST", headers: headers(args.userId), body: createBody });
     if (!res.ok) throw new Error(`code create failed: ${res.status}`);
     const j = await res.json();
-    codeSessionId = j.sessionId as string;
+    return j.sessionId as string;
+  };
+
+  // 1) Start (create) or continue the turn.
+  let codeSessionId = args.codeSessionId;
+  let startCursor = args.startCursor;
+  let restarted = false;
+  if (!codeSessionId) {
+    codeSessionId = await createSession();
   } else {
     const res = await client.req(`${CODE_BASE}/eve/v1/session/${codeSessionId}`, { method: "POST", headers: headers(args.userId), body });
-    if (!res.ok) throw new Error(`code continue failed: ${res.status}`);
+    // A stored id the server does not know (handler.ts:1642 is this route's
+    // only 404): a devx chat id stored before claw moved to eve, a pruned
+    // session, a restored database. Open a fresh one ONCE rather than
+    // stranding the thread — a second failure throws like any other. The new
+    // session has no history, so the cursor restarts with it.
+    if (res.status === 404) {
+      console.warn(`claw: coder session ${codeSessionId} is unknown to the server (404) — starting a fresh session`);
+      codeSessionId = await createSession();
+      startCursor = 0;
+      restarted = true;
+    } else if (!res.ok) {
+      throw new Error(`code continue failed: ${res.status}`);
+    }
   }
 
   // 2) Stream the turn's events from startCursor until the turn ends. Safe to
   // attach AFTER the message here: everything a turn does before we attach is
   // persisted, so the replay carries it (an approval gate is the one thing that
   // is not — see resolveCoderApproval.ts, which attaches first).
-  return await streamTurn(client, {
+  const result = await streamTurn(client, {
     codeSessionId,
-    startCursor: args.startCursor,
+    startCursor,
     userId: args.userId,
     onHeartbeat: args.onHeartbeat,
     timeoutMs: args.timeoutMs,
   });
+  return restarted ? { ...result, restarted: true } : result;
 }
 
 // Re-attach to a turn already in flight — used after a parked approval is

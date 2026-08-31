@@ -1,5 +1,5 @@
 // plugins/claw/agent/lib/code-session.test.ts
-import { assert, assertEquals } from "jsr:@std/assert";
+import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
 import { FakeTime } from "jsr:@std/testing/time";
 import { attachCodeStream, CODE_BASE, reattachCodeTurn, resolveCodeApproval, runCodeTurn, type TokioClient } from "./code-session.ts";
 
@@ -84,6 +84,7 @@ Deno.test("runCodeTurn creates a session then streams the reply (no mode = full 
 
   assertEquals(res.codeSessionId, "code-1");
   assertEquals(res.replyText, "PLAN: do the thing");
+  assertEquals(res.restarted, undefined); // an ordinary create is not a restart
   // Only message.completed is replayable; turn.started/session.waiting are
   // live-only and must not move the cursor (see REPLAYABLE).
   assertEquals(res.nextCursor, 1);
@@ -625,4 +626,55 @@ Deno.test("runCodeTurn declares a reachable approver on create, and only on crea
   const { client: client2, reqs: reqs2 } = fakeClient([cont, stream2]);
   await runCodeTurn(client2, { codeSessionId: "code-1", message: "again", startCursor: 2 });
   assertEquals(JSON.parse(reqs2[0].init.body).approverReachable, undefined);
+});
+
+// A stored id the server no longer knows — a devx chat id written before claw
+// moved to eve, a pruned session, a restored database. The thread must not
+// strand on it.
+Deno.test("a continue that 404s opens a fresh session once, from cursor 0", async () => {
+  const gone = new Response(JSON.stringify({ error: "session not found" }), { status: 404 });
+  const create = new Response(JSON.stringify({ sessionId: "code-new" }), {
+    headers: { "content-type": "application/json" },
+  });
+  const stream = ndjson(
+    { type: "message.completed", data: { text: "picked it up" } },
+    { type: "turn.completed", data: {} },
+  );
+  const { client, reqs } = fakeClient([gone, create, stream]);
+
+  const res = await runCodeTurn(client, {
+    codeSessionId: "devx-chat-id", message: "carry on", userId: "u1", startCursor: 5,
+  });
+
+  assertEquals(res.codeSessionId, "code-new");
+  assertEquals(res.replyText, "picked it up");
+  // Flagged so askCore can tell the channel the coder lost this thread.
+  assertEquals(res.restarted, true);
+  // The fresh session has no history: the cursor restarts with it, and the
+  // stream must be attached at 0, not at the dead session's 5.
+  assertEquals(res.nextCursor, 2);
+  assert(reqs[1].url.endsWith("/eve/v1/session"), "expected a session create after the 404");
+  assertEquals(JSON.parse(reqs[1].init.body).approverReachable, true);
+  assert(reqs[2].url.includes("startIndex=0"), `streamed from the wrong index: ${reqs[2].url}`);
+});
+
+Deno.test("a second failure after the 404 re-create is a real error, not another retry", async () => {
+  const gone = new Response(JSON.stringify({ error: "session not found" }), { status: 404 });
+  const createFailed = new Response("nope", { status: 500 });
+  const { client } = fakeClient([gone, createFailed]);
+  await assertRejects(
+    () => runCodeTurn(client, { codeSessionId: "stale", message: "go", startCursor: 1 }),
+    Error,
+    "code create failed: 500",
+  );
+});
+
+Deno.test("a non-404 continue failure still fails the turn — only a gone session self-heals", async () => {
+  const boom = new Response("upstream exploded", { status: 500 });
+  const { client } = fakeClient([boom]);
+  await assertRejects(
+    () => runCodeTurn(client, { codeSessionId: "code-1", message: "go", startCursor: 1 }),
+    Error,
+    "code continue failed: 500",
+  );
 });

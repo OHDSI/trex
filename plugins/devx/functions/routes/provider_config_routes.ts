@@ -52,11 +52,11 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
     // the masked preview and auth_shape can be computed from the actually
     // resolved value — once a row is encrypted, the plaintext api_key column
     // alone is NULL, so deriving these straight from SQL would silently show
-    // "no key" / auth_shape "none" for a row that has one. auth_shape does
-    // not gate the loop (useEffectiveLoop.ts only forces legacy for
-    // provider === "claude-code"); it's a display-only credential-shape hint
-    // for the Settings UI, but that's still real signal, so this isn't just
-    // cosmetic.
+    // "no key" / auth_shape "none" for a row that has one. auth_shape gates
+    // nothing — there is one loop now, and the client-side router that used to
+    // force claude-code onto the legacy one is deleted; it's a display-only
+    // credential-shape hint for the Settings UI, but that's still real signal,
+    // so this isn't just cosmetic.
     const result = await sql(
       `SELECT id, user_id, provider, model, api_key, api_key_encrypted, api_key_iv,
               base_url, display_name, is_active, created_at, updated_at
