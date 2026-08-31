@@ -1,6 +1,6 @@
-// task-u1/u2: chat client for the ported eve/agents runtime, gated behind
-// devx.settings.loop === 'agents' (see ChatPanel.tsx's single flag branch
-// point). U1 shipped this against the stateless /chat endpoint (useChat +
+// task-u1/u2: chat client for the ported eve/agents runtime, which every
+// provider now runs on (ChatPanel.tsx is a plain pass-through). U1 shipped
+// this against the stateless /chat endpoint (useChat +
 // DefaultChatTransport); U2 replaces the transport with the eve/v1 session
 // API (POST /eve/v1/session, follow-up POSTs, GET .../stream NDJSON tail,
 // POST .../approval) so `needsApproval` tools actually pause mid-turn for a

@@ -34,11 +34,9 @@ export const CHAT_MODES: { id: ChatMode; label: string; description: string }[] 
 // stored credential cannot be derived client-side — the server computes it
 // from the raw key before masking (functions/auth_shape.ts). Display-only:
 // shown alongside key_status/is_plaintext so the Settings UI can tell the
-// user what kind of credential is on file. NOT a loop gate — only
-// provider === "claude-code" forces the legacy loop (useEffectiveLoop.ts);
-// IAM-shaped bedrock credentials are simply unsupported and error at
-// agent.ts's resolveModel. Absent on older server builds (optional
-// everywhere it appears).
+// user what kind of credential is on file. IAM-shaped bedrock credentials
+// are simply unsupported and error at agent.ts's resolveModel. Absent on
+// older server builds (optional everywhere it appears).
 export type AuthShape = "bearer" | "iam" | "plain" | "none";
 
 export interface DevxSettings {
