@@ -84,6 +84,7 @@ Deno.test("runCodeTurn creates a session then streams the reply (no mode = full 
 
   assertEquals(res.codeSessionId, "code-1");
   assertEquals(res.replyText, "PLAN: do the thing");
+  assertEquals(res.restarted, undefined); // an ordinary create is not a restart
   // Only message.completed is replayable; turn.started/session.waiting are
   // live-only and must not move the cursor (see REPLAYABLE).
   assertEquals(res.nextCursor, 1);
@@ -647,6 +648,8 @@ Deno.test("a continue that 404s opens a fresh session once, from cursor 0", asyn
 
   assertEquals(res.codeSessionId, "code-new");
   assertEquals(res.replyText, "picked it up");
+  // Flagged so askCore can tell the channel the coder lost this thread.
+  assertEquals(res.restarted, true);
   // The fresh session has no history: the cursor restarts with it, and the
   // stream must be attached at 0, not at the dead session's 5.
   assertEquals(res.nextCursor, 2);

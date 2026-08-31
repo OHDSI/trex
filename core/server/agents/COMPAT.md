@@ -1291,8 +1291,10 @@ Discord thread open at deploy time carried an id the eve session route answers
 `404` for (`handler.ts:1642`). `code-session.ts`'s `runCodeTurn` now treats that
 one status on the continue call as "this id is gone": it logs, opens a fresh
 session ONCE (same create body, `approverReachable` included), and restarts the
-cursor at 0 because the new session has no history. A second failure throws like
-any other. This also covers a pruned session or a restored database, not just
+cursor at 0 because the new session has no history, and reports the restart up
+to `askCore`, which posts a plain note to the Discord thread — the coder losing
+the conversation is otherwise indistinguishable from a bug. A second failure
+throws like any other. This also covers a pruned session or a restored database, not just
 the migration.
 
 **`devx.settings.loop` (the column) is deliberately still there.** Dropping

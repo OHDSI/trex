@@ -35,6 +35,9 @@ export interface CodeTurnOutcome {
   nextCursor?: number;
   reason?: TurnEnd;
   pending?: PendingApproval[];
+  // The coder's stored session was gone and the turn ran on a fresh one (see
+  // code-session.ts's 404 branch) — the thread's earlier context is lost.
+  restarted?: boolean;
   // Set only by routeCodeTurn's real branches (absent from existing test
   // stubs by design). Eve turns need mirroring into devx.chats/devx.messages
   // for UI visibility (chat-mirror.ts); the legacy transport already writes
@@ -145,6 +148,7 @@ export async function routeCodeTurn(
     nextCursor: result.nextCursor,
     reason: result.reason,
     pending: result.pending,
+    restarted: result.restarted,
     transport: "eve",
   };
 }
@@ -207,6 +211,22 @@ export async function askCore(
     eventCursor: outcome.nextCursor ?? 0,
     appId,
   });
+  // A restart is invisible from the channel otherwise: the coder simply stops
+  // remembering the thread, which reads as a bug. Same posting mechanism as the
+  // heartbeat and the approval gates, and a Discord failure must not fail the
+  // turn — the coder's work is already done by here.
+  if (outcome.restarted && ctx.channelId) {
+    const botToken = Deno.env.get("DISCORD_BOT_TOKEN");
+    if (botToken) {
+      await postChannelMessage(fetch, {
+        botToken,
+        channelId: ctx.channelId,
+        content:
+          "Note: the previous coding session is no longer available, so this ran on a fresh one. " +
+          "The coder has lost the context from earlier in this thread — I will re-state whatever it needs from here.",
+      }).catch((e) => console.error("claw: failed to post the coder session-restart notice:", e));
+    }
+  }
   // Eve turns never touch devx.chats/devx.messages themselves (see
   // chat-mirror.ts) — mirror this turn so the devx UI shows it, same as the
   // legacy transport already does server-side. Never for legacy: that would

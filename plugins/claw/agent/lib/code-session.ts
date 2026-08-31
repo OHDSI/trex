@@ -83,6 +83,12 @@ export interface TurnResult {
   reason: TurnEnd;
   /** Non-empty only when reason is "input-requested". */
   pending: PendingApproval[];
+  /**
+   * The stored session id was unknown to the server and this turn ran on a
+   * fresh session instead — so the coder has none of the earlier history.
+   * Set only on that path, never on an ordinary create.
+   */
+  restarted?: boolean;
 }
 
 interface StreamArgs {
@@ -192,6 +198,7 @@ export async function runCodeTurn(
   // 1) Start (create) or continue the turn.
   let codeSessionId = args.codeSessionId;
   let startCursor = args.startCursor;
+  let restarted = false;
   if (!codeSessionId) {
     codeSessionId = await createSession();
   } else {
@@ -205,6 +212,7 @@ export async function runCodeTurn(
       console.warn(`claw: coder session ${codeSessionId} is unknown to the server (404) — starting a fresh session`);
       codeSessionId = await createSession();
       startCursor = 0;
+      restarted = true;
     } else if (!res.ok) {
       throw new Error(`code continue failed: ${res.status}`);
     }
@@ -214,13 +222,14 @@ export async function runCodeTurn(
   // attach AFTER the message here: everything a turn does before we attach is
   // persisted, so the replay carries it (an approval gate is the one thing that
   // is not — see resolveCoderApproval.ts, which attaches first).
-  return await streamTurn(client, {
+  const result = await streamTurn(client, {
     codeSessionId,
     startCursor,
     userId: args.userId,
     onHeartbeat: args.onHeartbeat,
     timeoutMs: args.timeoutMs,
   });
+  return restarted ? { ...result, restarted: true } : result;
 }
 
 // Re-attach to a turn already in flight — used after a parked approval is

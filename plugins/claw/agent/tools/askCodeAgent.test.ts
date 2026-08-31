@@ -588,3 +588,85 @@ Deno.test("instructions.md still has the Talking to the coder section", async ()
   const text = await Deno.readTextFile(new URL("../instructions.md", import.meta.url));
   assertStringIncludes(text, "## Talking to the coder");
 });
+
+// --- session-restart notice -------------------------------------------------
+// The 404 self-heal (code-session.ts) fires on every thread open at the moment
+// claw's coder moves to eve. Without a word in the channel it looks exactly
+// like a coder that inexplicably forgot the conversation.
+
+// Captures Discord POSTs made through the global fetch. The mirror has its own
+// injected fetch, so anything caught here is a channel post.
+function captureDiscordPosts() {
+  const posts: string[] = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = ((_url: string | URL | Request, init?: RequestInit) => {
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (typeof body.content === "string") posts.push(body.content);
+    return Promise.resolve(new Response(JSON.stringify({ id: "m1" }), { status: 200 }));
+  }) as typeof fetch;
+  return { posts, restore: () => { globalThis.fetch = real; } };
+}
+
+const quietMirror: MirrorDeps = {
+  mintToken: () => Promise.resolve("tok"),
+  ensureChat: () => Promise.resolve("devx-chat-1"),
+  fetch: (() => Promise.resolve(new Response("{}", { status: 200 }))) as typeof fetch,
+};
+
+Deno.test("askCore tells the channel when the coder session had to be restarted", async () => {
+  const sql = fakeSqlMerging();
+  const cap = captureDiscordPosts();
+  Deno.env.set("DISCORD_BOT_TOKEN", "bot-token");
+  try {
+    await askCore(
+      sql.fn,
+      { sessionId: "s1", userId: "u1", channelId: "chan-1" },
+      { message: "go" },
+      stubEveTurnWithTransport({ restarted: true }),
+      quietMirror,
+    );
+  } finally {
+    cap.restore();
+    Deno.env.delete("DISCORD_BOT_TOKEN");
+  }
+  assertEquals(cap.posts.length, 1);
+  assertStringIncludes(cap.posts[0], "previous coding session is no longer available");
+  assertStringIncludes(cap.posts[0], "lost the context");
+});
+
+Deno.test("an ordinary turn says nothing — the notice is not a generic warning", async () => {
+  const sql = fakeSqlMerging();
+  const cap = captureDiscordPosts();
+  Deno.env.set("DISCORD_BOT_TOKEN", "bot-token");
+  try {
+    await askCore(
+      sql.fn,
+      { sessionId: "s1", userId: "u1", channelId: "chan-1" },
+      { message: "go" },
+      stubEveTurnWithTransport(), // no restart: a normal create/continue
+      quietMirror,
+    );
+  } finally {
+    cap.restore();
+    Deno.env.delete("DISCORD_BOT_TOKEN");
+  }
+  assertEquals(cap.posts, []);
+});
+
+Deno.test("a restart with no channel to post to still returns the turn", async () => {
+  const sql = fakeSqlMerging();
+  const cap = captureDiscordPosts();
+  try {
+    const out = await askCore(
+      sql.fn,
+      { sessionId: "s1", userId: "u1" }, // no channelId
+      { message: "go" },
+      stubEveTurnWithTransport({ restarted: true, replyText: "done" }),
+      quietMirror,
+    );
+    assertEquals(out.reply, "done");
+  } finally {
+    cap.restore();
+  }
+  assertEquals(cap.posts, []);
+});
