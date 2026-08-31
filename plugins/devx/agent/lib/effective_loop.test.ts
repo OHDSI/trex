@@ -17,7 +17,13 @@
 // user now resolves to "agents" like everyone else and fails loudly at
 // agent.ts's resolveModel instead.
 import { assert, assertEquals } from "jsr:@std/assert";
-import { resolveEffectiveLoop, SETTINGS_FETCH_FAILURE_LOOP } from "../../src/hooks/effectiveLoop.ts";
+import {
+  resolveEffectiveLoop,
+  SETTINGS_FETCH_FAILED,
+  stateForLoading,
+  stateForSettingsFailure,
+  type EffectiveLoop,
+} from "../../src/hooks/effectiveLoop.ts";
 
 Deno.test("resolveEffectiveLoop: loop='agents' + anthropic -> 'agents'", () => {
   assertEquals(resolveEffectiveLoop({ loop: "agents", provider: "anthropic" }), "agents");
@@ -77,15 +83,38 @@ Deno.test("resolveEffectiveLoop: an explicit unknown loop value -> 'legacy', not
   assertEquals(resolveEffectiveLoop({ loop: "something-else", provider: "anthropic" }), "legacy");
 });
 
-// The CRITICAL distinction (R13): a failed settings/provider FETCH is not an
-// absent settings row. useEffectiveLoop's `.catch` uses this constant, not
-// resolveEffectiveLoop, because a user whose provider could not be read may
-// be on `claude-code`, for which eve's resolveModel throws.
-Deno.test("a failed settings fetch falls back to 'legacy', unlike an absent settings row", () => {
-  assertEquals(SETTINGS_FETCH_FAILURE_LOOP, "legacy");
+// Corrected R13 (task-4): a failed settings/provider FETCH is a browser
+// concern, not a turn — there is nothing to guess a loop for. Silently
+// defaulting to "legacy" only worked because legacy accepted every
+// provider, a property Phase 4 removes. useEffectiveLoop's `.catch` now
+// sets this sentinel instead of resolving to any loop; the UI renders it as
+// a retryable error.
+Deno.test("a failed settings fetch resolves to neither loop, unlike an absent settings row", () => {
+  assertEquals(SETTINGS_FETCH_FAILED, "settings-fetch-failed");
   assertEquals(resolveEffectiveLoop({ loop: undefined, provider: "anthropic" }), "agents");
-  assert(
-    SETTINGS_FETCH_FAILURE_LOOP !== resolveEffectiveLoop({ loop: undefined, provider: "anthropic" }),
-    "the fetch-failure fallback and the no-row default must stay distinct",
-  );
+  // The sentinel must not collide with, or be assignable in place of, a real
+  // EffectiveLoop value — a failed fetch must not resolve to any loop.
+  const loops: EffectiveLoop[] = ["legacy", "agents"];
+  assert(!loops.includes(SETTINGS_FETCH_FAILED as unknown as EffectiveLoop), "the sentinel must not be a valid EffectiveLoop value");
+});
+
+// task-4 must-fix: pins the shape useEffectiveLoop.ts's catch/loading
+// branches are required to build via these two functions rather than
+// inline literals. This does NOT exercise the React effect (devx has no
+// RTL/vitest/jsdom) — a hook that stopped calling stateForSettingsFailure()
+// and wrote `{ status: "resolved", loop: "legacy" }` inline instead would
+// still pass this suite. It only guarantees the values these functions are
+// allowed to hand back are never a resolved loop.
+Deno.test("stateForSettingsFailure: yields 'error', never a resolved loop", () => {
+  const result = stateForSettingsFailure();
+  assertEquals(result, { status: "error" });
+  assert(result.status !== "resolved", "a failed fetch must not resolve to a loop");
+  assert(!("loop" in result), "the failure state must carry no loop field");
+});
+
+Deno.test("stateForLoading: yields 'loading', never a resolved loop", () => {
+  const result = stateForLoading();
+  assertEquals(result, { status: "loading" });
+  assert(result.status !== "resolved", "loading must not resolve to a loop");
+  assert(!("loop" in result), "the loading state must carry no loop field");
 });

@@ -9,6 +9,8 @@ import { maskKey, settingsKeyWriteDecision } from "./api_key_mask.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey, writeProviderKeyFields } from "./provider_key.ts";
 import { isNoKeyProvider, removedProviderResponse } from "./provider_support.ts";
 import { streamAgentChat, resolveConsent, clearPendingConsents } from "./agent.ts";
+import { isPlanRun, planStatusAfterRun, runAgentRunOnEve } from "./lib/agent_run.ts";
+import { bearerFromRequest, denialSummary } from "./lib/eve_run.ts";
 import { clearPendingResponses } from "./tools/plan_tools.ts";
 import { ensureAppWorkspace, getAppWorkspacePath, getRunWorktreePath, ensureWorktreeParent, readProjectRules } from "./tools/workspace.ts";
 import { safeJoin, EXCLUDED_DIRS, EXCLUDED_FILES } from "./tools/path_safety.ts";
@@ -1162,8 +1164,6 @@ Deno.serve(async (req: Request) => {
       if (!agentSettings || (!agentSettings.api_key && !isNoKeyProvider(agentSettings.provider))) {
         return Response.json({ error: "AI provider not configured" }, { status: 400, headers: corsHeaders });
       }
-      // Agent-driven runs are autonomous.
-      agentSettings = { ...agentSettings, auto_approve: true };
 
       const stream = new ReadableStream({
         async start(controller) {
@@ -1176,13 +1176,10 @@ Deno.serve(async (req: Request) => {
           }, 15000);
 
           try {
-            const { streamAgentChat } = await import("./agent.ts");
-
-            // Map SDK Task ids → child subagent_runs ids (for nested display).
-            const childRuns = new Map<string, string>();
-
-            // Log tool calls as subagent messages; bridge SDK Task subagents
-            // into child subagent_runs rows (parent_run_id = this run).
+            // Log tool calls as subagent messages. The former subagent_start/
+            // step/done bridge is gone with the SDK loop: eve's event stream
+            // (lib/eve_sse.ts) carries no Task lifecycle, so no child
+            // subagent_runs rows are created for a delegated subagent.
             const agentSend = (data: any) => {
               send(data); // Forward to SSE
               if (data.type === "tool_call_start") {
@@ -1191,45 +1188,14 @@ Deno.serve(async (req: Request) => {
                    VALUES ($1, 'tool', $2, $3, $4)`,
                   [runId, JSON.stringify(data.args || {}), data.name, data.callId],
                 ).catch(() => {});
-              } else if (data.type === "subagent_start" && data.taskId) {
-                sql(
-                  `INSERT INTO devx.subagent_runs
-                     (parent_chat_id, parent_run_id, agent_name, task, user_id, app_id, run_kind, status)
-                   VALUES ($1, $2, $3, $4, $5, $6, 'subagent', 'running') RETURNING id`,
-                  [run.parent_chat_id, runId, (data.name || "subagent").slice(0, 200), (data.task || "").slice(0, 4000), userId, run.app_id],
-                ).then((r) => { if (r.rows[0]) childRuns.set(data.taskId, r.rows[0].id); }).catch(() => {});
-              } else if (data.type === "subagent_step" && data.taskId && data.lastTool) {
-                const cid = childRuns.get(data.taskId);
-                if (cid) {
-                  sql(
-                    `INSERT INTO devx.subagent_messages (run_id, role, content, tool_name) VALUES ($1, 'tool', $2, $3)`,
-                    [cid, (data.summary || "").slice(0, 4000), data.lastTool],
-                  ).catch(() => {});
-                }
-              } else if (data.type === "subagent_done" && data.taskId) {
-                const cid = childRuns.get(data.taskId);
-                if (cid) {
-                  sql(
-                    `UPDATE devx.subagent_runs SET status = $1, result = $2, completed_at = NOW() WHERE id = $3`,
-                    [data.status === "completed" ? "completed" : "failed", (data.result || "").slice(0, 50000), cid],
-                  ).catch(() => {});
-                }
               }
             };
-
-            // Plan-execution runs get a directive prompt that pre-decides
-            // subagent-driven execution (so the skill won't re-ask), and run on
-            // the claude-code path where the devx skills are invocable.
-            const isPlanRun = run.run_kind === "agent" && !!run.plan_id;
-            const runPrompt = isPlanRun
-              ? `Execute the following implementation plan using the subagent-driven-development skill. Do not ask which execution strategy to use — use subagent-driven execution. Implement everything end-to-end with your tools.\n\nPLAN:\n${run.task}`
-              : run.task + ". Use your tools to thoroughly analyze the project.";
 
             // Isolate agent-driven plan runs in a dedicated git worktree on a
             // run/<id> branch, so concurrent runs don't collide and the work is
             // reviewable/mergeable from the Git tab. Non-fatal on failure.
             let cwdOverride: string | undefined;
-            if (isPlanRun && run.app_id) {
+            if (isPlanRun(run) && run.app_id) {
               try {
                 const repoRoot = getAppWorkspacePath(userId, run.app_id);
                 await ensureWorktreeParent(userId, run.app_id);
@@ -1247,43 +1213,39 @@ Deno.serve(async (req: Request) => {
               }
             }
 
-            const baseArgs = {
-              chatId: `agent-run-${runId}`,
+            // One seam for every provider: a claude-code account is delegated by
+            // the agent's own resolveEngine, not by a branch here.
+            const result = await runAgentRunOnEve({
               userId,
-              appId: run.app_id,
-              chatMode: "agent" as const,
-              settings: { ...agentSettings, max_steps: 100, auto_approve: true },
-              history: [{ role: "user", content: runPrompt }],
-              send: agentSend,
-              sqlFn: sql,
+              run,
               skillContext: skillBody,
-              commandOverride: matchedSkill?.allowed_tools
-                ? { allowed_tools: matchedSkill.allowed_tools, model: null, body: "" }
-                : undefined,
+              // An empty allowed_tools is "the skill named none", not "allow
+              // nothing" — declaring it would drop every tool from the run.
+              allowedTools: matchedSkill?.allowed_tools?.length ? matchedSkill.allowed_tools : undefined,
               workspacePathOverride: cwdOverride,
-            };
+              send: agentSend,
+              sql,
+              bearerToken: bearerFromRequest(req),
+            });
 
-            let result;
-            if (isPlanRun && agentSettings.provider === "claude-code") {
-              const { streamClaudeCodeChat } = await import("./claude_code_agent.ts");
-              result = await streamClaudeCodeChat(baseArgs);
-            } else {
-              if (isPlanRun && agentSettings.provider !== "claude-code") {
-                agentSend({ type: "chunk", content: "\n> ⚠️ Subagent-driven execution needs the Claude Code provider; running in basic autonomous mode.\n\n" });
-              }
-              result = await streamAgentChat(baseArgs);
-            }
-
-            const fullContent = result.content || "";
+            // An unattended run has no approver, so eve denies hard-tier tools
+            // outright. Record that with the result: a run that "completed"
+            // without the tools it needed must not read as a clean one.
+            const denialNotice = denialSummary(result.denials);
+            if (denialNotice) agentSend({ type: "chunk", content: `\n> ⚠️ ${denialNotice}\n\n` });
+            const fullContent = denialNotice
+              ? `${result.content || ""}\n\n> ⚠️ ${denialNotice}`
+              : (result.content || "");
             await sql(
               `UPDATE devx.subagent_runs SET status = 'completed', result = $1, completed_at = NOW() WHERE id = $2`,
               [fullContent.slice(0, 50000), runId],
             );
-            // Plan-execution runs mark their plan implemented on success.
+            // Plan-execution runs mark their plan implemented on success — but
+            // NOT when eve refused the tools the plan needed (planStatusAfterRun).
             if (run.plan_id) {
               await sql(
-                `UPDATE devx.plans SET status = 'implemented', updated_at = NOW() WHERE id = $1`,
-                [run.plan_id],
+                `UPDATE devx.plans SET status = $1, updated_at = NOW() WHERE id = $2`,
+                [planStatusAfterRun(result.denials), run.plan_id],
               ).catch(() => {});
             }
             // Save final assistant message
@@ -1319,7 +1281,7 @@ Deno.serve(async (req: Request) => {
               }
             } catch { /* parsing failed, not critical */ }
 
-            send({ type: "done", content: fullContent });
+            send({ type: "done", content: fullContent, denials: result.denials });
           } catch (err) {
             await sql(
               `UPDATE devx.subagent_runs SET status = 'failed', result = $1, completed_at = NOW() WHERE id = $2`,

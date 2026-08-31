@@ -12,6 +12,15 @@ import { devServerManager } from "../dev_server.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey } from "../provider_key.ts";
 import { isNoKeyProvider, removedProviderResponse } from "../provider_support.ts";
 import { classifyCoderError } from "../error_codes.ts";
+import { bearerFromRequest, denialSummary, runOnEve } from "../lib/eve_run.ts";
+import {
+  browserlessRefusal,
+  CODE_REVIEW_TOOLS,
+  DESIGN_REVIEW_TOOLS,
+  DOCS_UPDATE_TOOLS,
+  QA_REVIEW_TOOLS,
+  SECURITY_REVIEW_TOOLS,
+} from "./review_tools.ts";
 
 const EXCLUDED_DIRS = new Set([
   "node_modules", ".git", "dist", "build", ".next", ".venv", "venv",
@@ -19,35 +28,6 @@ const EXCLUDED_DIRS = new Set([
 ]);
 
 const CODE_EXTENSIONS = /\.(ts|tsx|js|jsx|mjs|cjs|json|env|yaml|yml|py|sql|html|css|vue|svelte)$/;
-
-// Tool allowlists per review type
-const CODE_REVIEW_TOOLS = [
-  "Read", "Glob", "Grep", "CodeSearch", "GitDiff", "GitLog", "GitStatus",
-];
-const SECURITY_REVIEW_TOOLS = [
-  "Read", "Glob", "Grep", "CodeSearch", "GitDiff", "GitLog", "GitStatus",
-];
-const QA_REVIEW_TOOLS = [
-  // Screenshot lets a QA finding carry visual evidence; without it a bug report is
-  // prose only. BrowserEvaluate doubles as the console/pageerror capture channel.
-  "BrowserNavigate", "BrowserClick", "BrowserFill", "BrowserGetText", "BrowserEvaluate",
-  "BrowserScreenshot",
-  "Read", "Glob", "Grep", "GitDiff",
-];
-const DESIGN_REVIEW_TOOLS = [
-  // BrowserEvaluate is what makes the design review measurable rather than impressionistic:
-  // it can read computed styles (font stacks, contrast, touch-target sizes) and resize the
-  // viewport, without which the Responsive Design category cannot be honestly assessed.
-  "BrowserNavigate", "BrowserClick", "BrowserScreenshot", "BrowserGetText", "BrowserEvaluate",
-  "Read", "Glob", "Grep", "GitDiff",
-];
-const DOCS_UPDATE_TOOLS = [
-  // The one agent in this file that WRITES: it adds/updates pages in the app's
-  // documentation website (d2e: docs/website), so it needs Write/Edit/SearchReplace
-  // on top of the explore set the code review uses.
-  "Read", "Glob", "Grep", "CodeSearch", "GitDiff", "GitLog", "GitStatus",
-  "Write", "Edit", "SearchReplace",
-];
 
 export async function handleSecurityRoutes(path, method, req, userId, sql, corsHeaders) {
   // POST /apps/:id/security/scan — fast npm audit + secret scan (unchanged)
@@ -132,26 +112,21 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
     parseFindings: (text: string) => { title: string; level: string; description: string }[];
     table: string;
     eventPrefix: string;
-    allowedTools: string[];
-    maxSteps?: number;
+    allowedTools: readonly string[];
   }) {
-    // Read active provider config, fall back to legacy settings. Probe
-    // before selecting the encrypted columns — see provider_key.ts's
-    // assertProviderConfigEncryptionMigrated header comment.
+    // Pre-flight provider gate. The model itself is now resolved inside the
+    // eve devx agent (agent.ts's resolveModel, off the same rows) — this is
+    // kept so a misconfigured provider fails the REQUEST with a usable message
+    // instead of failing the turn halfway through a stream.
     await assertProviderConfigEncryptionMigrated(sql);
     const activePC = await sql(
       `SELECT provider, model, api_key, api_key_encrypted, api_key_iv, base_url FROM devx.provider_configs WHERE user_id = $1 AND is_active = true LIMIT 1`,
       [userId],
     );
-    const prefsResult = await sql(
-      `SELECT ai_rules, auto_approve, max_steps FROM devx.settings WHERE user_id = $1 LIMIT 1`,
-      [userId],
-    );
     const providerRow = activePC.rows[0];
-    const prefs = prefsResult.rows[0] || {};
+    // Which loop this review will run on — the refusal below turns on it.
+    let resolvedProvider = providerRow?.provider;
 
-    // Assigned by exactly one of the two branches below and read after them.
-    let settings;
     if (!providerRow) {
       // Legacy fallback. devx.settings carries the same encrypted-pair
       // columns as provider_configs (V16) now — resolved through
@@ -187,6 +162,7 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       // whenever the user has no active provider_configs row.
       const removedLegacyProviderRejection = removedProviderResponse(legacyRow.provider, corsHeaders);
       if (removedLegacyProviderRejection) return removedLegacyProviderRejection;
+      resolvedProvider = legacyRow.provider;
       // Only providers that genuinely authenticate without a stored key belong
       // in the shared waiver — see the providerRow branch below for why a removed
       // engine must never be waived past the key gate.
@@ -196,18 +172,12 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
           { status: 400, headers: corsHeaders },
         );
       }
-      // Same "no ciphertext in the settings object" posture as the
-      // providerRow branch below.
-      const { api_key_encrypted: _legacyEnc, api_key_iv: _legacyIv, ...legacyNoCiphertext } = legacyRow;
-      settings = { ...legacyNoCiphertext, api_key: resolvedLegacyApiKey };
     } else {
-      // Resolve through the encryption helper before the no-key check
-      // (which must run on the resolved value, same as index.ts) and before
-      // `settings` is built — never let the raw api_key_encrypted/api_key_iv
-      // columns leak into settings.api_key unresolved, and never swallow a
-      // decrypt failure (this streams straight into streamAgentChat's
-      // createModel, which would otherwise fall through to an env-var
-      // credential on a NULL api_key).
+      // Resolve through the encryption helper before the no-key check, which
+      // must run on the RESOLVED value (same as index.ts): api_key is NULL once
+      // a row is encrypted, and a key gate reading the raw column would wave a
+      // keyless row through to the agent's own resolveModel. A decrypt failure
+      // must fail the request, never continue with an absent key.
       let resolvedApiKey;
       try {
         resolvedApiKey = await readProviderKey(providerRow);
@@ -230,21 +200,21 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       // Only providers that genuinely authenticate without a stored key belong
       // in the shared waiver (provider_support.ts, one definition for every
       // read site). A provider whose engine no longer exists must NOT be waived:
-      // streamAgentChat's createModel would route it to the OpenAI-compatible
-      // client, which resolves an absent key from the worker's own
-      // OPENAI_API_KEY.
+      // the model builder would route it to the OpenAI-compatible client, which
+      // resolves an absent key from the worker's own OPENAI_API_KEY.
       if (!resolvedApiKey && !isNoKeyProvider(providerRow.provider)) {
         return Response.json(
           { error: "AI provider not configured. Set your API key in Settings." },
           { status: 400, headers: corsHeaders },
         );
       }
-      // The comment above says ciphertext never leaks into `settings` — make
-      // that true by destructuring it out rather than spreading the raw row
-      // (same fix as index.ts's settings/agentSettings assembly).
-      const { api_key_encrypted: _providerRowEnc, api_key_iv: _providerRowIv, ...providerRowNoCiphertext } = providerRow;
-      settings = { ...providerRowNoCiphertext, api_key: resolvedApiKey, ...prefs };
     }
+
+    // Backstop for the routes' own early refusal above: a browser-dependent
+    // review must never reach eve on the delegated path, whichever route added
+    // it. Free here — the provider is already resolved.
+    const refusal = browserlessRejection(opts.table, resolvedProvider);
+    if (refusal) return refusal;
 
     // Fetch previous review for context
     let previousContext = "";
@@ -279,9 +249,6 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
         try {
           send({ type: `${opts.eventPrefix}_progress`, message: "Starting review agent..." });
 
-          // Import streamAgentChat dynamically to avoid circular deps
-          const { streamAgentChat } = await import("../agent.ts");
-
           // Create a send wrapper that forwards agent events as review progress
           let lastProgressTime = 0;
           const agentSend = (data: any) => {
@@ -311,50 +278,48 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
               };
               const msg = toolMessages[data.name] || `Using ${data.name}...`;
               send({ type: `${opts.eventPrefix}_progress`, message: msg });
-            } else if (data.type === "step") {
-              send({ type: `${opts.eventPrefix}_progress`, message: `Step ${data.step}/${data.maxSteps}...` });
             }
           };
 
-          // Run the agent
-          const result = await streamAgentChat({
-            // Synthetic chatId — not a real chat row. Safe because auto_approve
-            // bypasses consent (which uses chatId for resolution), and hooks
-            // query by userId, not chatId.
-            chatId: `review-${opts.appId}-${Date.now()}`,
+          // An unattended eve session with no approver: the review's tools are
+          // read-only, and anything in the hard escalate tier is denied outright
+          // rather than parked on a gate nobody is watching. runOnEve declares
+          // opts.allowedTools on the session row BEFORE the turn, which is what
+          // makes the per-review allowlist actually restrict the tool set.
+          const result = await runOnEve({
             userId,
             appId: opts.appId,
-            chatMode: "agent",
-            settings: {
-              ...settings,
-              max_steps: opts.maxSteps || 20,
-              auto_approve: true, // Auto-approve all tool calls for reviews
-            },
-            history: [{ role: "user", content: fullUserMessage }],
-            send: agentSend,
-            sqlFn: sql,
+            prompt: fullUserMessage,
             skillContext: opts.systemPrompt,
-            commandOverride: {
-              allowed_tools: opts.allowedTools,
-              model: null,
-              body: "",
-            },
+            allowedTools: opts.allowedTools,
+            send: agentSend,
+            sql,
+            bearerToken: bearerFromRequest(req),
           });
 
-          // Parse findings from the agent's final response
-          const agentResponse = result.content || "";
-          const findings = opts.parseFindings(agentResponse);
+          const findings = opts.parseFindings(result.content || "");
+          // Deliberately NOT a _progress frame: onDone clears the progress line
+          // the moment it arrives, so a denial sent that way is never displayed.
+          // It rides the review object instead, which is also what reloads.
+          const denialNotice = denialSummary(result.denials);
+          if (denialNotice) console.warn(`[devx] ${opts.table} review: ${denialNotice}`);
 
-          // Store in DB
+          // Stored WITH the denials (V21): on the live wire alone, a reload
+          // shows a clean-looking review that never had the tools it needed.
           const insertResult = await sql(
-            `INSERT INTO devx.agent_results (app_id, user_id, result_type, findings)
-             VALUES ($1, $2, $3, $4) RETURNING id, created_at`,
-            [opts.appId, userId, opts.table, JSON.stringify(findings)],
+            `INSERT INTO devx.agent_results (app_id, user_id, result_type, findings, denials)
+             VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at`,
+            [opts.appId, userId, opts.table, JSON.stringify(findings), JSON.stringify(result.denials)],
           );
 
           send({
             type: `${opts.eventPrefix}_done`,
-            review: { id: insertResult.rows[0].id, findings, created_at: insertResult.rows[0].created_at },
+            review: {
+              id: insertResult.rows[0].id,
+              findings,
+              created_at: insertResult.rows[0].created_at,
+              denials: result.denials,
+            },
           });
         } catch (err) {
           send({ type: `${opts.eventPrefix}_error`, error: err.message });
@@ -378,7 +343,7 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
   // Helper: get latest review by result type
   async function getLatestReview(appId: string, resultType: string) {
     const result = await sql(
-      `SELECT id, findings, created_at FROM devx.agent_results WHERE app_id = $1 AND user_id = $2 AND result_type = $3 ORDER BY created_at DESC LIMIT 1`,
+      `SELECT id, findings, denials, created_at FROM devx.agent_results WHERE app_id = $1 AND user_id = $2 AND result_type = $3 ORDER BY created_at DESC LIMIT 1`,
       [appId, userId, resultType],
     );
     return result.rows.length === 0 ? null : result.rows[0];
@@ -408,6 +373,29 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
 
   // Helper: build QA/Design review message with git diff and app URL.
   // Returns { error } on failure or { message, appUrl } on success.
+  function browserlessRejection(reviewType: string, provider: string | null | undefined): Response | null {
+    const refusal = browserlessRefusal(reviewType, provider);
+    if (!refusal) return null;
+    return Response.json({ error: refusal, code: "browser_tools_unavailable" }, { status: 400, headers: corsHeaders });
+  }
+
+  // Refuse BEFORE any precondition the refusal makes irrelevant. A browserless
+  // QA review behind a stopped dev server otherwise answers "start the dev
+  // server", and the user learns the real reason only on the retry. Reads the
+  // provider NAME alone — the key gate still runs later, in runAgentReview.
+  async function refuseBrowserlessReview(reviewType: string): Promise<Response | null> {
+    const active = await sql(
+      `SELECT provider FROM devx.provider_configs WHERE user_id = $1 AND is_active = true LIMIT 1`,
+      [userId],
+    );
+    let provider = active.rows[0]?.provider;
+    if (provider === undefined) {
+      const legacy = await sql(`SELECT provider FROM devx.settings WHERE user_id = $1 LIMIT 1`, [userId]);
+      provider = legacy.rows[0]?.provider;
+    }
+    return browserlessRejection(reviewType, provider);
+  }
+
   async function buildBrowserReviewMessage(appId: string, prefix: string): Promise<{ error: string } | { message: string; appUrl: string }> {
     const wsPath = getAppWorkspacePath(userId, appId);
 
@@ -458,7 +446,6 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       table: "security-review",
       eventPrefix: "review",
       allowedTools: SECURITY_REVIEW_TOOLS,
-      maxSteps: 20,
     });
   }
 
@@ -493,7 +480,6 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       table: "code-review",
       eventPrefix: "code_review",
       allowedTools: CODE_REVIEW_TOOLS,
-      maxSteps: 20,
     });
   }
 
@@ -516,6 +502,8 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
     if (!await checkApp(appId)) {
       return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
     }
+    const browserless = await refuseBrowserlessReview("qa-test");
+    if (browserless) return browserless;
     const result = await buildBrowserReviewMessage(appId, "Perform functional QA testing on the running web application. Use Playwright browser tools to navigate, click, fill forms, and verify behavior.");
     if (result.error) {
       return Response.json({ error: result.error }, { status: 400, headers: corsHeaders });
@@ -528,7 +516,6 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       table: "qa-test",
       eventPrefix: "qa_review",
       allowedTools: QA_REVIEW_TOOLS,
-      maxSteps: 30,
     });
   }
 
@@ -551,6 +538,8 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
     if (!await checkApp(appId)) {
       return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
     }
+    const browserless = await refuseBrowserlessReview("design-review");
+    if (browserless) return browserless;
     const result = await buildBrowserReviewMessage(appId, "Perform a visual design review of the running web application. Use Playwright browser tools to navigate and take screenshots for analysis.");
     if (result.error) {
       return Response.json({ error: result.error }, { status: 400, headers: corsHeaders });
@@ -563,7 +552,6 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       table: "design-review",
       eventPrefix: "design_review",
       allowedTools: DESIGN_REVIEW_TOOLS,
-      maxSteps: 25,
     });
   }
 
@@ -604,7 +592,6 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       table: "docs-update",
       eventPrefix: "docs_review",
       allowedTools: DOCS_UPDATE_TOOLS,
-      maxSteps: 30,
     });
   }
 

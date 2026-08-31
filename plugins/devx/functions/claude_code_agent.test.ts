@@ -1,5 +1,6 @@
 import { assertEquals, assertStringIncludes } from "jsr:@std/assert";
-import { answerPermissionRequest, buildAskQuestionRule } from "./claude_code_agent.ts";
+import { answerPermissionRequest, buildAskQuestionRule, sidecarAllowedTools } from "./claude_code_agent.ts";
+import { toolsOption } from "../fn-claude-code/tool_options.js";
 import { resolveCoderProfile } from "./coder_profile.ts";
 
 // answerPermissionRequest writes the exact decision file path/shape the sidecar's
@@ -213,4 +214,35 @@ Deno.test("answerPermissionRequest: a throwing injected resolver denies rather t
   } finally {
     await cleanupDecisionFile(id);
   }
+});
+
+// ---------------------------------------------------------------------------
+// The two hops the declared allowlist takes to reach the SDK. The empty-list
+// inversion is the trap on both: an EMPTY declared allowlist means "no
+// built-ins", an ABSENT one means "leave the SDK preset alone". A truthiness
+// test collapses those into one and hands a declared-nothing session every
+// tool. The code was correct on both hops and nothing held it.
+// ---------------------------------------------------------------------------
+
+Deno.test("hop 1 (devx -> sidecar): a declared EMPTY allowlist is forwarded as [], never as absent", () => {
+  assertEquals(sidecarAllowedTools([]), []);
+  assertEquals(sidecarAllowedTools(["Read", "Grep"]), ["Read", "Grep"]);
+  assertEquals(sidecarAllowedTools(undefined), undefined);
+  assertEquals(sidecarAllowedTools(null), undefined);
+});
+
+Deno.test("hop 1: the forwarded list is a copy — a later mutation cannot widen what was sent", () => {
+  const declared = ["Read"];
+  const sent = sidecarAllowedTools(declared);
+  declared.push("Bash");
+  assertEquals(sent, ["Read"]);
+});
+
+Deno.test("hop 2 (sidecar -> SDK): `tools` is set for a declared EMPTY allowlist and omitted for an absent one", () => {
+  assertEquals(toolsOption([]), { tools: [] });
+  assertEquals(toolsOption(["Read", "Grep"]), { tools: ["Read", "Grep"] });
+  // Omitted entirely — spreading `{}` is what leaves the SDK preset alone.
+  assertEquals(toolsOption(undefined), {});
+  assertEquals(toolsOption(null), {});
+  assertEquals("tools" in toolsOption(undefined), false);
 });

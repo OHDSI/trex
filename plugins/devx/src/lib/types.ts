@@ -259,7 +259,15 @@ export interface Deployment {
   completed_at?: string;
 }
 
-// Security review types
+// Review types
+
+// A tool call eve refused because a review runs unattended, with no approver.
+// Carried on every review result: a review that reported nothing because its
+// tools were denied is not a review that found nothing.
+export interface ToolDenial {
+  toolName: string;
+  reason: string;
+}
 
 export interface SecurityFinding {
   title: string;
@@ -271,6 +279,7 @@ export interface SecurityReview {
   id: string;
   findings: SecurityFinding[];
   created_at: string;
+  denials?: ToolDenial[];
 }
 
 // Code review types
@@ -285,6 +294,7 @@ export interface CodeReview {
   id: string;
   findings: CodeReviewFinding[];
   created_at: string;
+  denials?: ToolDenial[];
 }
 
 // QA test review types
@@ -299,6 +309,7 @@ export interface QaTestReview {
   id: string;
   findings: QaTestFinding[];
   created_at: string;
+  denials?: ToolDenial[];
 }
 
 // Design review types
@@ -313,6 +324,7 @@ export interface DesignReview {
   id: string;
   findings: DesignFinding[];
   created_at: string;
+  denials?: ToolDenial[];
 }
 
 // Docs update types — the docs agent WRITES documentation; its "findings" are
@@ -328,6 +340,7 @@ export interface DocsReview {
   id: string;
   findings: DocsUpdateEntry[];
   created_at: string;
+  denials?: ToolDenial[];
 }
 
 export interface DevServerStatus {

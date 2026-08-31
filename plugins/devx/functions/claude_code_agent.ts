@@ -27,6 +27,18 @@ const CLAUDE_PROCESS = "claude-code-node-server";
 // which is what actually applies it during prompt assembly.
 export { buildAskQuestionRule } from "./coder_context.ts";
 
+/**
+ * The `allowedTools` value put on the wire to the sidecar. An EMPTY declared
+ * allowlist means "no built-ins" and must survive as `[]`; only an ABSENT one
+ * leaves the SDK preset alone. A truthiness test here (`?.length ? … :
+ * undefined`) inverts that and hands a declared-nothing session every tool.
+ */
+export function sidecarAllowedTools(
+  allowedTools: readonly string[] | null | undefined,
+): string[] | undefined {
+  return Array.isArray(allowedTools) ? [...allowedTools] : undefined;
+}
+
 export async function ensureClaudeCodeServer() {
   try {
     const raw = await duckdb(`SELECT * FROM trex_devx_process_status('${CLAUDE_PROCESS}', '')`);
@@ -133,6 +145,9 @@ async function decidePermission({ id, toolName, input, chatId, userId, sqlFn, se
 export async function streamClaudeCodeChat({
   chatId, userId, appId, chatMode, settings, history, send, sqlFn,
   skillContext, commandOverride, hasComponentSelection, workspacePathOverride, useWorktree, remoteChannel, attachments,
+  // The eve session's declared tool allowlist (V14). Undefined = unrestricted;
+  // an EMPTY array declares "no tools" and must stay distinct from undefined.
+  allowedTools,
   // Set only when this stream IS an eve turn (agent/lib/sidecar_engine.ts) —
   // see answerPermissionRequest for what supplying it changes.
   resolvePermission,
@@ -233,6 +248,9 @@ export async function streamClaudeCodeChat({
         oauthToken,
         figmaToken: figmaToken || undefined,
         cwd: workspacePath,
+        // Restricts the SDK's built-in tool set (server.js maps it to `tools`).
+        // Sent only when declared, so an unrestricted session keeps the preset.
+        allowedTools: sidecarAllowedTools(allowedTools),
         // Resume each chat's OWN claude session — a single global session would
         // bleed context across chats and let one bad session break all of them.
         chatId,

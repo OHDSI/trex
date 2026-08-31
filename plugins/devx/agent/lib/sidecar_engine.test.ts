@@ -1,10 +1,17 @@
 import { assert, assertEquals } from "jsr:@std/assert";
-import { createSidecarEngine, type PermissionDecision, type SidecarStream, toSdkMessage } from "./sidecar_engine.ts";
+import {
+  createSidecarEngine,
+  type PermissionDecision,
+  type SidecarStream,
+  toSdkMessage,
+  unavailableDelegatedTools,
+} from "./sidecar_engine.ts";
+import { UNAVAILABLE_TOOL_ERROR } from "../../functions/lib/eve_run.ts";
 import type { HookCtx } from "../../../../core/server/agents/eve-shim/types.ts";
 import { createSdkTranslator } from "../../../../core/server/agents/service/engine/events.ts";
 import { subscribe } from "../../../../core/server/agents/service/stream.ts";
 import { coarseScopeKey, deriveScopeKey } from "../../../../core/server/agents/service/scope-key.ts";
-import { getWorkspacePath } from "../../functions/tools/workspace.ts";
+import { ensureAppWorkspace, getRunWorktreePath, getWorkspacePath } from "../../functions/tools/workspace.ts";
 import type { AgentEvent } from "../../../../core/server/agents/service/events.ts";
 
 // The engine's contract is "produce what core's translator reads", so the
@@ -325,4 +332,206 @@ Deno.test("sidecar engine: an unattended session with a reachable approver is st
   );
   assertEquals(decision, { behavior: "deny", message: "denied by user" });
   assertEquals(gated, 1);
+});
+
+// ---------------------------------------------------------------------------
+// The session's declared scope (V14) on THIS path. core's runDelegatedTurn
+// calls neither resolveInstructions nor buildSdkTools, so agent.ts's
+// filterTools / resolveWorkspace never fire for a claude-code turn — without
+// the engine reading the scope itself both capabilities are inert here.
+// ---------------------------------------------------------------------------
+
+/** fakeSql, plus the V14 scope row (the only SELECT naming tool_allowlist). */
+function scopedSql(scopeRow: Record<string, unknown>, over: Record<string, unknown[]> = {}): HookCtx["sql"] {
+  const base = fakeSql(over);
+  return (sql: string, params: unknown[] = []) =>
+    sql.includes("tool_allowlist") ? Promise.resolve({ rows: [scopeRow] }) : base(sql, params);
+}
+
+async function runScoped(
+  session: string,
+  sql: HookCtx["sql"],
+  opts: {
+    metadata?: unknown;
+    permission?: { id: string; toolName: string; input: Record<string, unknown> };
+  } = {},
+) {
+  const decisions: PermissionDecision[] = [];
+  let workspacePathOverride: string | undefined;
+  let allowedTools: readonly string[] | undefined;
+  const stream: SidecarStream = async (args) => {
+    workspacePathOverride = args.workspacePathOverride;
+    allowedTools = args.allowedTools;
+    if (opts.permission && args.resolvePermission) decisions.push(await args.resolvePermission(opts.permission));
+    return { content: "", toolCalls: [] };
+  };
+  const ctx: HookCtx = { ...hookCtx(sql), sessionId: session, metadata: opts.metadata ?? {} };
+  const engine = createSidecarEngine(ctx, { stream, approvalPollMs: 1, approvalTimeoutMs: 150 });
+  for await (const _ of engine.run({ sessionId: session, turnId: TURN, prompt: "do it" })) { /* drains */ }
+  return { decisions, workspacePathOverride, allowedTools };
+}
+
+Deno.test("sidecar engine: a delegated turn enforces the session's declared tool allowlist", async () => {
+  const session = "s-eng-allowlist";
+  const seen: AgentEvent[] = [];
+  const unsubscribe = subscribe(session, (e) => seen.push(e));
+  try {
+    const { decisions } = await runScoped(
+      session,
+      scopedSql({ tool_allowlist: ["Read"], tool_allowlist_declared: true, workspace_path: "" }, { decision: [{ decision: "approve" }] }),
+      { permission: { id: "p-al", toolName: "Bash", input: { command: "rm -rf /tmp/x" } } },
+    );
+    assertEquals(decisions, [{ behavior: "deny", message: "Bash is not in this session's tool allowlist" }]);
+    // Refused by the allowlist, never turned into an approval a human could grant.
+    assertEquals(seen.filter((e) => e.type === "input.requested").length, 0);
+  } finally {
+    unsubscribe();
+  }
+});
+
+Deno.test("sidecar engine: an allowlisted tool still reaches eve's approval gate", async () => {
+  const { decisions } = await runScoped(
+    "s-eng-allowlist-hit",
+    scopedSql({ tool_allowlist: ["Bash"], tool_allowlist_declared: true, workspace_path: "" }, { decision: [{ decision: "approve" }] }),
+    { permission: { id: "p-al2", toolName: "Bash", input: { command: "rm -rf /tmp/x" } } },
+  );
+  assertEquals(decisions, [{ behavior: "allow", updatedInput: { command: "rm -rf /tmp/x" } }]);
+});
+
+// The inverted-default trap: an EMPTY allowlist declares "no tools", not "all".
+Deno.test("sidecar engine: a declared EMPTY allowlist denies every gated tool", async () => {
+  const { decisions } = await runScoped(
+    "s-eng-allowlist-empty",
+    scopedSql({ tool_allowlist: [], tool_allowlist_declared: true, workspace_path: "" }, { decision: [{ decision: "approve" }] }),
+    { permission: { id: "p-al3", toolName: "Read", input: { file_path: "/tmp/x" } } },
+  );
+  assertEquals(decisions, [{ behavior: "deny", message: "Read is not in this session's tool allowlist" }]);
+});
+
+Deno.test("sidecar engine: an undeclared allowlist leaves every tool available, exactly as today", async () => {
+  const { decisions } = await runScoped(
+    "s-eng-allowlist-none",
+    scopedSql({ workspace_path: "" }, { decision: [{ decision: "approve" }] }),
+    { permission: { id: "p-al4", toolName: "Bash", input: { command: "rm -rf /tmp/x" } } },
+  );
+  assertEquals(decisions, [{ behavior: "allow", updatedInput: { command: "rm -rf /tmp/x" } }]);
+});
+
+Deno.test("sidecar engine: a delegated turn runs in the declared worktree, not the app tree", async () => {
+  const declared = getRunWorktreePath("u-1", "app-eng", "run-9");
+  const { workspacePathOverride } = await runScoped("s-eng-ws", scopedSql({ workspace_path: declared }), {
+    metadata: { appId: "app-eng" },
+  });
+  assertEquals(workspacePathOverride, declared);
+});
+
+// Same acceptance rule as agent.ts's: independent of the turn's metadata.appId.
+Deno.test("sidecar engine: the declared worktree survives a turn whose metadata omits or changes appId", async () => {
+  const declared = getRunWorktreePath("u-1", "app-eng", "run-9");
+  for (const metadata of [{}, { appId: "app-other" }, undefined]) {
+    const { workspacePathOverride } = await runScoped("s-eng-ws-drift", scopedSql({ workspace_path: declared }), { metadata });
+    assertEquals(workspacePathOverride, declared);
+  }
+});
+
+Deno.test("sidecar engine: a rejected declared workspace falls back to the derived tree", async () => {
+  const { workspacePathOverride } = await runScoped("s-eng-ws-bad", scopedSql({ workspace_path: "/etc" }), {
+    metadata: { appId: "app-eng" },
+  });
+  assertEquals(workspacePathOverride, await ensureAppWorkspace("u-1", "app-eng"));
+});
+
+// canUseTool alone cannot close the allowlist: the SDK auto-approves the
+// read-only built-ins in `default` permission mode, so Read/Glob/Grep never
+// reach it. The allowlist therefore also has to reach the sidecar's query()
+// as the SDK `tools` option (server.js), which is what drops them from the
+// model's context in the first place.
+Deno.test("sidecar engine: the declared allowlist is handed to the sidecar, not only to canUseTool", async () => {
+  const { allowedTools } = await runScoped(
+    "s-eng-allowlist-forward",
+    scopedSql({ tool_allowlist: ["Read", "Grep"], tool_allowlist_declared: true, workspace_path: "" }),
+  );
+  assertEquals(allowedTools, ["Read", "Grep"]);
+});
+
+Deno.test("sidecar engine: a declared EMPTY allowlist is forwarded as empty, never as absent", async () => {
+  const { allowedTools } = await runScoped(
+    "s-eng-allowlist-forward-empty",
+    scopedSql({ tool_allowlist: [], tool_allowlist_declared: true, workspace_path: "" }),
+  );
+  assertEquals(allowedTools, []);
+});
+
+Deno.test("sidecar engine: an undeclared allowlist forwards nothing, leaving the SDK preset alone", async () => {
+  const { allowedTools } = await runScoped(
+    "s-eng-allowlist-forward-none",
+    scopedSql({ tool_allowlist: [], tool_allowlist_declared: false, workspace_path: "" }),
+  );
+  assertEquals(allowedTools, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Whole-branch review must-fix 2. The allowlist is devx's tool vocabulary, but
+// on this path it is spent as SDK BUILT-IN names (server.js's `tools` option).
+// CodeSearch, Git*, SearchReplace and every Browser* have no built-in and no
+// MCP equivalent — the sidecar registers only kb/ask — so they simply vanish,
+// and a tool merely ABSENT produces no signal at all. Recorded as denials
+// instead, which is what carries them into devx.agent_results.denials, the
+// plan-status guard and the Problems-tab banner.
+// ---------------------------------------------------------------------------
+
+Deno.test("unavailableDelegatedTools: names the devx tools the SDK's built-in set cannot cover", () => {
+  assertEquals(
+    unavailableDelegatedTools(["Read", "Glob", "Grep", "CodeSearch", "GitDiff", "GitLog", "GitStatus"]),
+    ["CodeSearch", "GitDiff", "GitLog", "GitStatus"],
+  );
+  // Write/Edit ARE built-ins; SearchReplace is devx's own name for the same idea
+  // and is not, so it must not be waved through on resemblance.
+  assertEquals(unavailableDelegatedTools(["Write", "Edit", "SearchReplace"]), ["SearchReplace"]);
+  // An undeclared allowlist restricts nothing, so nothing is missing.
+  assertEquals(unavailableDelegatedTools(undefined), []);
+  // A declared EMPTY allowlist declares no tools — also nothing missing.
+  assertEquals(unavailableDelegatedTools([]), []);
+});
+
+async function publishedDenials(session: string, sql: HookCtx["sql"]): Promise<AgentEvent[]> {
+  const seen: AgentEvent[] = [];
+  const stop = subscribe(session, (e) => seen.push(e));
+  try {
+    await runScoped(session, sql);
+  } finally {
+    stop();
+  }
+  return seen.filter((e) => e.type === "action.result");
+}
+
+Deno.test("sidecar engine: a QA review's browser tools are recorded as denials, not dropped in silence", async () => {
+  const declared = ["BrowserNavigate", "BrowserClick", "BrowserScreenshot", "Read", "Glob", "Grep", "GitDiff"];
+  const results = await publishedDenials(
+    "s-eng-unavailable",
+    scopedSql({ tool_allowlist: declared, tool_allowlist_declared: true, workspace_path: "" }),
+  );
+
+  assertEquals(
+    results.map((e) => (e.data as { result: { toolName: string } }).result.toolName),
+    ["BrowserNavigate", "BrowserClick", "BrowserScreenshot", "GitDiff"],
+  );
+  for (const e of results) {
+    assertEquals((e.data as { status: string }).status, "failed");
+    const output = (e.data as { result: { output: unknown } }).result.output as { error: string };
+    assert(output.error.includes(UNAVAILABLE_TOOL_ERROR), `unrecognisable denial: ${output.error}`);
+  }
+});
+
+Deno.test("sidecar engine: an allowlist this path can fully honour reports nothing", async () => {
+  const results = await publishedDenials(
+    "s-eng-available",
+    scopedSql({ tool_allowlist: ["Read", "Glob", "Grep", "Bash"], tool_allowlist_declared: true, workspace_path: "" }),
+  );
+  assertEquals(results, []);
+});
+
+Deno.test("sidecar engine: an undeclared allowlist reports nothing (it restricts nothing)", async () => {
+  const results = await publishedDenials("s-eng-available-none", scopedSql({ workspace_path: "" }));
+  assertEquals(results, []);
 });

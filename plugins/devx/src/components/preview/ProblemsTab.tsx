@@ -18,7 +18,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion";
-import type { Problem } from "@/lib/types";
+import type { Problem, ToolDenial } from "@/lib/types";
 import type { UseReviewAgentsReturn } from "@/hooks/useReviewAgents";
 import * as api from "@/lib/api";
 
@@ -128,6 +128,7 @@ interface ReviewData {
   id: string;
   findings: ReviewFinding[];
   created_at: string;
+  denials?: ToolDenial[];
 }
 
 function ReviewSection({
@@ -176,6 +177,23 @@ function ReviewSection({
       {!review && !isRunning && (
         <div className="px-4 py-4 text-center">
           <p className="text-xs text-muted-foreground">{emptyDescription}</p>
+        </div>
+      )}
+
+      {/* Tools the run could not use. Above the result, and shown in BOTH the
+          empty and non-empty cases: "no issues" from a review that was refused
+          its tools is the one reading this has to correct. */}
+      {review && !isRunning && (review.denials?.length ?? 0) > 0 && (
+        <div className="flex items-start gap-2 px-3 py-2.5 border-b bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300">
+          <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+          <div className="min-w-0">
+            <p className="text-xs font-medium">Incomplete — some declared tools did not run</p>
+            <p className="text-xs mt-0.5">
+              {[...new Set(review.denials?.map((d) => d.toolName))].join(", ")}
+              {" "}could not run on this session (denied, or unavailable on this provider&apos;s loop).
+              {" "}Treat the result below as partial.
+            </p>
+          </div>
         </div>
       )}
 

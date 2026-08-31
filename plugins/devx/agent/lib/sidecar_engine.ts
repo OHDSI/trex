@@ -1,17 +1,11 @@
-// The claude-code sidecar as an eve AgentEngine (core's eve-shim/types.ts):
-// it runs its OWN agentic loop, so eve hands it the whole turn and translates
-// what it streams back (core's service/engine/delegate.ts) instead of driving
-// streamText over eve's tools.
-//
-// Two jobs live here and nowhere else:
-//   1. re-shape the sidecar's devx-flavoured SSE events into the SDK message
-//      shapes core's translator reads (service/engine/events.ts), and
-//   2. answer the sidecar's permission requests from EVE's approval gate,
-//      which is only possible now that a sidecar turn is a real agents.turns
-//      row — Task 4 had to use devx's own consent tables for exactly that
-//      reason.
+// The claude-code sidecar as an eve AgentEngine: it runs its OWN agentic loop,
+// so eve hands it the whole turn (service/engine/delegate.ts). Two jobs live
+// here — reshaping its SSE events into the SDK shapes core's translator reads,
+// and answering its permission requests from eve's approval gate.
 import { ensureAppWorkspace, ensureWorkspace } from "../../functions/tools/workspace.ts";
 import { readMetadata } from "./context.ts";
+import { acceptDeclaredWorkspace, loadSessionScope } from "./session_scope.ts";
+import { UNAVAILABLE_TOOL_ERROR } from "../../functions/lib/eve_run.ts";
 // Type-only, erased at runtime — same posture as agent.ts's ToolDef import
 // (these types are not part of eve's public re-export surface).
 import type { AgentEngine, EngineTurn, HookCtx } from "../../../../core/server/agents/eve-shim/types.ts";
@@ -24,6 +18,25 @@ import { deriveScopeKey } from "../../../../core/server/agents/service/scope-key
 import { parseEscalateList, resolveEscalateFor } from "../../../../core/server/agents/service/approval-policy.ts";
 
 export const SIDECAR_ENGINE_NAME = "claude-code";
+
+// devx tool names the delegated loop can actually run. server.js's `tools`
+// option names the SDK's BUILT-INS, so only a devx tool whose name IS one
+// survives; the rest (CodeSearch, Git*, SearchReplace, Browser*, …) exist on
+// the model loop alone, and the sidecar registers only the kb/ask MCP servers.
+const DELEGATED_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "Read", "Write", "Edit", "Bash", "Glob", "Grep",
+  "WebFetch", "WebSearch", "TodoWrite", "Skill",
+]);
+
+/**
+ * The declared tools this path would silently drop. Returned so they can be
+ * recorded as denials — a review that ran 3 of its 7 tools must never be
+ * byte-identical, in devx.agent_results, to one that ran all 7.
+ */
+export function unavailableDelegatedTools(allowedTools: readonly string[] | undefined): string[] {
+  if (!allowedTools) return [];
+  return [...new Set(allowedTools)].filter((name) => !DELEGATED_TOOL_NAMES.has(name));
+}
 
 // The subset of the SDK's message shapes core's translator reads
 // (service/engine/events.ts's SdkMessageLike). Declared rather than imported
@@ -56,6 +69,8 @@ export type SidecarStream = (args: {
   userId: string;
   appId?: string;
   chatMode: string;
+  workspacePathOverride?: string;
+  allowedTools?: readonly string[];
   settings: Record<string, unknown>;
   history: Array<{ role: string; content: string }>;
   send: (e: SidecarEvent) => void;
@@ -151,13 +166,10 @@ async function readSettings(sql: HookCtx["sql"], userId: string): Promise<Settin
   return (r.rows[0] as SettingsRow | undefined) ?? {};
 }
 
-// `escalate` is the agent's AUTHORED override (AgentConfig.escalate), which
-// handler.ts:63 passes to the model loop and which nothing here can read off
-// the LoadedAgent — agent.ts supplies it, from the same constant it declares
-// to defineAgent, so the two loops cannot drift. The two approval timings are
-// test seams, exactly as they are on toolset.ts's ToolBuildCtx: a test that
-// asserts "this must NOT gate" has to fail fast rather than park for the
-// production 30 minutes.
+// `escalate` is the agent's AUTHORED override, supplied by agent.ts from the
+// same constant it declares to defineAgent so the two loops cannot drift. The
+// approval timings are test seams: a "must NOT gate" test has to fail fast
+// rather than park for the production 30 minutes.
 export interface SidecarEngineDeps {
   stream?: SidecarStream;
   escalate?: string;
@@ -191,16 +203,23 @@ async function* runSidecarTurn(
   if (!userId) throw new Error("devx sidecar engine requires an authenticated user");
   const { appId } = readMetadata(ctx.metadata);
   const store = createStore(ctx.sql);
-  const [{ plugin, agentName }, settings, unattended, channelBound, approverReachable] = await Promise.all([
+  const [{ plugin, agentName }, settings, unattended, channelBound, approverReachable, scope] = await Promise.all([
     gateContext(ctx.sql, turn.sessionId),
     readSettings(ctx.sql, userId),
     store.isUnattended(turn.sessionId),
     store.isChannelBound(turn.sessionId),
     store.isApproverReachable(turn.sessionId),
+    // Core's delegated path (handler.ts's runDelegatedTurn) calls NEITHER
+    // resolveInstructions nor buildSdkTools, so agent.ts's filterTools /
+    // resolveWorkspace never fire here — this engine reads the scope itself.
+    loadSessionScope(turn.sessionId, ctx.sql),
   ]);
   // The same workspace authoredTool keys a stored consent on (agent.ts's
-  // resolveWorkspace) — a grant for one app must not cover another.
-  const workspace = appId ? await ensureAppWorkspace(userId, appId) : await ensureWorkspace(userId);
+  // resolveWorkspace) — a grant for one app must not cover another. A session
+  // that declared an isolated run worktree gets that instead, through the SAME
+  // validator agent.ts uses; a rejected value falls back to the derived tree.
+  const workspace = acceptDeclaredWorkspace(scope.workspace, userId) ??
+    (appId ? await ensureAppWorkspace(userId, appId) : await ensureWorkspace(userId));
   const escalate = resolveEscalateFor(authoredEscalate, parseEscalateList(ctx.env("AGENTS_ESCALATE_TOOLS")), agentName);
   // handler.ts:978 does exactly this before handing `unattended` to the tool
   // set: a channel-bound session never writes the unattended column
@@ -214,8 +233,12 @@ async function* runSidecarTurn(
   const resolvePermission = async (
     req: { id: string; toolName: string; input: Record<string, unknown> },
   ): Promise<PermissionDecision> => {
-    // The SDK's argument names are not devx's, and deriveScopeKey reads
-    // devx's — an unmapped shape yields an empty action half, which gates.
+    // Second of two allowlist layers, checked before the gate so no stored
+    // consent can override it: the SDK `tools` option governs BUILT-INS only,
+    // so the kb/ask MCP tools are caught only here.
+    if (scope.allowedTools && !scope.allowedTools.includes(req.toolName)) {
+      return { behavior: "deny", message: `${req.toolName} is not in this session's tool allowlist` };
+    }
     const mapped = toDevxToolInput(req.toolName, req.input);
     const refusal = await runApprovalGate({
       toolName: mapped.tool,
@@ -242,6 +265,25 @@ async function* runSidecarTurn(
     return refusal ? { behavior: "deny", message: refusal.error } : { behavior: "allow", updatedInput: req.input };
   };
 
+  // Do not silently degrade: a tool this path cannot provide is never CALLED,
+  // so it leaves no trace of its own. One failed action.result each is what
+  // carries it into eve_run.ts's `denials` and the durability behind them.
+  for (const toolName of unavailableDelegatedTools(scope.allowedTools)) {
+    publish(turn.sessionId, {
+      type: "action.result",
+      data: {
+        turnId: turn.turnId,
+        result: {
+          kind: "tool-result",
+          callId: `unavailable:${turn.turnId}:${toolName}`,
+          toolName,
+          output: { error: `${toolName} ${UNAVAILABLE_TOOL_ERROR} (${SIDECAR_ENGINE_NAME})` },
+        },
+        status: "failed",
+      },
+    });
+  }
+
   const queue = messageQueue();
   let usage: { input_tokens?: number; output_tokens?: number } | undefined;
   const run = stream({
@@ -252,6 +294,13 @@ async function* runSidecarTurn(
     userId,
     appId,
     chatMode: "agent",
+    // Without this the sidecar re-derives appId ? app tree : user tree, and an
+    // autonomous run mutates the main app tree instead of its own worktree.
+    workspacePathOverride: workspace,
+    // Becomes the SDK's `tools` option (the base built-in set) in
+    // fn-claude-code/server.js. resolvePermission below still re-checks it:
+    // that is what covers MCP tools, which `tools` does not govern.
+    allowedTools: scope.allowedTools,
     // auto_approve is deliberately NOT forwarded: eve's gate owns that
     // decision now (resolveApproval's unattended/escalate tiers), and a
     // forwarded `true` would short-circuit the gate before it ever ran.

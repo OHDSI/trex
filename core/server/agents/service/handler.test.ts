@@ -2474,6 +2474,68 @@ Deno.test("POST /chat rejects a missing or empty messages array with 400", async
   }
 });
 
+// Phase 3 whole-branch re-review. This read used to be caught into "none
+// activated" as harmless bookkeeping. It is not: buildSdkTools Step 6 WITHHOLDS
+// every deferred tool it does not name, so an empty answer NARROWS the turn's
+// tool set, and a session that pre-activated a declared allowlist would run
+// without the tools it declared and still report a clean result. Same posture
+// as the isChildSession read beside it: fail the turn rather than guess.
+Deno.test("a failed activated-tools read fails the turn instead of silently narrowing its tool set", async () => {
+  const { handler, db } = await makeHandler({
+    mutate: (agent) => {
+      agent.config.context.deferredTools = ["propose_card"];
+    },
+    wrapStore: (s) => ({
+      ...s,
+      getActivatedTools: () => Promise.reject(new Error("activated-tools read blew up")),
+    }),
+  });
+  const live: AgentEvent[] = [];
+  const unsub = subscribe("s-1", (e) => live.push(e));
+  try {
+    const res = await handler(new Request(`${BASE}/eve/v1/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "hi" }),
+    }));
+    assertEquals(res.status, 200);
+    await until(() => settled(db));
+  } finally {
+    unsub();
+  }
+  // Visible and retryable, not a hang: the read sits INSIDE startTurn's own try,
+  // so the failure becomes a real turn.failed rather than escaping to the
+  // fire-and-forget catch, which publishes nothing and strands every reader.
+  assertEquals(db.turns[0].status, "failed");
+  assert(db.turns[0].error && db.turns[0].error.includes("activated-tools read blew up"));
+  assertEquals(live.filter((e) => e.type === "turn.failed").length, 1);
+  assertEquals(live.filter((e) => e.type === "session.failed").length, 1);
+});
+
+// The new failure mode is confined to agents that actually defer: for every
+// other agent the value is unused, so it is not read at all.
+Deno.test("an agent that defers nothing never reads activated tools (and cannot fail on it)", async () => {
+  let reads = 0;
+  const { handler, db } = await makeHandler({
+    wrapStore: (s) => ({
+      ...s,
+      getActivatedTools: (id: string) => {
+        reads++;
+        return s.getActivatedTools(id);
+      },
+    }),
+  });
+  const res = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi" }),
+  }));
+  assertEquals(res.status, 200);
+  await until(() => settled(db));
+  assertEquals(db.turns[0].status, "completed");
+  assertEquals(reads, 0, "deferredTools is empty, so the read can only return an unused []");
+});
+
 // /chat creates a FRESH session per request (it is the stateless endpoint —
 // history comes from the client, not from replay), so its activated-tools
 // read could only ever return []. It was a guaranteed-empty round trip per

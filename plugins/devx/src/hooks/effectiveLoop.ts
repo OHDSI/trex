@@ -22,15 +22,38 @@
 // which tells them to switch to a bearer token.
 export type EffectiveLoop = "legacy" | "agents";
 
-// The loop a user gets when their settings/provider could NOT be read at all
-// (useEffectiveLoop's `.catch`). Deliberately NOT the same as an ABSENT
-// `loop` value, which resolves to "agents" below: a user whose provider row
-// we failed to fetch may be on `claude-code`, for which eve's resolveModel
-// throws — so an unreadable configuration must degrade to the loop that
-// works for EVERY provider, while a merely-unset flag follows V17's new
-// column default. Exported so the distinction is pinned by a test rather
-// than living only as a literal inside a React `.catch`.
-export const SETTINGS_FETCH_FAILURE_LOOP: EffectiveLoop = "legacy";
+// Sentinel useEffectiveLoop.ts's `.catch` sets when settings/provider could
+// NOT be read at all. This is a browser-side routing decision made before
+// any turn exists, not a turn to fail — and there is no safe loop to guess:
+// silently degrading to "legacy" used to work only because legacy accepted
+// every provider, a property Phase 4 removes. Deliberately NOT an
+// EffectiveLoop value, so it can't be mistaken for a resolved routing
+// decision; the UI renders it as a retryable error instead.
+export const SETTINGS_FETCH_FAILED = "settings-fetch-failed" as const;
+
+// task-4 must-fix: the hook's catch/loading branches must build these two
+// non-resolved states by calling here, not by writing `{ status: ... }`
+// inline — inline construction is exactly how a future edit could quietly
+// reinstate `{ status: "resolved", loop: "legacy" }` (the bug this task
+// removed, respelled) without any test noticing. This does NOT test
+// useEffectiveLoop's React effect itself — devx has no UI test harness
+// (no RTL/vitest/jsdom) — it only pins the shape these two states must
+// take, so a hook that stops calling them is a smaller, more obvious diff.
+export interface EffectiveLoopLoadingState {
+  status: "loading";
+}
+
+export function stateForLoading(): EffectiveLoopLoadingState {
+  return { status: "loading" };
+}
+
+export interface EffectiveLoopFailedState {
+  status: "error";
+}
+
+export function stateForSettingsFailure(): EffectiveLoopFailedState {
+  return { status: "error" };
+}
 
 export interface ResolveEffectiveLoopInput {
   // devx.settings.loop, as returned by GET /settings. ABSENT (null/undefined/

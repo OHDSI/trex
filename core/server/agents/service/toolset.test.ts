@@ -174,6 +174,34 @@ Deno.test("buildSdkTools: deferredTools empty (the default) never adds a provide
   }
 });
 
+// Phase 3 whole-branch review, must-fix 1. filterTools is Step 4 and deferral
+// is Step 6, so a tool an agent both ALLOWLISTS and DEFERS is dropped from the
+// turn entirely — and ToolSearch cannot bring it back, because activation is
+// read once per turn before the tool set is built. devx's per-review sessions
+// (plugins/devx/functions/routes/review_tools.ts) rely on pre-activating the
+// declared allowlist to survive that ordering; this pins the ordering itself,
+// which the deferral tests above exercise without any filterTools in play.
+Deno.test("buildSdkTools: an allowlisted tool that is also deferred needs pre-activation to survive", async () => {
+  const agent = await loadAgent(TOY);
+  agent.config.context.deferredTools = ["propose_card", "connection_search"];
+  const allowlist = ["echo", "propose_card"];
+  agent.config.filterTools = (name: string) => allowlist.includes(name);
+
+  // The trap: propose_card is allowlisted and gone anyway.
+  const withheld = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  assertEquals(Object.keys(withheld), ["echo"]);
+
+  // Pre-activating the declared set is what puts it back, in the same turn.
+  const activated = await buildSdkTools({
+    agent,
+    sessionId: "s-1",
+    depth: 0,
+    hookCtx: fakeHookCtx(),
+    activatedTools: allowlist,
+  });
+  assertEquals(Object.keys(activated), ["echo", "propose_card"]);
+});
+
 Deno.test("buildSdkTools: a deferredTools entry naming no real tool is ignored, not thrown", async () => {
   const agent = await loadAgent(TOY);
   agent.config.context.deferredTools = ["NoSuchTool"];

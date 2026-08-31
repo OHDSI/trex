@@ -32,6 +32,7 @@ import { defineTool } from "eve/tools";
 // same as every other agent-authored file.
 import type { QueryFn, ToolContext, ToolDef } from "../../../../core/server/agents/eve-shim/types.ts";
 import { ensureAppWorkspace, ensureWorkspace } from "../../functions/tools/workspace.ts";
+import { acceptDeclaredWorkspace, peekSessionScope } from "./session_scope.ts";
 import type { AgentContext as DevxAgentContext, ConsentLevel } from "../../functions/tools/types.ts";
 
 export type { DevxAgentContext };
@@ -158,7 +159,11 @@ export async function toDevxCtx(evectx: ToolContext & { sql: QueryFn }): Promise
     }
   }
 
-  const workspacePath = appId ? await ensureAppWorkspace(userId, appId) : await ensureWorkspace(userId);
+  // Same session-declared workspace (V14), acceptance check and snapshot as
+  // agent.ts's resolveWorkspace: that one keys the consents, this one decides
+  // where the tools write, and a run worktree is isolated only if both agree.
+  const declared = acceptDeclaredWorkspace(peekSessionScope(evectx.sessionId)?.workspace, userId);
+  const workspacePath = declared ?? (appId ? await ensureAppWorkspace(userId, appId) : await ensureWorkspace(userId));
   return {
     chatId,
     userId,

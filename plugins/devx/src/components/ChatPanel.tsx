@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { MessageSquarePlus } from "lucide-react";
+import { MessageSquarePlus, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { MessagesList } from "./chat/MessagesList";
 import { ChatInput } from "./chat/ChatInput";
@@ -35,16 +35,29 @@ interface ChatPanelProps {
 // override — see useEffectiveLoop.ts) renders AgentsChatPanel; everything
 // else renders LegacyChatPanel below, whose body is byte-for-byte what
 // ChatPanel used to be before this task (see git history) — same hook
-// (useMessages), same components, same behavior. `resolved` gates against a
-// one-render flash of the legacy UI before the settings/provider fetch
-// completes: renders nothing (same posture as the loading gate every other
-// devx page already uses) rather than mount-then-possibly-remount into the
-// agents loop, which would otherwise start a stream against the wrong
-// endpoint for a moment on every chat open.
+// (useMessages), same components, same behavior. The "loading" state gates
+// against a one-render flash of the legacy UI before the settings/provider
+// fetch completes: renders nothing (same posture as the loading gate every
+// other devx page already uses) rather than mount-then-possibly-remount
+// into the agents loop, which would otherwise start a stream against the
+// wrong endpoint for a moment on every chat open. "error" (settings/provider
+// could not be read at all) must not guess a loop — it renders a retryable
+// error instead.
 export function ChatPanel(props: ChatPanelProps) {
-  const { loop, resolved } = useEffectiveLoop();
-  if (!resolved) return null;
-  if (loop === "agents") {
+  const loopState = useEffectiveLoop();
+  if (loopState.status === "loading") return null;
+  if (loopState.status === "error") {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center">
+        <AlertCircle className="h-8 w-8 text-destructive" />
+        <p className="text-sm text-muted-foreground">Couldn't load chat settings.</p>
+        {/* Same error-message surfacing D2ESubAppPanel.tsx uses for its retry state. */}
+        <p className="text-sm text-destructive">{loopState.message}</p>
+        <Button variant="outline" size="sm" onClick={loopState.retry}>Retry</Button>
+      </div>
+    );
+  }
+  if (loopState.loop === "agents") {
     return (
       <AgentsChatPanel
         {...props}

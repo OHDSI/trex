@@ -9,6 +9,7 @@ import { z } from "zod";
 import { kbMcpServer } from "./kb_mcp.js";
 import { seedResponse, authKey, getCached, setCached } from "./models_cache.js";
 import { applyPermissionPolicy, disableCoderAttribution } from "./permission_policy.js";
+import { toolsOption } from "./tool_options.js";
 
 const modelsCache = new Map(); // authKey -> { models, expires }
 
@@ -104,7 +105,8 @@ const server = http.createServer(async (req, res) => {
     let body = "";
     for await (const chunk of req) body += chunk;
 
-    const { prompt, systemPrompt, model, maxTurns, oauthToken, cwd, chatId, figmaToken } = JSON.parse(body);
+    const { prompt, systemPrompt, model, maxTurns, oauthToken, cwd, chatId, figmaToken, allowedTools } =
+      JSON.parse(body);
     const sessionKey = chatId || "__default__";
 
     if (oauthToken) process.env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
@@ -193,6 +195,10 @@ const server = http.createServer(async (req, res) => {
         settingSources: ["user"],
         // Forward subagent (Task) text so consumers can render nested transcripts.
         forwardSubagentText: true,
+        // The eve session's declared allowlist becomes the BASE built-in tool
+        // set (see tool_options.js). Governs BUILT-INS only, which is why
+        // sidecar_engine.ts re-checks the allowlist in canUseTool.
+        ...toolsOption(allowedTools),
       });
 
       const resumeId = chatSessions.get(sessionKey);
