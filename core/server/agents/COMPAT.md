@@ -324,9 +324,21 @@ live-tail by event shape.
     supports both. devx's GET `/provider-configs` and `/settings` responses
     mask `api_key`, so the shape cannot be detected client-side — the server
     derives a non-secret `auth_shape` hint from the unmasked key
-    (`plugins/devx/functions/auth_shape.ts`) and `useEffectiveLoop.ts` forces
-    `bedrock` + `auth_shape === "iam"` users onto the legacy loop before
-    `/chat` is ever called; the `resolveModel` throw is the backstop.
+    (`plugins/devx/functions/auth_shape.ts`) purely for **display**
+    (`GET /settings`/`GET /provider-configs` attach it so the frontend can
+    show what kind of credential is on file). It used to also be a routing
+    signal: `useEffectiveLoop.ts` forced `bedrock` + `auth_shape === "iam"`
+    users onto the legacy loop before `/chat` was ever called, with the
+    `resolveModel` throw as the backstop if that routing were ever wrong.
+    That hook is gone (Phase 4 Task 2 deleted the two-loop client router
+    outright — every provider, `bedrock` included, now runs on the agents
+    loop) and nothing replaced the routing half of its job, only the display
+    half survives. So IAM-shaped bedrock credentials are simply unsupported
+    now, with no escape hatch: `resolveModel`'s throw fires on the agents
+    loop's own session route, same as any other rejecting model hook —
+    `runner.ts`'s turn loop turns it into an ordinary `turn.failed`/
+    `session.failed` pair (`runner.ts:175-178`), not a crash, but there is no
+    longer a code path that avoids it for these users.
 17. **`onTurnEnd`/`buildUserMessage` turn-lifecycle hooks (Task 3)** are also
     additive `AgentConfig` fields real eve's `defineAgent` doesn't define —
     eve silently ignores unknown fields, so an agent directory using them
@@ -1229,6 +1241,109 @@ or `sessions.unattended`) sidecar session:
 
 An **attended** delegated turn does *not* see hard and soft the same way —
 see "Two tiers: hard and soft" above for exactly how they diverge.
+
+## The legacy AI-SDK loop: migrated in full, deletion deferred
+
+Phase 4 of `docs/superpowers/specs/2026-08-30-one-loop-program-design.md` set
+out to delete devx's legacy (pre-eve) AI-SDK loop. It did not get there: the
+deletion task's own safety grep found the plan's inventory was wrong and
+**blocked before deleting anything**. What actually shipped is a migration —
+every client that used to be able to reach the legacy loop now goes through
+the agents loop instead — plus this section, which is the record for
+whoever runs the deletion next.
+
+**What changed.** The devx browser now uses the agents loop for every
+provider, `claude-code` included — the two-loop client router
+(`src/hooks/effectiveLoop.ts`/`useEffectiveLoop.ts`, which used to pick
+per-provider) is deleted outright, not merely unreachable. claw's coder now
+routes every provider, `claude-code` included, to the eve transport
+(`chooseCoderTransport` in `plugins/claw/agent/lib/code-route.ts` is now a
+constant function returning `"eve"`); its legacy client path
+(`code-stream.ts`'s `runCodeTurn`/`streamTurn`, reached via `runLegacy`) is
+left in the tree but unreachable — deliberately, as the one-line rollback
+until live verification lands. `/chat` now refuses an engine-backed agent
+with a parseable `501` (see "`POST /chat` refuses an engine-backed agent
+rather than delegating" above) instead of the uncaught `500` it used to
+produce; that fix (Task 1b) is *why* nothing broke when the browser's
+two-loop router was deleted out from under it. And the loop flag itself is
+retired: `PUT`/`GET /settings` no longer read or write `loop`, and
+`SettingsPage.tsx`'s "Chat Engine (experimental)" toggle is gone.
+
+**`devx.settings.loop` (the column) is deliberately still there.** Dropping
+a column is not something a rollback can undo, and the code that used to
+repopulate it was removed in the same branch that stopped reading it — so a
+drop now would be one-way with no fallback if anything upstream still
+expected the column to exist. It is inert: nothing reads it, nothing writes
+it, and its `NOT NULL DEFAULT 'agents'` means every INSERT still satisfies
+the constraint without naming it. Safe to drop in a later, deliberate
+migration; not this branch's job.
+
+### Why `/chat` refuses an engine-backed agent instead of delegating to it
+
+Worth restating here as an architectural boundary, not just a bug fix,
+because it is the kind of thing a future "just make it work" patch would
+get wrong. A delegated turn carries only a `prompt` — the engine resumes
+its *own* transcript, keyed on eve's session id (the sidecar sees it as
+`chatId`, `sidecar_engine.ts:293`) — while `/chat` mints a session per
+request that is never read back and takes its history from the client on
+every call. Those are incompatible shapes: delegating a `/chat` request
+would hand the engine a fresh session each time and answer every message
+with no memory of the ones before it — silently, behind a `200`. The `501`
+is the honest failure; a delegated `/chat` would be a silent one.
+
+### The corrected deletion target list
+
+The original plan's file inventory was wrong in three ways, all caught by
+the grep gate before anything was touched. Anyone re-attempting the
+deletion should start from this list, not the plan's:
+
+- **`plugins/devx/functions/claude_code_agent.ts` is NOT legacy-exclusive
+  and must never be deleted.** `plugins/devx/agent/lib/sidecar_engine.ts:201`
+  imports its `streamClaudeCodeChat`, reached from `plugins/devx/agent/
+  agent.ts:152`'s `resolveEngine` — this file IS the Phase 2 sidecar bridge,
+  not a legacy-loop artifact. `plugins/devx/functions/routes/
+  claude_code_models_routes.ts:2` also imports `ensureClaudeCodeServer` from
+  it, for a live route.
+- **`plugins/devx/functions/tools/spawn_agent.ts` is NOT legacy-exclusive
+  and must never be deleted.** Live via `tools/registry.ts:56,147` →
+  `TOOL_DEFINITIONS` → `GET /tools` (`routes/provider_routes.ts:39`) and via
+  eve's own `plugins/devx/agent/tools/ToolSearch.ts:27`.
+- **`resolveConsent` is dead; `clearPendingConsents` is live.** Both live in
+  `plugins/devx/functions/agent.ts` and share one import at `index.ts:11`.
+  `resolveConsent`'s only route (`POST /chats/:id/consent`) has no remaining
+  client — the browser's consent flow now posts to eve's
+  `${AGENTS_SESSION_URL}/:id/approval` instead. `clearPendingConsents` is
+  called from `index.ts:983`, inside the still-live `/chats/:id/stream`
+  route's `cancel()` — it dies with that route, not before it.
+- **`runsUnattended` is live** — one call site, `index.ts:523`, inside
+  `POST /chats/:id/stream`. It also dies with that route, not before.
+
+What the deletion actually covers, once its precondition (below) is met:
+`plugins/devx/functions/agent.ts` (`streamAgentChat`, `resolveConsent`,
+`clearPendingConsents`, `runsUnattended`), the `/chats/:id/stream` route
+itself, and the now-orphaned
+`plugins/devx/src/hooks/useMessages.ts` and
+`plugins/devx/src/components/chat/MessagesList.tsx` — note that second
+path: the original plan named `src/components/MessagesList.tsx`, which is
+wrong, the file lives under `components/chat/`. On the claw side:
+`chooseCoderTransport`, `routeCodeTurn`'s `runLegacy` branch and
+`TransportDeps.runLegacy`, `CodeTurnOutcome.transport`, `fetchCoderProvider`,
+and `code-stream.ts`'s `runCodeTurn`/`streamTurn`.
+
+**Precondition, stated plainly: this deletion happens only after a real
+coding task has been verified end to end through Discord on the eve
+transport.** Nothing above is time-sensitive or blocking on its own — the
+unreachable legacy code paths cost nothing at rest — so there is no reason
+to delete before that verification, and the grep gate that blocked Task 3
+the first time is proof the inventory is easy to get wrong under pressure.
+
+**One efficiency item to fold into that deletion, not before:**
+`fetchCoderProvider` still runs a separate mint+GET against devx's
+`/settings` before `assertCoderProvider` runs on every eve turn — two round
+trips where a single one would do. Collapsing them isn't safe to do now,
+because `fetchCoderProvider` is still claw's rollback path to the legacy
+transport; collapse it in the same change that removes `fetchCoderProvider`
+for good.
 
 ## devx's last two legacy consumers: security review and autonomous runs
 
