@@ -2,10 +2,11 @@
 // core's auth dir, copied next to the agent servicePath at worker creation), not
 // against the plugin source tree.
 //
-// claw drives the SAME coder the devx browser UI uses: the coder sidecar,
-// reached through the devx-api edge function's POST /chats/:id/stream. The eve
-// agents runtime cannot host that sidecar (its hook only yields a ModelSpec and
-// core owns the turn), so claw talks to the function mount directly instead.
+// claw's LEGACY coder transport: the devx-api edge function's POST
+// /chats/:id/stream. No provider selects it any more — eve hosts the sidecar
+// too now (code-route.ts) — and it is kept only until the legacy loop is
+// deleted. mintToken/apiBase/ensureChat below are still live on the eve path
+// (askCodeAgent's provider read, chat-mirror.ts).
 //
 // Transport is a plain loopback fetch, NOT Trex.req: the inter-service channel
 // (core/server/plugin/function.ts) buffers the whole response via `.text()` under

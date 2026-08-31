@@ -271,21 +271,23 @@ function fakeClient(): TokioClient {
   return { req: () => Promise.resolve(new Response("{}", { status: 200 })) };
 }
 
-Deno.test("routeCodeTurn calls the legacy transport for a claude-code account", async () => {
-  const seenLegacy: CodeTurnArgs[] = [];
+Deno.test("routeCodeTurn calls the eve transport for a claude-code account too", async () => {
+  const seenEve: unknown[] = [];
   const deps: TransportDeps = {
     getProvider: () => Promise.resolve("claude-code"),
-    runLegacy: (args) => {
-      seenLegacy.push(args);
-      return Promise.resolve({ chatId: "chat-1", replyText: "ok" });
+    runLegacy: () => {
+      throw new Error("must not call legacy — eve hosts the sidecar since phase 2");
     },
-    runEve: () => {
-      throw new Error("must not call eve for a claude-code account");
+    runEve: (_client, runArgs) => {
+      seenEve.push(runArgs);
+      return Promise.resolve({ codeSessionId: "sess-1", replyText: "ok", nextCursor: 2, reason: "completed", pending: [] });
     },
+    getClient: () => fakeClient(),
   };
   const out = await routeCodeTurn(baseArgs(), 0, deps);
   assertEquals(out.replyText, "ok");
-  assertEquals(seenLegacy.length, 1);
+  assertEquals(out.transport, "eve");
+  assertEquals(seenEve.length, 1);
 });
 
 Deno.test("routeCodeTurn calls the eve transport for a non-claude-code account", async () => {
@@ -317,21 +319,18 @@ Deno.test("routeCodeTurn calls the eve transport for a non-claude-code account",
   assertEquals((seenEve[0] as { startCursor: number }).startCursor, 3);
 });
 
-Deno.test("routeCodeTurn falls back to legacy when the provider fetch fails", async () => {
-  const seenLegacy: CodeTurnArgs[] = [];
+Deno.test("routeCodeTurn surfaces a provider fetch failure instead of silently falling back to legacy", async () => {
   const deps: TransportDeps = {
-    getProvider: () => Promise.reject(new Error("settings fetch failed: 500")),
-    runLegacy: (args) => {
-      seenLegacy.push(args);
-      return Promise.resolve({ chatId: "chat-1", replyText: "ok" });
+    getProvider: () => Promise.reject(new Error("coder settings fetch failed: 500")),
+    runLegacy: () => {
+      throw new Error("must not call legacy when the provider is unreadable");
     },
     runEve: () => {
-      throw new Error("must not call eve when the provider is unreadable");
+      throw new Error("must not reach the coder when the provider is unreadable");
     },
+    getClient: () => fakeClient(),
   };
-  const out = await routeCodeTurn(baseArgs(), 0, deps);
-  assertEquals(out.replyText, "ok");
-  assertEquals(seenLegacy.length, 1);
+  await assertRejects(() => routeCodeTurn(baseArgs(), 0, deps), Error, "coder settings fetch failed: 500");
 });
 
 Deno.test("routeCodeTurn refuses attachments with no appId on the eve transport instead of silently dropping them", async () => {
@@ -370,6 +369,38 @@ Deno.test("routeCodeTurn throws when eve is chosen but Trex.req is unavailable",
     getClient: () => null,
   };
   await assertRejects(() => routeCodeTurn(baseArgs(), 0, deps), Error, "Trex.req unavailable");
+});
+
+// Routing claude-code to eve must not bypass the create-body flag: without it
+// the hard escalate tier reads the session as unapprovable and the ship step's
+// `git push` is DENIED outright rather than relayed to the channel.
+Deno.test("a claude-code session opened through the eve transport declares approverReachable", async () => {
+  const reqs: { url: string; init: { method: string; body?: string } }[] = [];
+  const client: TokioClient = {
+    req(url, init) {
+      reqs.push({ url, init });
+      if (url.includes("/pending-approval")) return Promise.resolve(Response.json({ pending: null }));
+      if (init.method === "POST") return Promise.resolve(Response.json({ sessionId: "code-1" }));
+      const events = [
+        { type: "message.completed", data: { message: "shipped" } },
+        { type: "turn.completed", data: {} },
+      ].map((e) => JSON.stringify(e)).join("\n") + "\n";
+      return Promise.resolve(new Response(events, { headers: { "content-type": "application/x-ndjson" } }));
+    },
+  };
+  // No runEve stub: this drives code-session.ts's real runCodeTurn.
+  const out = await routeCodeTurn(baseArgs(), 0, {
+    getProvider: () => Promise.resolve("claude-code"),
+    runLegacy: () => {
+      throw new Error("must not call legacy for a claude-code account");
+    },
+    getClient: () => client,
+  });
+  assertEquals(out.transport, "eve");
+  assertEquals(out.replyText, "shipped");
+  const create = reqs.find((r) => r.init.method === "POST");
+  assert(create, "expected a session create POST");
+  assertEquals(JSON.parse(create.init.body ?? "{}").approverReachable, true);
 });
 
 // --- devx-UI mirroring: eve turns only, never legacy ------------------------

@@ -96,16 +96,9 @@ export async function routeCodeTurn(
   const runEve = deps.runEve ?? runEveTurn;
   const getClient = deps.getClient ?? tokioClientFromGlobal;
 
-  let transport: ReturnType<typeof chooseCoderTransport>;
-  try {
-    transport = chooseCoderTransport(await getProvider(args.userId));
-  } catch (e) {
-    // Mirrors effectiveLoop.ts's SETTINGS_FETCH_FAILURE_LOOP: an unreadable
-    // provider might be the sidecar, which eve cannot host, so an unknown
-    // configuration degrades to the transport that works for every provider.
-    console.error("claw: coder provider fetch failed, defaulting to legacy transport:", e);
-    transport = "legacy";
-  }
+  // No fallback: a failed provider read is surfaced to the channel like any
+  // other coder failure, never quietly answered by picking a transport.
+  const transport = chooseCoderTransport(await getProvider(args.userId));
   if (transport === "legacy") return { ...(await runLegacy(args)), transport: "legacy" };
 
   // devx's buildUserMessage (agent.ts:583) materializes attachments only when
