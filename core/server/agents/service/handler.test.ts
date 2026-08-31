@@ -491,6 +491,10 @@ async function makeHandler(
     wrapStore?: (s: ReturnType<typeof createStore>) => ReturnType<typeof createStore>;
     // Test seam for the per-turn resolved escalate list — see Deps.captureEscalate.
     captureEscalate?: (list: EscalateList) => void;
+    // Leaves deps.model UNSET. Every other test injects one, and that injection
+    // short-circuits `deps.model ?? resolveModelForTurn(...)` at every call
+    // site — so an agent's resolveModel hook is only reachable without it.
+    omitModel?: boolean;
   } = {},
 ) {
   const agent = await loadAgent(TOY);
@@ -500,7 +504,8 @@ async function makeHandler(
   const handler = createHandler({
     agent, store: opts.wrapStore ? opts.wrapStore(base) : base,
     plugin: "toy-agent", agentName: "toy",
-    basePath: "/plugins/trex/toy", model: opts.model ?? model("hello from toy"),
+    basePath: "/plugins/trex/toy",
+    ...(opts.omitModel ? {} : { model: opts.model ?? model("hello from toy") }),
     captureEscalate: opts.captureEscalate,
   });
   return { handler, db };
@@ -5185,6 +5190,164 @@ Deno.test("resolveEngine returning undefined leaves the turn on runner.ts's mode
 
   assertEquals(db.turns[0].status, "completed");
   assertEquals(JSON.parse(String(db.steps[0].payload)).text, "hello from toy");
+});
+
+// ---------------------------------------------------------------------------
+// Phase 4, task 1 — the claude-code carve-out's premise
+// (plugins/devx/src/hooks/effectiveLoop.ts). devx forces a `claude-code`
+// account onto the legacy loop because agent.ts's resolveModel THROWS for a
+// sidecar provider; these pin whether a delegated turn can still reach that
+// hook. They run with NO deps.model (`omitModel`), because an injected model
+// short-circuits `deps.model ?? resolveModelForTurn(...)` at every call site
+// and would make them pass for the wrong reason.
+// ---------------------------------------------------------------------------
+
+const engineReply = (text: string): SdkScriptMessage[] => [
+  { type: "assistant", session_id: "sdk-1", message: { content: [{ type: "text", text }] } },
+  {
+    type: "result",
+    session_id: "sdk-1",
+    is_error: false,
+    stop_reason: "stop",
+    usage: { input_tokens: 3, output_tokens: 4 },
+  },
+];
+
+// The sidecar posture, verbatim: an engine takes the turn, and any model
+// resolution is both recorded and fatal.
+function sidecarAgent(onModelResolved: () => void): (agent: LoadedAgent) => void {
+  return (agent) => {
+    agent.config.resolveEngine = () => Promise.resolve(scriptedEngine("claude-code", engineReply("engine reply")));
+    agent.config.resolveModel = () => {
+      onModelResolved();
+      throw new Error("sidecar providers use the legacy endpoint");
+    };
+  };
+}
+
+Deno.test("a delegated turn completes without ever calling the agent's resolveModel hook", async () => {
+  let modelResolved = false;
+  const { handler, db } = await makeHandler({
+    omitModel: true,
+    mutate: sidecarAgent(() => {
+      modelResolved = true;
+    }),
+  });
+  const res = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi" }),
+  }));
+  assertEquals(res.status, 200);
+  await res.json();
+  await until(() => settled(db));
+
+  assertEquals(db.turns[0].status, "completed");
+  assertEquals(JSON.parse(String(db.steps[0].payload)).text, "engine reply");
+  assertEquals(modelResolved, false);
+});
+
+Deno.test("a delegated turn over the compaction threshold does not reach resolveModel either", async () => {
+  let modelResolved = false;
+  const { handler, db } = await makeHandler({
+    omitModel: true,
+    mutate: (agent) => {
+      sidecarAgent(() => {
+        modelResolved = true;
+      })(agent);
+      // Puts every turn with any history over maybeCompact's trigger
+      // (min(fraction * window, ceiling)) — the summarizer is the one place a
+      // delegated turn was previously observed to resolve a model.
+      agent.config.context.compactAtTokens = 1;
+    },
+  });
+  const created = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "one" }),
+  }));
+  assertEquals(created.status, 200);
+  const { sessionId } = await created.json();
+  await until(() => settled(db));
+
+  const follow = await handler(new Request(`${BASE}/eve/v1/session/${sessionId}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "two" }),
+  }));
+  assertEquals(follow.status, 202);
+  await follow.json();
+  await until(() => db.turns.length === 2 && settled(db));
+
+  assertEquals(db.turns.map((t) => t.status), ["completed", "completed"]);
+  assertEquals(modelResolved, false);
+  // The whole pre-turn compaction block is gated on `!engine`, so it never
+  // even reached the drop fallback the control below observes.
+  assertEquals(db.steps.filter((s) => s.kind === "compaction").length, 0);
+});
+
+// Anti-vacuity control for the test above: it must be the ENGINE that keeps
+// resolveModel unreached, not a fixture that never gets over the threshold.
+Deno.test("the same fixture without an engine reaches resolveModel through the compaction summarizer", async () => {
+  let modelResolved = false;
+  const { handler, db } = await makeHandler({
+    omitModel: true,
+    mutate: (agent) => {
+      agent.config.resolveModel = () => {
+        modelResolved = true;
+        throw new Error("sidecar providers use the legacy endpoint");
+      };
+      agent.config.context.compactAtTokens = 1;
+    },
+  });
+  const created = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "one" }),
+  }));
+  const { sessionId } = await created.json();
+  await until(() => settled(db));
+
+  const follow = await handler(new Request(`${BASE}/eve/v1/session/${sessionId}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "two" }),
+  }));
+  await follow.json();
+  await until(() => db.turns.length === 2 && settled(db));
+
+  assertEquals(modelResolved, true);
+  // maybeCompact's summarizer threw and fell back to dropping the oldest
+  // turns; that fallback is what persists this step, so it is proof the
+  // compaction block actually ran on this history size.
+  assertEquals(db.steps.filter((s) => s.kind === "compaction").length, 1);
+});
+
+// Characterization of a residual gap, NOT part of the gate above: the
+// stateless /chat route is not engine-aware at all — it never calls
+// resolveEngineForTurn and resolves a model unconditionally — so a sidecar
+// account still throws out of it. devx's agents loop does not post here (it
+// uses the eve/v1 session API; see plugins/devx/src/lib/config.ts's
+// AGENTS_SESSION_URL), which is why this no longer decides the carve-out.
+Deno.test("POST /chat resolves a model even for an agent whose resolveEngine yields an engine", async () => {
+  let modelResolved = false;
+  const { handler } = await makeHandler({
+    omitModel: true,
+    mutate: sidecarAgent(() => {
+      modelResolved = true;
+    }),
+  });
+  await assertRejects(
+    () =>
+      handler(new Request(`${BASE}/chat`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ messages: [{ role: "user", parts: [{ type: "text", text: "hi" }] }] }),
+      })),
+    Error,
+    "sidecar providers use the legacy endpoint",
+  );
+  assertEquals(modelResolved, true);
 });
 
 // ---------------------------------------------------------------------------
