@@ -326,19 +326,34 @@ live-tail by event shape.
     derives a non-secret `auth_shape` hint from the unmasked key
     (`plugins/devx/functions/auth_shape.ts`) purely for **display**
     (`GET /settings`/`GET /provider-configs` attach it so the frontend can
-    show what kind of credential is on file). It used to also be a routing
-    signal: `useEffectiveLoop.ts` forced `bedrock` + `auth_shape === "iam"`
-    users onto the legacy loop before `/chat` was ever called, with the
-    `resolveModel` throw as the backstop if that routing were ever wrong.
-    That hook is gone (Phase 4 Task 2 deleted the two-loop client router
-    outright — every provider, `bedrock` included, now runs on the agents
-    loop) and nothing replaced the routing half of its job, only the display
-    half survives. So IAM-shaped bedrock credentials are simply unsupported
-    now, with no escape hatch: `resolveModel`'s throw fires on the agents
-    loop's own session route, same as any other rejecting model hook —
-    `runner.ts`'s turn loop turns it into an ordinary `turn.failed`/
-    `session.failed` pair (`runner.ts:175-178`), not a crash, but there is no
-    longer a code path that avoids it for these users.
+    show what kind of credential is on file) — it was NEVER a routing
+    signal, on either loop. Verified against the deleted router itself
+    (`git show 0c1fdb5b^:plugins/devx/src/hooks/effectiveLoop.ts`):
+    `resolveEffectiveLoop`'s `providerForcesLegacy` checked only
+    `provider === "claude-code"`, and its own header said so in as many
+    words — *"IAM-shaped bedrock credentials are NOT routed here: that
+    configuration is simply unsupported … A user on bedrock with IAM-shaped
+    credentials resolves to 'agents' like any other provider and hits
+    agent.ts's resolveModel throw."* `agent.ts`'s own comment confirms the
+    same thing from the other side: hitting that throw is *"the NORMAL
+    path for a user on IAM-shaped bedrock creds"*. So provider-based
+    routing changed nothing for this configuration — it hit the throw
+    before Phase 4 Task 2 and it hits the same throw after.
+    **What DID change, and is worth recording accurately: the explicit
+    `devx.settings.loop` flag was the actual escape hatch**, not the
+    provider check. Before Task 2, a user could deliberately set
+    `loop: "legacy"` and get routed to the legacy AI-SDK loop, whose
+    `createModel` supported both bearer-token and IAM-shaped bedrock auth
+    — so an IAM user who knew to opt in had a working path. Task 2 made
+    routing unconditional (deleting the router that read the flag) and
+    Task 4 retired the flag itself (`PUT`/`GET /settings` no longer
+    read or write it), so that opt-out is gone: there is no longer any
+    configuration that reaches the legacy loop's IAM support, deliberate
+    or otherwise. `resolveModel`'s throw fires on the agents loop's own
+    session route like any other rejecting model hook — `runner.ts`'s
+    turn loop turns it into an ordinary `turn.failed`/`session.failed`
+    pair (`runner.ts:175-178`), not a crash — but it is now unconditional
+    for this configuration rather than avoidable by an explicit setting.
 17. **`onTurnEnd`/`buildUserMessage` turn-lifecycle hooks (Task 3)** are also
     additive `AgentConfig` fields real eve's `defineAgent` doesn't define —
     eve silently ignores unknown fields, so an agent directory using them
@@ -1344,6 +1359,15 @@ trips where a single one would do. Collapsing them isn't safe to do now,
 because `fetchCoderProvider` is still claw's rollback path to the legacy
 transport; collapse it in the same change that removes `fetchCoderProvider`
 for good.
+
+**One code-side cleanup to fold in as well:** `plugins/devx/functions/
+auth_shape.ts`'s header comment still describes `useEffectiveLoop.ts`
+branching on `auth_shape` for routing purposes — it never did (see the
+IAM-shaped-credentials note above), and the file it names no longer exists
+at all. Left uncorrected here deliberately: this hand-off is
+documentation-only, `auth_shape.ts` is code, and a comment fix there is a
+one-line change that belongs in the same branch as the rest of this
+deletion, not stapled onto a docs commit.
 
 ## devx's last two legacy consumers: security review and autonomous runs
 
