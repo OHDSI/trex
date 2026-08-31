@@ -14,7 +14,7 @@
 // metadata.appId. Once the session exists the stored app wins; a different
 // `app` mid-task is ignored (one task = one thread = one app).
 import { defineTool } from "eve/tools";
-import { apiBase, mintToken, runCodeTurn as runLegacyTurn, type CodeTurnArgs } from "../lib/code-stream.ts";
+import { apiBase, assertCoderProvider, mintToken, runCodeTurn as runLegacyTurn, type CodeTurnArgs } from "../lib/code-stream.ts";
 import { runCodeTurn as runEveTurn, type PendingApproval, type TokioClient, type TurnEnd } from "../lib/code-session.ts";
 import { tokioClientFromGlobal } from "../lib/tokio.ts";
 import { chooseCoderTransport } from "../lib/code-route.ts";
@@ -79,6 +79,7 @@ async function fetchCoderProvider(userId: string): Promise<string | undefined> {
 // Trex.req does not exist outside one either).
 export interface TransportDeps {
   getProvider?: (userId: string) => Promise<string | undefined>;
+  ensureProvider?: (userId: string) => Promise<void>;
   runLegacy?: (args: CodeTurnArgs) => Promise<CodeTurnOutcome>;
   runEve?: typeof runEveTurn;
   getClient?: () => TokioClient | null;
@@ -92,6 +93,7 @@ export async function routeCodeTurn(
   deps: TransportDeps = {},
 ): Promise<CodeTurnOutcome> {
   const getProvider = deps.getProvider ?? fetchCoderProvider;
+  const ensureProvider = deps.ensureProvider ?? assertCoderProvider;
   const runLegacy = deps.runLegacy ?? runLegacyTurn;
   const runEve = deps.runEve ?? runEveTurn;
   const getClient = deps.getClient ?? tokioClientFromGlobal;
@@ -109,6 +111,11 @@ export async function routeCodeTurn(
   }
   const client = getClient();
   if (!client) throw new Error("askCodeAgent: Trex.req unavailable for the eve transport");
+  // Before the turn, not after: devx resolves the engine per turn from the
+  // account's settings, so a deployment-pinned provider has to be written
+  // first. The legacy transport asserted it inline and nothing routes there
+  // now — without this call CLAW_CODER_PROVIDER would be silently inert.
+  await ensureProvider(args.userId);
   const onProgress = args.onProgress;
   const result = await runEve(client, {
     codeSessionId: args.chatId,

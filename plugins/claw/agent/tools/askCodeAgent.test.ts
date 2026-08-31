@@ -371,6 +371,27 @@ Deno.test("routeCodeTurn throws when eve is chosen but Trex.req is unavailable",
   await assertRejects(() => routeCodeTurn(baseArgs(), 0, deps), Error, "Trex.req unavailable");
 });
 
+// CLAW_CODER_PROVIDER used to be asserted only inside the legacy runCodeTurn;
+// with everything on eve, an unasserted pin would be silently ignored and a
+// live verification would run against settings nobody wrote.
+Deno.test("routeCodeTurn asserts the pinned coder provider BEFORE the eve turn", async () => {
+  const order: string[] = [];
+  const deps: TransportDeps = {
+    getProvider: () => Promise.resolve("claude-code"),
+    ensureProvider: (userId) => {
+      order.push(`ensure:${userId}`);
+      return Promise.resolve();
+    },
+    runEve: () => {
+      order.push("eve");
+      return Promise.resolve({ codeSessionId: "sess-1", replyText: "ok", nextCursor: 1, reason: "completed", pending: [] });
+    },
+    getClient: () => fakeClient(),
+  };
+  await routeCodeTurn(baseArgs(), 0, deps);
+  assertEquals(order, ["ensure:u1", "eve"]);
+});
+
 // Routing claude-code to eve must not bypass the create-body flag: without it
 // the hard escalate tier reads the session as unapprovable and the ship step's
 // `git push` is DENIED outright rather than relayed to the channel.

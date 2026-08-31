@@ -21,7 +21,7 @@
 // the servicePath), so a static import breaks module resolution in the plugin
 // source tree / CI, where `../../auth/keys.ts` does not exist.
 
-import { resolveCoderProviderIntent } from "./coder-provider.ts";
+import { type CoderProviderIntent, resolveCoderProviderIntent } from "./coder-provider.ts";
 
 // Loopback base for the control server. Reuse the gateway override so a
 // deployment that moves trexas off 33001 stays consistent with claw's Discord
@@ -66,17 +66,13 @@ export async function mintToken(userId: string): Promise<string> {
   return `${data}.${b64url(sig)}`;
 }
 
-// Assert the configured provider on the coder account, if this deployment
-// pins one. With no CLAW_CODER_PROVIDER set this is a no-op and the account's
-// own devx Settings decide the engine — which is what lets an operator move
-// the coder between engines from the UI, with no redeploy.
+// Write the pinned intent onto the coder account (callers reach this through
+// assertCoderProvider, which decides whether anything is pinned at all).
 // Reads current settings first and only writes when something actually
 // differs, to avoid clobbering a shared user's other preferences. NOTE: a user
 // with an ACTIVE devx.provider_configs row wins over devx.settings (index.ts
 // resolution order); the dedicated CLAW_CODE_USER_ID has none, so this suffices.
-async function ensureCoderProvider(token: string): Promise<void> {
-  const intent = resolveCoderProviderIntent((k) => Deno.env.get(k));
-  if (!intent) return;
+async function ensureCoderProvider(token: string, intent: CoderProviderIntent): Promise<void> {
   const base = apiBase();
   const auth = { authorization: `Bearer ${token}` };
   let cur: Record<string, unknown> | null = null;
@@ -110,6 +106,23 @@ async function ensureCoderProvider(token: string): Promise<void> {
     }),
   });
   if (!res.ok) throw new Error(`code provider set failed: ${res.status} ${await res.text()}`);
+}
+
+// mint is injected by the legacy transport (it already holds a token) and by
+// tests; env only by tests. Production reads Deno.env and mints for real.
+export interface CoderProviderAssertDeps {
+  env?: (k: string) => string | undefined;
+  mint?: (userId: string) => Promise<string>;
+}
+
+// Assert the pinned provider before a turn, on EITHER transport. This used to
+// live inline in the legacy runCodeTurn below; nothing selects that transport
+// any more (code-route.ts), so the eve path calls this or CLAW_CODER_PROVIDER
+// goes silently inert. Nothing pinned means no token minted and no round trip.
+export async function assertCoderProvider(userId: string, deps: CoderProviderAssertDeps = {}): Promise<void> {
+  const intent = resolveCoderProviderIntent(deps.env ?? ((k: string) => Deno.env.get(k)));
+  if (!intent) return;
+  await ensureCoderProvider(await (deps.mint ?? mintToken)(userId), intent);
 }
 
 // The chat always runs in devx "agent" mode: it is the only mode that keeps the
@@ -292,7 +305,7 @@ export async function runCodeTurn(
   args: CodeTurnArgs,
 ): Promise<{ chatId: string; replyText: string }> {
   const token = await mintToken(args.userId);
-  await ensureCoderProvider(token);
+  await assertCoderProvider(args.userId, { mint: () => Promise.resolve(token) });
   const chatId = await ensureChat(token, args.appId, args.chatId);
   const replyText = await streamTurn(token, chatId, args.message, args.attachments, args.onProgress);
   return { chatId, replyText };
