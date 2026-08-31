@@ -5323,13 +5323,19 @@ Deno.test("the same fixture without an engine reaches resolveModel through the c
   assertEquals(db.steps.filter((s) => s.kind === "compaction").length, 1);
 });
 
-// Characterization of a residual gap, NOT part of the gate above: the
-// stateless /chat route is not engine-aware at all — it never calls
-// resolveEngineForTurn and resolves a model unconditionally — so a sidecar
-// account still throws out of it. devx's agents loop does not post here (it
-// uses the eve/v1 session API; see plugins/devx/src/lib/config.ts's
-// AGENTS_SESSION_URL), which is why this no longer decides the carve-out.
-Deno.test("POST /chat resolves a model even for an agent whose resolveEngine yields an engine", async () => {
+// Phase 4, task 1b — the residual gap task 1 characterized above. /chat used
+// to reach resolveModel for a sidecar account and throw its bare "use the
+// legacy endpoint" out of the route; it now refuses such an agent up front.
+// These pin the refusal (parseable, model never resolved, turn not left
+// running) and that the model path is untouched by it.
+const chatRequest = () =>
+  new Request(`${BASE}/chat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", parts: [{ type: "text", text: "hi" }] }] }),
+  });
+
+Deno.test("POST /chat refuses an engine-backed agent with a parseable error instead of resolving a model", async () => {
   let modelResolved = false;
   const { handler } = await makeHandler({
     omitModel: true,
@@ -5337,17 +5343,48 @@ Deno.test("POST /chat resolves a model even for an agent whose resolveEngine yie
       modelResolved = true;
     }),
   });
-  await assertRejects(
-    () =>
-      handler(new Request(`${BASE}/chat`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ messages: [{ role: "user", parts: [{ type: "text", text: "hi" }] }] }),
-      })),
-    Error,
-    "sidecar providers use the legacy endpoint",
-  );
-  assertEquals(modelResolved, true);
+  const res = await handler(chatRequest());
+  assertEquals(res.status, 501);
+  const body = await res.json();
+  assertEquals(body.engine, "claude-code");
+  assertStringIncludes(String(body.use), "/eve/v1/session");
+  assertStringIncludes(String(body.error), "claude-code");
+  // The whole point: the sidecar's resolveModel throw never happens, so the
+  // caller gets this body rather than an unparseable 500.
+  assertEquals(modelResolved, false);
+});
+
+Deno.test("POST /chat's refused turn is failed, not left running for the stale-turn sweep", async () => {
+  const { handler, db } = await makeHandler({
+    omitModel: true,
+    mutate: sidecarAgent(() => {}),
+  });
+  const res = await handler(chatRequest());
+  assertEquals(res.status, 501);
+  await res.json();
+
+  assertEquals(db.turns.length, 1);
+  assertEquals(db.turns[0].status, "failed");
+  assertStringIncludes(String(db.turns[0].error), "claude-code");
+  // Nothing ran, so nothing is persisted to replay.
+  assertEquals(db.steps.length, 0);
+});
+
+// The refusal is gated on a RESOLVED engine, not on the hook existing: an
+// agent that authors resolveEngine and answers undefined is a model-backed
+// agent and must stream from the model loop exactly as it did before.
+Deno.test("POST /chat is unchanged for an agent whose resolveEngine yields no engine", async () => {
+  const { handler, db } = await makeHandler({
+    mutate: (agent) => {
+      agent.config.resolveEngine = () => Promise.resolve(undefined);
+    },
+  });
+  const res = await handler(chatRequest());
+  assertEquals(res.status, 200);
+  assert((res.headers.get("content-type") || "").includes("text/event-stream"));
+  assertStringIncludes(await res.text(), "hello from toy");
+  await until(() => settled(db));
+  assertEquals(db.turns[0].status, "completed");
 });
 
 // ---------------------------------------------------------------------------

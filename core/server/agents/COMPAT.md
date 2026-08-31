@@ -991,6 +991,30 @@ A delegated turn still persists the same `agents.steps` row kinds a
 read whichever path wrote them, so this is not optional parity, it is the
 contract `delegate.ts`'s own header comment states.
 
+### `POST /chat` refuses an engine-backed agent rather than delegating
+
+`/chat` is the stateless UIMessage route: history comes from the client, and
+the `agents.sessions` row it creates is minted per request and never read
+back. A delegated turn is the opposite shape — `DelegatedTurnOpts`/`EngineTurn`
+carry no history at all, because the engine resumes its OWN transcript keyed
+on eve's session id (the sidecar passes it straight through as `chatId`,
+`sidecar_engine.ts:293`). Delegating on `/chat` would therefore hand the
+engine a fresh session on every request and answer each message with no
+memory of the conversation the client just sent — silently.
+
+So the route resolves the engine (before any model resolution) and, if one
+comes back, fails the turn and answers
+`501 {error, engine, use: "POST /eve/v1/session"}`. Before this it fell
+through to `resolveModel`, whose throw for a sidecar provider surfaced as a
+bare, unparseable 500 — the behaviour
+`plugins/devx/src/hooks/effectiveLoop.ts` used to route around. An agent
+whose `resolveEngine` answers `undefined` is unaffected: `/chat` streams from
+the model loop exactly as before. Same posture as this route's
+`buildSpawnCapabilities(..., false, ...)`, which refuses a detached child
+spawn outright rather than orphaning one, and for the same reason: a
+capability that needs a revisitable session cannot be served by a session
+that is never revisited.
+
 ### Hooks a delegated turn structurally cannot honour
 
 The engine owns its own loop — there is no per-step hook point inside it for
@@ -1030,9 +1054,10 @@ either sufficient on its own:
   why devx's `agent.ts`'s `resolveModel` still throws `"sidecar providers use
   the legacy endpoint"` for `claude-code` rather than ever returning
   something usable (`agent.ts:194-206`) — this throw is now unreachable on
-  the delegating path (the engine is picked before `resolveModel` would run),
-  but stays in place because `/chat` has no engine switch and can still
-  reach it. Without this skip, `maybeCompact`'s own catch-and-drop fallback
+  both live routes (`startTurn` picks the engine before `resolveModel` would
+  run, and `/chat` refuses an engine-backed agent up front, see below), but
+  stays in place as the backstop for any caller that resolves a model without
+  first resolving an engine. Without this skip, `maybeCompact`'s own catch-and-drop fallback
   would silently start dropping the oldest turns from eve's record of the
   session for no benefit.
 
