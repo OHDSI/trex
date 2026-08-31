@@ -5,8 +5,8 @@
 // claw's LEGACY coder transport: the devx-api edge function's POST
 // /chats/:id/stream. No provider selects it any more — eve hosts the sidecar
 // too now (code-route.ts) — and it is kept only until the legacy loop is
-// deleted. mintToken/apiBase/ensureChat below are still live on the eve path
-// (askCodeAgent's provider read, chat-mirror.ts).
+// deleted. mintToken/apiBase/ensureChat/assertCoderProvider below are still
+// live on the eve path (chat-mirror.ts, askCodeAgent's pinned-provider assert).
 //
 // Transport is a plain loopback fetch, NOT Trex.req: the inter-service channel
 // (core/server/plugin/function.ts) buffers the whole response via `.text()` under
@@ -102,7 +102,6 @@ async function ensureCoderProvider(token: string, intent: CoderProviderIntent): 
       max_steps: cur?.max_steps ?? undefined,
       max_tool_steps: cur?.max_tool_steps ?? undefined,
       auto_fix_problems: cur?.auto_fix_problems ?? undefined,
-      loop: cur?.loop ?? undefined,
     }),
   });
   if (!res.ok) throw new Error(`code provider set failed: ${res.status} ${await res.text()}`);

@@ -7,6 +7,6 @@
 // legacy loop's deletion, as this migration's one-line rollback.
 export type CoderTransport = "legacy" | "eve";
 
-export function chooseCoderTransport(_provider: string | null | undefined): CoderTransport {
+export function chooseCoderTransport(_provider?: string | null): CoderTransport {
   return "eve";
 }

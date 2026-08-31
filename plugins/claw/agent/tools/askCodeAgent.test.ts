@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "jsr:@std/assert";
-import askCodeAgentTool, { askCore, routeCodeTurn, type CodeTurnOutcome, type TransportDeps } from "./askCodeAgent.ts";
+import askCodeAgentTool, { askCore, providerFromSettings, routeCodeTurn, type CodeTurnOutcome, type TransportDeps } from "./askCodeAgent.ts";
 import type { CodeTurnArgs } from "../lib/code-stream.ts";
 import type { TokioClient } from "../lib/code-session.ts";
 import type { MirrorDeps } from "../lib/chat-mirror.ts";
@@ -274,7 +274,6 @@ function fakeClient(): TokioClient {
 Deno.test("routeCodeTurn calls the eve transport for a claude-code account too", async () => {
   const seenEve: unknown[] = [];
   const deps: TransportDeps = {
-    getProvider: () => Promise.resolve("claude-code"),
     runLegacy: () => {
       throw new Error("must not call legacy — eve hosts the sidecar since phase 2");
     },
@@ -293,7 +292,6 @@ Deno.test("routeCodeTurn calls the eve transport for a claude-code account too",
 Deno.test("routeCodeTurn calls the eve transport for a non-claude-code account", async () => {
   const seenEve: unknown[] = [];
   const deps: TransportDeps = {
-    getProvider: () => Promise.resolve("anthropic"),
     runLegacy: () => {
       throw new Error("must not call legacy for an anthropic account");
     },
@@ -319,23 +317,40 @@ Deno.test("routeCodeTurn calls the eve transport for a non-claude-code account",
   assertEquals((seenEve[0] as { startCursor: number }).startCursor, 3);
 });
 
-Deno.test("routeCodeTurn surfaces a provider fetch failure instead of silently falling back to legacy", async () => {
-  const deps: TransportDeps = {
-    getProvider: () => Promise.reject(new Error("coder settings fetch failed: 500")),
-    runLegacy: () => {
-      throw new Error("must not call legacy when the provider is unreadable");
-    },
-    runEve: () => {
-      throw new Error("must not reach the coder when the provider is unreadable");
-    },
-    getClient: () => fakeClient(),
-  };
-  await assertRejects(() => routeCodeTurn(baseArgs(), 0, deps), Error, "coder settings fetch failed: 500");
+// The transport no longer depends on the account's provider, so a turn must not
+// read devx settings to pick one — reading them first is what deadlocked a
+// fresh deployment (the read threw on the `null` body of a missing row, and the
+// only code that CREATES that row ran after it).
+Deno.test("routeCodeTurn reads no settings before the turn — nothing to fail, nothing to fall back from", async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (() => {
+    throw new Error("must not read devx settings to choose a transport");
+  }) as typeof fetch;
+  try {
+    const out = await routeCodeTurn(baseArgs(), 0, {
+      ensureProvider: () => Promise.resolve(),
+      runLegacy: () => {
+        throw new Error("must not call legacy");
+      },
+      runEve: () =>
+        Promise.resolve({ codeSessionId: "sess-1", replyText: "ok", nextCursor: 1, reason: "completed", pending: [] }),
+      getClient: () => fakeClient(),
+    });
+    assertEquals(out.transport, "eve");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+Deno.test("providerFromSettings tolerates the null body a missing devx.settings row returns", () => {
+  assertEquals(providerFromSettings(null), undefined);
+  assertEquals(providerFromSettings({}), undefined);
+  assertEquals(providerFromSettings({ provider: 7 }), undefined);
+  assertEquals(providerFromSettings({ provider: "claude-code" }), "claude-code");
 });
 
 Deno.test("routeCodeTurn refuses attachments with no appId on the eve transport instead of silently dropping them", async () => {
   const deps: TransportDeps = {
-    getProvider: () => Promise.resolve("anthropic"),
     runEve: () => {
       throw new Error("must not reach the coder — attachments would be silently dropped");
     },
@@ -348,7 +363,6 @@ Deno.test("routeCodeTurn refuses attachments with no appId on the eve transport 
 Deno.test("routeCodeTurn allows attachments through on eve when an appId is present", async () => {
   const seenEve: unknown[] = [];
   const deps: TransportDeps = {
-    getProvider: () => Promise.resolve("anthropic"),
     runEve: (_client, runArgs) => {
       seenEve.push(runArgs);
       return Promise.resolve({ codeSessionId: "sess-1", replyText: "ok", nextCursor: 1, reason: "completed", pending: [] });
@@ -362,7 +376,6 @@ Deno.test("routeCodeTurn allows attachments through on eve when an appId is pres
 
 Deno.test("routeCodeTurn throws when eve is chosen but Trex.req is unavailable", async () => {
   const deps: TransportDeps = {
-    getProvider: () => Promise.resolve("anthropic"),
     runEve: () => {
       throw new Error("must not call eve with no client");
     },
@@ -377,7 +390,6 @@ Deno.test("routeCodeTurn throws when eve is chosen but Trex.req is unavailable",
 Deno.test("routeCodeTurn asserts the pinned coder provider BEFORE the eve turn", async () => {
   const order: string[] = [];
   const deps: TransportDeps = {
-    getProvider: () => Promise.resolve("claude-code"),
     ensureProvider: (userId) => {
       order.push(`ensure:${userId}`);
       return Promise.resolve();
@@ -411,7 +423,6 @@ Deno.test("a claude-code session opened through the eve transport declares appro
   };
   // No runEve stub: this drives code-session.ts's real runCodeTurn.
   const out = await routeCodeTurn(baseArgs(), 0, {
-    getProvider: () => Promise.resolve("claude-code"),
     runLegacy: () => {
       throw new Error("must not call legacy for a claude-code account");
     },

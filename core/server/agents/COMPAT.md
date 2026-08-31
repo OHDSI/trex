@@ -1284,6 +1284,17 @@ two-loop router was deleted out from under it. And the loop flag itself is
 retired: `PUT`/`GET /settings` no longer read or write `loop`, and
 `SettingsPage.tsx`'s "Chat Engine (experimental)" toggle is gone.
 
+**Flipping transports strands stored session ids, so the eve transport now
+self-heals.** `claw.orchestration.code_session_id` holds a devx chat id on the
+legacy transport and an eve session id on eve, with no discriminator — so every
+Discord thread open at deploy time carried an id the eve session route answers
+`404` for (`handler.ts:1642`). `code-session.ts`'s `runCodeTurn` now treats that
+one status on the continue call as "this id is gone": it logs, opens a fresh
+session ONCE (same create body, `approverReachable` included), and restarts the
+cursor at 0 because the new session has no history. A second failure throws like
+any other. This also covers a pruned session or a restored database, not just
+the migration.
+
 **`devx.settings.loop` (the column) is deliberately still there.** Dropping
 a column is not something a rollback can undo, and the code that used to
 repopulate it was removed in the same branch that stopped reading it — so a
@@ -1340,10 +1351,14 @@ itself, and the now-orphaned
 `plugins/devx/src/hooks/useMessages.ts` and
 `plugins/devx/src/components/chat/MessagesList.tsx` — note that second
 path: the original plan named `src/components/MessagesList.tsx`, which is
-wrong, the file lives under `components/chat/`. On the claw side:
-`chooseCoderTransport`, `routeCodeTurn`'s `runLegacy` branch and
-`TransportDeps.runLegacy`, `CodeTurnOutcome.transport`, `fetchCoderProvider`,
-and `code-stream.ts`'s `runCodeTurn`/`streamTurn`.
+wrong, the file lives under `components/chat/`. Also orphaned by
+`useEffectiveLoop.ts`'s deletion, with zero remaining callers anywhere:
+`getActiveProviderConfig`, `getActiveProvider` and the `ActiveProviderConfig`
+type (`plugins/devx/src/lib/api.ts:181,201,209`) — the hook was their only
+consumer. On the claw side: `chooseCoderTransport`, `routeCodeTurn`'s
+`runLegacy` branch and `TransportDeps.runLegacy`, `CodeTurnOutcome.transport`,
+`fetchCoderProvider`/`providerFromSettings`, and `code-stream.ts`'s
+`runCodeTurn`/`streamTurn`.
 
 **Precondition, stated plainly: this deletion happens only after a real
 coding task has been verified end to end through Discord on the eve
@@ -1352,13 +1367,19 @@ unreachable legacy code paths cost nothing at rest — so there is no reason
 to delete before that verification, and the grep gate that blocked Task 3
 the first time is proof the inventory is easy to get wrong under pressure.
 
-**One efficiency item to fold into that deletion, not before:**
-`fetchCoderProvider` still runs a separate mint+GET against devx's
-`/settings` before `assertCoderProvider` runs on every eve turn — two round
-trips where a single one would do. Collapsing them isn't safe to do now,
-because `fetchCoderProvider` is still claw's rollback path to the legacy
-transport; collapse it in the same change that removes `fetchCoderProvider`
-for good.
+**`fetchCoderProvider` is no longer called on the turn path.** An earlier
+draft of this section called its extra mint+GET "an efficiency item to fold
+in later"; that was wrong on two counts. It was not merely wasteful — it ran
+*before* `assertCoderProvider`, and `GET /settings` answers a bare `null` for
+an account with no `devx.settings` row (`index.ts:1355`), so on a fresh
+deployment it threw a raw `TypeError` on every turn, and the only code that
+creates the row sat behind it. A permanent deadlock, not an inefficiency.
+The read is gone from `routeCodeTurn` (the transport no longer depends on the
+provider, so a turn must not mint, fetch, or fail for a value nothing reads),
+and `providerFromSettings` now tolerates the null body. The function itself
+stays, unused, as the other half of `chooseCoderTransport`'s rollback: putting
+per-provider routing back means putting this call back, so it must be correct
+when that happens. Both die together in the deletion.
 
 **One code-side cleanup to fold in as well:** `plugins/devx/functions/
 auth_shape.ts`'s header comment still describes `useEffectiveLoop.ts`
