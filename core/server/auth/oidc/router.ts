@@ -12,7 +12,8 @@
 import { Router } from "express";
 import express from "express";
 import { pool } from "../../db.ts";
-import { verifyAccessToken } from "../jwt.ts";
+import { generateRefreshToken, hashRefreshToken, verifyAccessToken } from "../jwt.ts";
+import { isRefreshTokenExpired } from "../refresh-token-ttl.ts";
 import { apiLimiter, authLimiter } from "../../middleware/rate-limit.ts";
 import {
   getClient,
@@ -74,6 +75,22 @@ async function fetchUser(id: string): Promise<IdTokenUser | null> {
 }
 
 /** The session the native IdP sets in sync-cookie; no second session concept. */
+/**
+ * Mint a refresh token for a relying party and store only its hash.
+ *
+ * Shares the table the native identity provider uses, so a token issued here is
+ * revoked by the same paths that revoke a password-change or a deletion.
+ */
+async function issueOidcRefreshToken(userId: string): Promise<string> {
+  const token = generateRefreshToken();
+  await pool.query(
+    `INSERT INTO trexdb.refresh_token (id, "userId", token_hash, session_id, revoked, "createdAt", "updatedAt")
+     VALUES ($1, $2, $3, $4, false, NOW(), NOW())`,
+    [crypto.randomUUID(), userId, await hashRefreshToken(token), crypto.randomUUID()],
+  );
+  return token;
+}
+
 async function isBanned(id: string): Promise<boolean> {
   const result = await pool.query<{ banned: boolean }>(
     `SELECT banned FROM trexdb."user" WHERE id = $1 AND "deletedAt" IS NULL`,
@@ -125,7 +142,7 @@ export function registerOidcRoutes(basePath: string) {
       jwks_uri: `${issuer}/.well-known/jwks.json`,
       end_session_endpoint: `${issuer}/session/end`,
       response_types_supported: ["code"],
-      grant_types_supported: ["authorization_code", "client_credentials"],
+      grant_types_supported: ["authorization_code", "client_credentials", "refresh_token"],
       subject_types_supported: ["public"],
       id_token_signing_alg_values_supported: ["RS256"],
       scopes_supported: ["openid", "profile", "email"],
@@ -234,7 +251,11 @@ export function registerOidcRoutes(basePath: string) {
     try {
       const body = req.body ?? {};
       const grantType = body.grant_type;
-      if (grantType !== "authorization_code" && grantType !== "client_credentials") {
+      if (
+        grantType !== "authorization_code" &&
+        grantType !== "client_credentials" &&
+        grantType !== "refresh_token"
+      ) {
         res.status(400).json({ error: "unsupported_grant_type" });
         return;
       }
@@ -293,6 +314,63 @@ export function registerOidcRoutes(basePath: string) {
         return;
       }
 
+      if (grantType === "refresh_token") {
+        const presented = body.refresh_token ?? "";
+        if (!presented) {
+          res.status(400).json({ error: "invalid_grant", error_description: "refresh_token is required" });
+          return;
+        }
+
+        // Rotated on redemption: the row is revoked as it is read, so a token
+        // replayed by someone else finds nothing left to redeem.
+        const hash = await hashRefreshToken(presented);
+        const rotated = await pool.query<{ userId: string; createdAt: Date }>(
+          `UPDATE trexdb.refresh_token SET revoked = true, "updatedAt" = NOW()
+            WHERE token_hash = $1 AND revoked = false
+        RETURNING "userId", "createdAt"`,
+          [hash],
+        );
+        if (!rotated.rows.length) {
+          res.status(400).json({ error: "invalid_grant", error_description: "Invalid or revoked refresh token" });
+          return;
+        }
+
+        const { userId: refreshUserId, createdAt } = rotated.rows[0];
+        if (isRefreshTokenExpired(createdAt)) {
+          res.status(400).json({ error: "invalid_grant", error_description: "Refresh token expired" });
+          return;
+        }
+
+        const refreshed = await fetchUser(refreshUserId);
+        if (!refreshed) {
+          res.status(400).json({ error: "invalid_grant", error_description: "User not found" });
+          return;
+        }
+        if (await isBanned(refreshUserId)) {
+          res.status(400).json({ error: "invalid_grant", error_description: "User is banned" });
+          return;
+        }
+
+        // The original grant's scopes are not stored, so the renewal carries what
+        // this client is allowed to ask for. Narrowing to "openid" instead would
+        // silently drop the email and profile claims the relying party had.
+        const refreshedScopes = grantedScopes(client, "openid profile email");
+        const renewed = await signIdToken(refreshed, {
+          issuer,
+          audience: client.clientId,
+          scopes: refreshedScopes,
+        });
+        res.json({
+          access_token: renewed,
+          id_token: renewed,
+          token_type: "Bearer",
+          expires_in: DEFAULT_ID_TOKEN_TTL_SECONDS,
+          scope: refreshedScopes.join(" "),
+          refresh_token: await issueOidcRefreshToken(refreshUserId),
+        });
+        return;
+      }
+
       const consumed = await consumeCode(body.code ?? "");
       if (!consumed.ok) {
         res.status(400).json({ error: "invalid_grant", error_description: consumed.reason });
@@ -332,6 +410,10 @@ export function registerOidcRoutes(basePath: string) {
         token_type: "Bearer",
         expires_in: DEFAULT_ID_TOKEN_TTL_SECONDS,
         scope: record.scope,
+        // Without this a relying party has no way to obtain a fresh token, and
+        // anything that invalidates the current one - an authorization change,
+        // an expiry mid-session - ends the session instead of renewing it.
+        refresh_token: await issueOidcRefreshToken(record.userId),
       });
     } catch (err) {
       console.error("[oidc] token error:", err);
