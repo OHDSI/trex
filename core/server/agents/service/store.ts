@@ -773,6 +773,21 @@ export function createStore(query: QueryFn) {
       return r.rows[0]?.consecutive_wakes ?? 0;
     },
 
+    // Gives back a unit charged for a turn that never happened. The charge is
+    // taken when a child-caused turn is about to be created, but the creation
+    // can still lose the one-running-turn race and requeue instead. The text
+    // then rides a later chained turn, which charges its own unit - so without
+    // this the loser is billed for a turn nobody ran, and a fan-out of N
+    // children spends N units to produce far fewer turns.
+    async refundConsecutiveWake(sessionId: string): Promise<void> {
+      await query(
+        `UPDATE agents.sessions
+            SET consecutive_wakes = GREATEST(consecutive_wakes - 1, 0)
+          WHERE id = $1`,
+        [sessionId],
+      );
+    },
+
     // Zeroes the wake budget on any turn NOT caused by a child, so a session
     // legitimately woken many times over a long life — with real messages in
     // between — never creeps toward MAX_CONSECUTIVE_WAKES.
