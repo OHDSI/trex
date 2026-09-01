@@ -919,6 +919,15 @@ function startTurn(
           e2,
         )
       );
+      // The budget was charged up front for a turn that did not happen. The
+      // requeued text will be drained by a chained turn that charges its own
+      // unit, so keeping this one would bill twice for one turn and walk a
+      // wide fan-out toward the cap on races alone.
+      if (wokenByChildId) {
+        await deps.store.refundConsecutiveWake(sessionId).catch((e2) =>
+          console.error(`agents: refunding the wake budget failed for session ${sessionId}:`, e2)
+        );
+      }
       return;
     }
     // Surface the freshly-created turn id to the caller (the channel layer uses
