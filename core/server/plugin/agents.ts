@@ -11,6 +11,7 @@ import { memoryWorkerBasePath } from "../memory/gbrain-worker/mount.ts";
 import { createGatewaySigner, DiscordGatewayClient, gatewayModeEnabled } from "../agents/gateway/discord.ts";
 import { createSlackGatewaySigner, SlackGatewayClient } from "../agents/gateway/slack.ts";
 import { copyDirRecursive } from "./utils.ts";
+import { collectSiblingImportDirs, SIBLING_STAGING_EXCLUDES } from "./agent-sibling-imports.ts";
 import { packsForAgent, stageSkillPacks, type SkillPackEntry } from "./skill-packs.ts";
 import { STALE_TURN_MS } from "../agents/service/turn-lifetime.ts";
 
@@ -147,6 +148,23 @@ export async function buildAgentWorkerConfig(
   }
   const stagedAgentDir = `${tmp}/agent`;
   await copyDirRecursive(agentDir, stagedAgentDir, AGENT_DIR_STAGING_EXCLUDES);
+
+  // An agent may import ACROSS its own directory boundary into a sibling of
+  // the plugin — devx's agent/agent.ts opens with ten `../functions/**`
+  // imports. Those resolve to `${tmp}/functions/**` once staged, which nothing
+  // put there, so the worker died at module evaluation with "Module not found:
+  // file://.../functions/skills/resolver.ts" and every request to that agent
+  // 500'd. Survivable while devx ran the legacy loop; fatal once the eve
+  // runtime became the only path for it.
+  //
+  // Read from the agent's own imports rather than hardcoding `functions`, so
+  // an agent that grows a new sibling does not reintroduce the same failure.
+  // Staged at the same relative depth the source uses, which is what makes the
+  // unchanged `../functions/...` specifiers resolve inside the servicePath.
+  const siblingDirs = await collectSiblingImportDirs(agentDir, pluginDir);
+  for (const sibling of siblingDirs) {
+    await copyDirRecursive(`${pluginDir}/${sibling}`, `${tmp}/${sibling}`, SIBLING_STAGING_EXCLUDES);
+  }
 
   // Linked-memory tools/skills (agent-linked-memory design, Task 3):
   // generated straight into the staged copy, never the plugin's own agent
