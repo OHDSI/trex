@@ -276,7 +276,8 @@ else
   grep -iE "ENC\(" /var/log/postgresql/*.log 2>/dev/null | tail -3
 fi
 echo "--- converter resolution ---"
-grep -E "EncryptedStringConverter|SpringBeanContainer|ManagedBeanRegistry|BeanContainer|defaultStringEncryptor" /tmp/harness-jasypt.log | cut -c1-400 | head -40
+grep -E "EncryptedStringConverter|SpringBeanContainer|ManagedBean|BeanContainer|defaultStringEncryptor|FallbackBeanInstanceProducer" /tmp/harness-jasypt.log \
+  | grep -v "Checking auto-apply" | cut -c1-600 | head -60
 kill "$HPID" 2>/dev/null || true
 
 echo "[smoke] done"
