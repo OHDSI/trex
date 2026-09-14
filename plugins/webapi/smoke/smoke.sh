@@ -231,8 +231,8 @@ SQL
 export JASYPT_ENCRYPTOR_ENABLED=true
 export JASYPT_ENCRYPTOR_PASSWORD=smokeJasyptPwd1234567890abcdef
 export JASYPT_ENCRYPTOR_ALGORITHM=PBEWITHSHA256AND256BITAES-CBC-BC
-# Surfaces whether Hibernate got the converter from Spring or fell back to its own producer.
-export SPRING_APPLICATION_JSON="${SPRING_APPLICATION_JSON%\}},\"logging.level.org.springframework.orm.hibernate5.SpringBeanContainer\":\"DEBUG\"}"
+# Traces how Hibernate obtains the converter and whether Spring injects it.
+export SPRING_APPLICATION_JSON="${SPRING_APPLICATION_JSON%\}},\"logging.level.org.springframework.orm.hibernate5.SpringBeanContainer\":\"TRACE\",\"logging.level.org.springframework.beans.factory.support\":\"TRACE\",\"logging.level.org.springframework.beans.factory.annotation\":\"TRACE\",\"logging.level.org.hibernate.resource.beans\":\"TRACE\",\"logging.level.org.hibernate.boot.model.convert\":\"TRACE\"}"
 
 /app/harness > /tmp/harness-jasypt.log 2>&1 &
 HPID=$!
@@ -275,8 +275,8 @@ else
   grep -E "Cannot remove generation caches|password authentication failed" /tmp/harness-jasypt.log | sort | uniq -c | head -5
   grep -iE "ENC\(" /var/log/postgresql/*.log 2>/dev/null | tail -3
 fi
-echo "--- SpringBeanContainer (converter resolution) ---"
-grep -E "SpringBeanContainer|EncryptedStringConverter" /tmp/harness-jasypt.log | cut -c1-400 | head -10
+echo "--- converter resolution ---"
+grep -E "EncryptedStringConverter|SpringBeanContainer|ManagedBeanRegistry|BeanContainer|defaultStringEncryptor" /tmp/harness-jasypt.log | cut -c1-400 | head -40
 kill "$HPID" 2>/dev/null || true
 
 echo "[smoke] done"
