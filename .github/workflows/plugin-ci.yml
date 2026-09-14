@@ -962,6 +962,11 @@ jobs:
           if ! grep -q "SMOKE_TRUST=installed" smoke.out; then
             echo "::error::WEBAPI_TRUST_CERTS was not honoured in the native image"; exit 1
           fi
+          # With jasypt on, Source entities must come back decrypted; otherwise every
+          # source connection is attempted with the literal ENC(...) credentials.
+          if ! grep -q "SMOKE_DECRYPT=ok" smoke.out; then
+            echo "::error::encrypted source credentials were not decrypted in the native image"; exit 1
+          fi
           # A shared-library native image installs no signal handlers, so SIGPIPE keeps the
           # host default of terminate and the close_notify write during TLS teardown kills
           # the process silently mid-boot. SigPipeGuard fixes that; assert it actually ran.

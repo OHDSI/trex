@@ -186,4 +186,97 @@ echo "=== server-side errors/exceptions during the sweep (root causes of 500s) =
 grep -nE "ERROR|Exception|Caused by|Servlet.service|nested exception" /tmp/harness.log \
   | grep -viE "error loading .* driver|WEBAPI_STATUS=" | tail -60
 
+# Encrypted source credentials must decrypt on read. Boot encryption and read-side
+# decryption take different paths: SourceService.ensureSourceEncrypted encrypts rows
+# with the encryptor bean over plain JDBC, while Source entities are decrypted by
+# EncryptedStringConverter, which Hibernate obtains through Spring. If the converter
+# ends up without its encryptor, EncryptorUtils.decrypt hands back the ENC(...) text
+# unchanged and every source connection fails with "password authentication failed
+# for user ENC(...)", while boot, login and the source list all look healthy.
+#
+# Nothing in the sweep above can reach a source connection (it runs unauthenticated),
+# so this drives one through CleanupScheduler instead: a stale generation_cache row
+# makes it load the Source entity and DELETE from that source's results schema over a
+# connection built from the decrypted credentials. The results row disappearing is the
+# proof. The cache row is only inserted once the credentials are visibly encrypted,
+# because the scheduler starts before ApplicationReadyEvent and would otherwise
+# succeed on the plaintext row.
+#
+# Asserted in plugin-ci.yml by grepping for SMOKE_DECRYPT=ok.
+echo "=== encrypted source credentials decrypt on read (jasypt) ==="
+kill "$HPID" 2>/dev/null
+for _ in $(seq 1 30); do kill -0 "$HPID" 2>/dev/null || break; sleep 1; done
+kill -9 "$HPID" 2>/dev/null || true
+
+PSQL_WEBAPI="su postgres -c"
+$PSQL_WEBAPI "psql -q -d webapi -v ON_ERROR_STOP=1" <<'SQL'
+CREATE SCHEMA IF NOT EXISTS smoke_results AUTHORIZATION ohdsi_app_user;
+CREATE TABLE smoke_results.cohort_cache (design_hash integer);
+CREATE TABLE smoke_results.cohort_inclusion_result_cache (design_hash integer);
+CREATE TABLE smoke_results.cohort_inclusion_stats_cache (design_hash integer);
+CREATE TABLE smoke_results.cohort_summary_stats_cache (design_hash integer);
+CREATE TABLE smoke_results.cohort_censor_stats_cache (design_hash integer);
+ALTER TABLE smoke_results.cohort_cache OWNER TO ohdsi_app_user;
+ALTER TABLE smoke_results.cohort_inclusion_result_cache OWNER TO ohdsi_app_user;
+ALTER TABLE smoke_results.cohort_inclusion_stats_cache OWNER TO ohdsi_app_user;
+ALTER TABLE smoke_results.cohort_summary_stats_cache OWNER TO ohdsi_app_user;
+ALTER TABLE smoke_results.cohort_censor_stats_cache OWNER TO ohdsi_app_user;
+INSERT INTO webapi.source (source_id, source_name, source_key, source_connection, source_dialect, username, password)
+  VALUES (9100, 'smoke-encrypted', 'smoke_enc', 'jdbc:postgresql://localhost:5432/webapi', 'postgresql', 'ohdsi_app_user', 'app1');
+-- daimon_type is the DaimonType ordinal: 2 = Results
+INSERT INTO webapi.source_daimon (source_daimon_id, source_id, daimon_type, table_qualifier, priority)
+  VALUES (9100, 9100, 2, 'smoke_results', 0);
+SQL
+
+export JASYPT_ENCRYPTOR_ENABLED=true
+export JASYPT_ENCRYPTOR_PASSWORD=smokeJasyptPwd1234567890abcdef
+export JASYPT_ENCRYPTOR_ALGORITHM=PBEWITHSHA256AND256BITAES-CBC-BC
+# Surfaces whether Hibernate got the converter from Spring or fell back to its own producer.
+export SPRING_APPLICATION_JSON="${SPRING_APPLICATION_JSON%\}},\"logging.level.org.springframework.orm.hibernate5.SpringBeanContainer\":\"DEBUG\"}"
+
+/app/harness > /tmp/harness-jasypt.log 2>&1 &
+HPID=$!
+decrypt_boot=down
+for _ in $(seq 1 90); do
+  grep -q "WEBAPI_STATUS=running" /tmp/harness-jasypt.log && { decrypt_boot=running; break; }
+  grep -q "WEBAPI_START=error" /tmp/harness-jasypt.log && break
+  kill -0 "$HPID" 2>/dev/null || break
+  sleep 2
+done
+echo "jasypt boot: $decrypt_boot"
+
+encrypted=0
+for _ in $(seq 1 30); do
+  $PSQL_WEBAPI "psql -tA -d webapi -c \"SELECT username LIKE 'ENC(%' FROM webapi.source WHERE source_id = 9100\"" | grep -q t && { encrypted=1; break; }
+  sleep 1
+done
+echo "credentials encrypted at boot: $encrypted"
+
+cleaned=0
+if [ "$decrypt_boot" = running ] && [ "$encrypted" = 1 ]; then
+  $PSQL_WEBAPI "psql -q -d webapi -v ON_ERROR_STOP=1" <<'SQL'
+INSERT INTO smoke_results.cohort_cache (design_hash) VALUES (424242);
+INSERT INTO webapi.generation_cache (type, design_hash, source_id, result_checksum, created_date)
+  VALUES ('COHORT', 424242, 9100, NULL, NOW() - INTERVAL '10 days');
+SQL
+  # cache.generation.cleanupInterval is 3s; allow several passes.
+  for _ in $(seq 1 30); do
+    [ "$($PSQL_WEBAPI "psql -tA -d webapi -c \"SELECT count(*) FROM smoke_results.cohort_cache WHERE design_hash = 424242\"")" = 0 ] \
+      && { cleaned=1; break; }
+    sleep 1
+  done
+fi
+
+if [ "$cleaned" = 1 ]; then
+  echo "SMOKE_DECRYPT=ok"
+else
+  echo "SMOKE_DECRYPT=failed"
+  echo "FAIL: CleanupScheduler could not reach a source with encrypted credentials"
+  grep -E "Cannot remove generation caches|password authentication failed" /tmp/harness-jasypt.log | sort | uniq -c | head -5
+  grep -iE "ENC\(" /var/log/postgresql/*.log 2>/dev/null | tail -3
+fi
+echo "--- SpringBeanContainer (converter resolution) ---"
+grep -E "SpringBeanContainer|EncryptedStringConverter" /tmp/harness-jasypt.log | cut -c1-400 | head -10
+kill "$HPID" 2>/dev/null || true
+
 echo "[smoke] done"
