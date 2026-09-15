@@ -115,7 +115,9 @@ Function plugins register Deno worker-based API endpoints. The full config struc
   the \`pluginAuthz\` middleware.
 - **\`init\`** — Functions executed once at startup (before API routes). Supports \`waitfor\`
   (URL to poll before running), \`waitforEnvVar\` (env var containing URL), and \`delay\`
-  (ms to wait after init completes).
+  (ms to wait after init completes). Set \`afterListen: true\` to instead run the init once
+  the HTTP server is listening (boot does not wait for it) — use this for an init that
+  calls trex's own HTTP API.
 - **\`api\`** — Functions registered as Express routes. Each entry:
   - \`source\` — URL path segment (route is mounted at \`PLUGINS_BASE_PATH + source + "/*"\`)
   - \`function\` — path to the Deno worker script (relative to plugin dir)

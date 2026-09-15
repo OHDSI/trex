@@ -89,8 +89,13 @@ under the registered path.
 | `waitfor` | URL to poll until reachable before running. |
 | `waitforEnvVar` | Name of an env var whose value to use as `waitfor` URL. |
 | `delay` | Milliseconds to wait after the worker exits. |
+| `afterListen` | When `true`, runs the init once the HTTP server is listening instead of during boot. Boot does not wait for it. Use this for an init that has to call trex's own HTTP API — nothing is listening yet during the normal, pre-listen init phase. |
 
-Init workers run sequentially in declaration order.
+Init workers run sequentially in declaration order. `afterListen` inits are a
+separate queue, also run one at a time in registration order, after the server
+starts listening; a plugin registered after boot (e.g. a devx app registered
+via `Plugins.registerFromPath`) with an `afterListen` init runs it immediately
+rather than waiting for a listen event that has already happened.
 
 ## Roles & Scopes
 
