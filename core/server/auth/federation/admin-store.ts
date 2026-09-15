@@ -58,12 +58,24 @@ export async function linkIdentity(client: PgClient, r: LinkRequest): Promise<Li
   await client.query("BEGIN");
   try {
     let result: LinkResult;
+    // Two advisory locks close the races READ COMMITTED leaves open between the
+    // check and the insert, since `account` has no unique index on
+    // ("userId","providerId") to serialize on:
+    //   - the (providerId, accountId) lock: two concurrent calls for the same
+    //     upstream account must not both fall through findLinkedUser's "no
+    //     existing link" branch and each provision/attach their own user.
+    //   - the row lock on the matched trexdb."user" row (FOR UPDATE below):
+    //     two concurrent calls for the *same* accountId but different emails
+    //     that resolve to different users must not both pass the "other
+    //     account at this provider" check before either has inserted — one has
+    //     to wait, see the other's account row, and get the 409.
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`${r.providerId}:${r.accountId}`]);
     const existing = await findLinkedUser(client, r.providerId, r.accountId);
     if (existing) {
       result = { userId: existing.userId, outcome: "already_linked" };
     } else {
       const byEmail = await client.query(
-        `SELECT id FROM trexdb."user" WHERE lower(email) = lower($1) AND "deletedAt" IS NULL LIMIT 1`,
+        `SELECT id FROM trexdb."user" WHERE lower(email) = lower($1) AND "deletedAt" IS NULL LIMIT 1 FOR UPDATE`,
         [r.email],
       );
       let userId: string;

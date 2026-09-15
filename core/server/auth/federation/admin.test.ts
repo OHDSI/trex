@@ -105,6 +105,27 @@ Deno.test("linkIdentity refuses an unknown provider", async () => {
   assertEquals(await linkIdentity(c, link), { unknownProvider: true });
 });
 
+Deno.test("linkIdentity takes the advisory lock right after BEGIN, before the link check", async () => {
+  const c = fakeClient([
+    ["FROM trexdb.sso_provider", [{ id: "logto" }]],
+    ["FROM trexdb.account a", [{ userId: "u1", disabled: false }]],
+  ]);
+  await linkIdentity(c, link);
+  const beginIdx = c.ran.indexOf("BEGIN");
+  const lockIdx = c.ran.findIndex((s) => s.startsWith("SELECT pg_advisory_xact_lock"));
+  const linkCheckIdx = c.ran.findIndex((s) => s.includes("FROM trexdb.account a"));
+  assertEquals(beginIdx !== -1 && lockIdx === beginIdx + 1 && linkCheckIdx > lockIdx, true);
+});
+
+Deno.test("linkIdentity locks the matched email row so a concurrent link on the same email serializes", async () => {
+  const c = fakeClient([
+    ["FROM trexdb.sso_provider", [{ id: "logto" }]],
+    ["lower(email) = lower($1)", [{ id: "u2" }]],
+  ]);
+  await linkIdentity(c, link);
+  assertEquals(c.ran.some((s) => s.includes('lower(email) = lower($1)') && s.includes("FOR UPDATE")), true);
+});
+
 Deno.test("upsertProvider writes every federation column in one statement", async () => {
   const c = fakeClient([]);
   await upsertProvider(c, parseProviderUpsert("logto", validProvider)!);
