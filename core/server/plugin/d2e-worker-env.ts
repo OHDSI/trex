@@ -21,6 +21,13 @@ export interface D2eWorkerEnvDeps {
   // attacker-reachable at runtime). Trusted @trex/@ohdsi plugins and agent
   // workers never get it either way, regardless of this flag, because their
   // package name is never in scope.
+  //
+  // Fails closed: only an explicit `false` counts as boot-scanned. `true`
+  // AND a missing/undefined value both deny the key — a caller that forgets
+  // to pass this (as memory/gbrain-worker/mount.ts's _addFunction call once
+  // did, an 8-argument call against a 9-argument signature that a plain
+  // `deno test --no-check` run doesn't type-check) must not silently fall
+  // back to the trusted branch.
   runtimeRegistered?: boolean;
 }
 
@@ -35,7 +42,9 @@ export async function d2eWorkerEnv(deps: D2eWorkerEnvDeps): Promise<Record<strin
 
   // The live DB registry, as d2e fed its services DATABASE_CREDENTIALS.
   out.DATABASE_CREDENTIALS = deps.databaseCredentialsJson();
-  if (deps.runtimeRegistered || !deps.pluginName?.startsWith(D2E_SCOPE_PREFIX)) return out;
+  // deps.runtimeRegistered !== false (i.e. true OR undefined) denies the key —
+  // see the deny-by-default note on the field above.
+  if (deps.runtimeRegistered !== false || !deps.pluginName?.startsWith(D2E_SCOPE_PREFIX)) return out;
 
   // d2e functions call trex's admin APIs (roles, federation) with this key.
   // Edge functions already receive it; plugin workers did not, which left

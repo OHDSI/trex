@@ -64,3 +64,22 @@ Deno.test("a boot-scanned @data2evidence/ plugin still gets the service-role key
     { DATABASE_CREDENTIALS: "[]", SUPABASE_SERVICE_ROLE_KEY: "srk" },
   );
 });
+
+// Fails closed: a caller that forgets to pass runtimeRegistered at all (the
+// TypeScript arity error at memory/gbrain-worker/mount.ts's old 8-argument
+// _addFunction call, invisible under `deno test --no-check`) must not fall
+// back to the trusted boot-scanned branch. Only an explicit `false` grants
+// the key — built directly, bypassing the deps() helper's own default, so
+// this exercises a truly absent field rather than an explicit false.
+Deno.test("an @data2evidence/ plugin with runtimeRegistered left undefined does not get the service-role key", async () => {
+  assertEquals(
+    await d2eWorkerEnv({
+      get: (k: string) => ({ D2E_COMPAT: "true" } as Record<string, string>)[k],
+      databaseCredentialsJson: () => "[]",
+      serviceRoleKey: () => Promise.resolve("srk"),
+      pluginName: "@data2evidence/d2e-functions",
+      // runtimeRegistered intentionally omitted.
+    }),
+    { DATABASE_CREDENTIALS: "[]" },
+  );
+});
