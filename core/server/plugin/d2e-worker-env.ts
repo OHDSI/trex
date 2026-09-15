@@ -6,11 +6,22 @@ export interface D2eWorkerEnvDeps {
   databaseCredentialsJson: () => string;
   serviceRoleKey: () => Promise<string | undefined>;
   // The plugin's package name (e.g. "@data2evidence/d2e-functions"), as
-  // addPlugin/_addFunction know it. Only d2e's own function plugins — the
-  // "@data2evidence/" scope — get the service-role key; trusted @trex/@ohdsi
-  // plugins, agent workers, and devx registerFromPath plugins do not, even
-  // in a D2E_COMPAT process.
+  // addPlugin/_addFunction know it.
   pluginName?: string;
+  // True when this plugin was registered through Plugins.registerFromPath —
+  // the devx/runtime registration path (a live HTTP call, or the re-register
+  // of a devx.apps row at boot) — rather than found by the boot-time
+  // directory scan of PLUGINS_DEV_PATH/PLUGINS_PATH. A runtime-registered
+  // plugin's package.json is not something trex vetted: a devx app can name
+  // itself "@data2evidence/anything" and, without this flag, would receive a
+  // 100-year service_role JWT able to call /admin/federation — account
+  // takeover. So the key goes ONLY to a plugin from the boot-time scan whose
+  // package name is in the "@data2evidence/" scope; PLUGINS_DEV_PATH counts
+  // as boot-scanned here (it is an operator-controlled mount, not
+  // attacker-reachable at runtime). Trusted @trex/@ohdsi plugins and agent
+  // workers never get it either way, regardless of this flag, because their
+  // package name is never in scope.
+  runtimeRegistered?: boolean;
 }
 
 const D2E_SCOPE_PREFIX = "@data2evidence/";
@@ -24,7 +35,7 @@ export async function d2eWorkerEnv(deps: D2eWorkerEnvDeps): Promise<Record<strin
 
   // The live DB registry, as d2e fed its services DATABASE_CREDENTIALS.
   out.DATABASE_CREDENTIALS = deps.databaseCredentialsJson();
-  if (!deps.pluginName?.startsWith(D2E_SCOPE_PREFIX)) return out;
+  if (deps.runtimeRegistered || !deps.pluginName?.startsWith(D2E_SCOPE_PREFIX)) return out;
 
   // d2e functions call trex's admin APIs (roles, federation) with this key.
   // Edge functions already receive it; plugin workers did not, which left

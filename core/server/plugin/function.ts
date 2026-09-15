@@ -291,6 +291,7 @@ async function _callWorker(
   dir: string,
   xenv: any,
   pluginName?: string,
+  runtimeRegistered?: boolean,
   signal?: AbortSignal
 ): Promise<globalThis.Response> {
   const myenv = Object.assign(
@@ -304,6 +305,7 @@ async function _callWorker(
         databaseCredentialsJson: cachedDatabaseCredentialsJson,
         serviceRoleKey: async () => (await ensureAuthKeys()).serviceRoleKey,
         pluginName,
+        runtimeRegistered,
       })),
     },
   );
@@ -423,7 +425,8 @@ async function _callInit(
   eszip: string | null,
   dir: string,
   fncfg: any = {},
-  pluginName?: string
+  pluginName?: string,
+  runtimeRegistered?: boolean
 ) {
   const myenv = Object.assign(
     {},
@@ -436,6 +439,7 @@ async function _callInit(
         databaseCredentialsJson: cachedDatabaseCredentialsJson,
         serviceRoleKey: async () => (await ensureAuthKeys()).serviceRoleKey,
         pluginName,
+        runtimeRegistered,
       })),
     },
   );
@@ -549,7 +553,8 @@ export function _addFunction(
   fncfg: any,
   dir: string,
   name: string,
-  xenv: any
+  xenv: any,
+  runtimeRegistered: boolean
 ) {
   REGISTERED_FUNCTIONS.push({ name, source: url, function: fncfg.function });
 
@@ -568,7 +573,7 @@ export function _addFunction(
     : name;
   const handler = (req: globalThis.Request) => {
     const c = cur();
-    return _callWorker(req, c.servicePath, c.importMapPath, fncfg, dir, c.xenv, name);
+    return _callWorker(req, c.servicePath, c.importMapPath, fncfg, dir, c.xenv, name, runtimeRegistered);
   };
   fnmap[`${name}${fncfg.function}`] = handler;
   fnmap[`${shortName}${fncfg.function}`] = handler;
@@ -676,7 +681,7 @@ export function _addFunction(
       });
 
       const c = cur();
-      const workerResponse = await _callWorker(webReq, c.servicePath, c.importMapPath, fncfg, dir, c.xenv, name, controller.signal);
+      const workerResponse = await _callWorker(webReq, c.servicePath, c.importMapPath, fncfg, dir, c.xenv, name, runtimeRegistered, controller.signal);
 
       res.status(workerResponse.status);
       workerResponse.headers.forEach((value: string, key: string) => {
@@ -725,7 +730,8 @@ export async function addPlugin(
   app: Express,
   value: any,
   dir: string,
-  name: string
+  name: string,
+  runtimeRegistered: boolean
 ) {
   const xenv = substituteEnvVarsInObject(value.env || {});
 
@@ -750,7 +756,8 @@ export async function addPlugin(
             r.eszip || null,
             dir,
             r,
-            name
+            name,
+            runtimeRegistered
           );
 
           if (r.delay) {
@@ -792,7 +799,8 @@ export async function addPlugin(
           r,
           dir,
           name,
-          xenv
+          xenv,
+          runtimeRegistered
         );
       }
     }

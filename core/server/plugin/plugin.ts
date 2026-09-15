@@ -128,7 +128,15 @@ export class Plugins {
     pkg: any,
     shortName: string,
     fullName: string,
-    source: "dev" | "npm"
+    source: "dev" | "npm",
+    // True when this call came from registerFromPath (a live devx registration,
+    // or the boot-time re-register of a devx.apps row) rather than the
+    // boot-time directory scan of PLUGINS_DEV_PATH/PLUGINS_PATH. `source` alone
+    // can't tell these apart — registerFromPath always passes "dev", the same
+    // value the PLUGINS_DEV_PATH scan uses — so this is a separate, explicit
+    // flag. See d2e-worker-env.ts's runtimeRegistered for why it matters: a
+    // devx app's self-declared package.json name is not something trex vetted.
+    runtimeRegistered: boolean
   ) {
     try {
       if (!pkg.trex || typeof pkg.trex !== "object") {
@@ -164,7 +172,7 @@ export class Plugins {
       for (const [key, value] of sortedEntries) {
         switch (key) {
           case "functions":
-            addFunctionPlugin(app, value, dir, fullName);
+            addFunctionPlugin(app, value, dir, fullName, runtimeRegistered);
             break;
           case "ui":
             addUIPlugin(app, value, dir, fullName);
@@ -250,7 +258,11 @@ export class Plugins {
         `Found plugin ${shortName} (v${pkg.version}) [${source}] in ${pluginDir}`
       );
       const fullName = pkg.name || shortName;
-      await Plugins.addPlugin(app, pluginDir, pkg, shortName, fullName, source);
+      // The boot-time directory scan (this method) is trusted: PLUGINS_DEV_PATH
+      // and PLUGINS_PATH are operator-controlled mounts, not something a devx
+      // user reaches at runtime. runtimeRegistered=false here regardless of
+      // "dev" vs "npm".
+      await Plugins.addPlugin(app, pluginDir, pkg, shortName, fullName, source, false);
       console.log(`Registered plugin ${shortName} [${source}]`);
     }
   }
@@ -433,7 +445,11 @@ export class Plugins {
 
       const fullName = pkg.name || shortName;
       console.log(`Dynamic register: ${shortName} from ${dir}`);
-      await Plugins.addPlugin(app, dir, pkg, shortName, fullName, "dev");
+      // Runtime registration (an HTTP call, or index.ts re-registering a
+      // devx.apps row at boot) — never the trusted boot-time scan. The
+      // plugin's package.json name is self-declared and unvetted, so it must
+      // not be trusted for the service-role key grant (see d2e-worker-env.ts).
+      await Plugins.addPlugin(app, dir, pkg, shortName, fullName, "dev", true);
       console.log(`Registered dynamic plugin ${shortName}`);
       return { ok: true, name: shortName };
     } catch (e) {
