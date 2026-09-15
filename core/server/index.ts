@@ -1417,6 +1417,11 @@ try {
     // drop it so the ensureAuthKeys() call below re-reads the empty rows and
     // regenerates fresh keys instead of returning the stale cache.
     invalidateAuthKeysCache();
+    // This only fixes the cache going forward: any ordinary (non-afterListen)
+    // init worker that already ran earlier in this same boot was handed the
+    // now-purged key in its env and still holds it in memory. Only an
+    // afterListen init (deferred-init.ts), which runs after this point, sees
+    // the fresh one.
   }
 } catch (err) {
   console.error("[boot] failed to reconcile stored JWT secret; continuing anyway:", err);
