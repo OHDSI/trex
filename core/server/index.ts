@@ -38,6 +38,7 @@ import { collectProvisionTargets, runProvisionTargets } from "./plugin/provision
 import { collectNavEntries, mergeNav } from "./plugin/nav.ts";
 import { startNativeWebApi } from "./webapi-native.ts";
 import { handleRealtimeUpgrade, mountRealtime, startRealtimeService, stopRealtimeService } from "./realtime/index.ts";
+import { runDeferredInits } from "./plugin/deferred-init.ts";
 
 console.log("main function started");
 console.log(Deno.version);
@@ -1482,6 +1483,9 @@ await runD2eBoot();
 
 server.listen(8000, () => {
   console.log("server listening on port 8000");
+
+  // Init functions that call trex's own HTTP API (see plugin/deferred-init.ts).
+  runDeferredInits().catch((e) => console.error("[plugins] deferred inits failed:", e));
 
   // The embedded WebAPI is part of the base image, not of d2e compatibility, so
   // it starts regardless of D2E_COMPAT (see WEBAPI_NATIVE_ENABLED). Starting it

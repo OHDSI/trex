@@ -10,6 +10,7 @@ import { apiLimiter } from "../middleware/rate-limit.ts";
 import { buildDatabaseCredentials, getRegistrationEpoch } from "../d2e-compat/dbm-sync.ts";
 import { d2eWorkerEnv } from "./d2e-worker-env.ts";
 import { ensureAuthKeys } from "../auth/api-keys.ts";
+import { deferInit } from "./deferred-init.ts";
 
 // eszip bundles are immutable on disk for the life of the process, so read each
 // one once and cache the bytes in memory — re-reading the (brotli-compressed)
@@ -731,30 +732,38 @@ export async function addPlugin(
   if (value.init) {
     for (const r of value.init) {
       if (r.function) {
-        console.log(`add init fn @ ${dir}${r.function}`);
-        const waitforUrl = r.waitfor ??
-          (r.waitforEnvVar ? Deno.env.get(r.waitforEnvVar) ?? "" : "");
-        if (waitforUrl) await waitfor(waitforUrl);
+        const runInit = async () => {
+          console.log(`add init fn @ ${dir}${r.function}`);
+          const waitforUrl = r.waitfor ??
+            (r.waitforEnvVar ? Deno.env.get(r.waitforEnvVar) ?? "" : "");
+          if (waitforUrl) await waitfor(waitforUrl);
 
-        await _callInit(
-          `${dir}${r.function}`,
-          r.imports
-            ? r.imports.indexOf(":") < 0
-              ? `${dir}${r.imports}`
-              : r.imports
-            : null,
-          r.env,
-          xenv,
-          r.eszip || null,
-          dir,
-          r,
-          name
-        );
+          await _callInit(
+            `${dir}${r.function}`,
+            r.imports
+              ? r.imports.indexOf(":") < 0
+                ? `${dir}${r.imports}`
+                : r.imports
+              : null,
+            r.env,
+            xenv,
+            r.eszip || null,
+            dir,
+            r,
+            name
+          );
 
-        if (r.delay) {
-          await new Promise((resolve) => setTimeout(resolve, r.delay));
+          if (r.delay) {
+            await new Promise((resolve) => setTimeout(resolve, r.delay));
+          }
+          console.log(`add init fn done @ ${dir}${r.function}`);
+        };
+        if (r.afterListen === true) {
+          console.log(`deferred init fn until listening @ ${dir}${r.function}`);
+          deferInit(`${dir}${r.function}`, runInit);
+        } else {
+          await runInit();
         }
-        console.log(`add init fn done @ ${dir}${r.function}`);
       }
     }
   }
