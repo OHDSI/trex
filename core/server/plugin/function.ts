@@ -8,6 +8,8 @@ import { buildWorkerHeaders } from "./worker-headers.ts";
 import { PLUGINS_BASE_PATH } from "../config.ts";
 import { apiLimiter } from "../middleware/rate-limit.ts";
 import { buildDatabaseCredentials, getRegistrationEpoch } from "../d2e-compat/dbm-sync.ts";
+import { d2eWorkerEnv } from "./d2e-worker-env.ts";
+import { ensureAuthKeys } from "../auth/api-keys.ts";
 
 // eszip bundles are immutable on disk for the life of the process, so read each
 // one once and cache the bytes in memory — re-reading the (brotli-compressed)
@@ -295,20 +297,11 @@ async function _callWorker(
     fncfg.env in xenv ? xenv[fncfg.env] : {},
     {
       TREX_FUNCTION_PATH: dir,
-      // d2e functions build their `services` object from SERVICE_ROUTES; pass it
-      // through to the worker (the d2e fork did the same). Added only when set so
-      // @trex-only deployments are unaffected.
-      ...(Deno.env.get("SERVICE_ROUTES")
-        ? { SERVICE_ROUTES: Deno.env.get("SERVICE_ROUTES") as string }
-        : {}),
-      // Under d2e, provide the live DB registry to function workers the way d2e
-      // fed its services DATABASE_CREDENTIALS. The engine only PROVIDES the data
-      // (from Trex.DatabaseManager); the DATABASE_CREDENTIALS → VCAP_SERVICES
-      // mapping stays in the plugin's own envConverter. Already a JSON string
-      // (epoch-cached), so the _myenv builder passes it through unchanged.
-      ...(Deno.env.get("D2E_COMPAT") === "true"
-        ? { DATABASE_CREDENTIALS: cachedDatabaseCredentialsJson() }
-        : {}),
+      ...(await d2eWorkerEnv({
+        get: (k) => Deno.env.get(k),
+        databaseCredentialsJson: cachedDatabaseCredentialsJson,
+        serviceRoleKey: async () => (await ensureAuthKeys()).serviceRoleKey,
+      })),
     },
   );
   const _myenv = Object.keys(myenv).map((k) => [
@@ -434,20 +427,11 @@ async function _callInit(
     fnEnv in xenv ? xenv[fnEnv] : {},
     {
       TREX_FUNCTION_PATH: dir,
-      // d2e functions build their `services` object from SERVICE_ROUTES; pass it
-      // through to the worker (the d2e fork did the same). Added only when set so
-      // @trex-only deployments are unaffected.
-      ...(Deno.env.get("SERVICE_ROUTES")
-        ? { SERVICE_ROUTES: Deno.env.get("SERVICE_ROUTES") as string }
-        : {}),
-      // Under d2e, provide the live DB registry to function workers the way d2e
-      // fed its services DATABASE_CREDENTIALS. The engine only PROVIDES the data
-      // (from Trex.DatabaseManager); the DATABASE_CREDENTIALS → VCAP_SERVICES
-      // mapping stays in the plugin's own envConverter. Already a JSON string
-      // (epoch-cached), so the _myenv builder passes it through unchanged.
-      ...(Deno.env.get("D2E_COMPAT") === "true"
-        ? { DATABASE_CREDENTIALS: cachedDatabaseCredentialsJson() }
-        : {}),
+      ...(await d2eWorkerEnv({
+        get: (k) => Deno.env.get(k),
+        databaseCredentialsJson: cachedDatabaseCredentialsJson,
+        serviceRoleKey: async () => (await ensureAuthKeys()).serviceRoleKey,
+      })),
     },
   );
   const _myenv = Object.keys(myenv).map((k) => [
