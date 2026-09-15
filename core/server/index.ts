@@ -7,7 +7,7 @@ import cors from "cors";
 import { BASE_PATH } from "./config.ts";
 import { pool } from "./db.ts";
 import { authRouter } from "./auth/auth-router.ts";
-import { ensureAuthKeys } from "./auth/api-keys.ts";
+import { ensureAuthKeys, invalidateAuthKeysCache } from "./auth/api-keys.ts";
 import {
   ensureSbKeys,
   resolveApiCredential,
@@ -1411,6 +1411,11 @@ try {
     await pool.query(
       "DELETE FROM trexdb.setting WHERE key IN ('auth.anonKey', 'auth.serviceRoleKey', 'auth.jwtSecret')",
     );
+    // Plugin init (initPlugins, above) may already have called ensureAuthKeys()
+    // and filled authKeysCache with the now-purged, old-secret-signed values;
+    // drop it so the ensureAuthKeys() call below re-reads the empty rows and
+    // regenerates fresh keys instead of returning the stale cache.
+    invalidateAuthKeysCache();
   }
 } catch (err) {
   console.error("[boot] failed to reconcile stored JWT secret; continuing anyway:", err);

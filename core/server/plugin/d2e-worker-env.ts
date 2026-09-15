@@ -5,7 +5,15 @@ export interface D2eWorkerEnvDeps {
   get: (key: string) => string | undefined;
   databaseCredentialsJson: () => string;
   serviceRoleKey: () => Promise<string | undefined>;
+  // The plugin's package name (e.g. "@data2evidence/d2e-functions"), as
+  // addPlugin/_addFunction know it. Only d2e's own function plugins — the
+  // "@data2evidence/" scope — get the service-role key; trusted @trex/@ohdsi
+  // plugins, agent workers, and devx registerFromPath plugins do not, even
+  // in a D2E_COMPAT process.
+  pluginName?: string;
 }
+
+const D2E_SCOPE_PREFIX = "@data2evidence/";
 
 export async function d2eWorkerEnv(deps: D2eWorkerEnvDeps): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
@@ -16,6 +24,8 @@ export async function d2eWorkerEnv(deps: D2eWorkerEnvDeps): Promise<Record<strin
 
   // The live DB registry, as d2e fed its services DATABASE_CREDENTIALS.
   out.DATABASE_CREDENTIALS = deps.databaseCredentialsJson();
+  if (!deps.pluginName?.startsWith(D2E_SCOPE_PREFIX)) return out;
+
   // d2e functions call trex's admin APIs (roles, federation) with this key.
   // Edge functions already receive it; plugin workers did not, which left
   // deployments without a way to hand it over (Helm) unable to write roles.

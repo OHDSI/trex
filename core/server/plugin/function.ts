@@ -289,6 +289,7 @@ async function _callWorker(
   fncfg: any,
   dir: string,
   xenv: any,
+  pluginName?: string,
   signal?: AbortSignal
 ): Promise<globalThis.Response> {
   const myenv = Object.assign(
@@ -301,6 +302,7 @@ async function _callWorker(
         get: (k) => Deno.env.get(k),
         databaseCredentialsJson: cachedDatabaseCredentialsJson,
         serviceRoleKey: async () => (await ensureAuthKeys()).serviceRoleKey,
+        pluginName,
       })),
     },
   );
@@ -419,7 +421,8 @@ async function _callInit(
   xenv: any,
   eszip: string | null,
   dir: string,
-  fncfg: any = {}
+  fncfg: any = {},
+  pluginName?: string
 ) {
   const myenv = Object.assign(
     {},
@@ -431,6 +434,7 @@ async function _callInit(
         get: (k) => Deno.env.get(k),
         databaseCredentialsJson: cachedDatabaseCredentialsJson,
         serviceRoleKey: async () => (await ensureAuthKeys()).serviceRoleKey,
+        pluginName,
       })),
     },
   );
@@ -563,7 +567,7 @@ export function _addFunction(
     : name;
   const handler = (req: globalThis.Request) => {
     const c = cur();
-    return _callWorker(req, c.servicePath, c.importMapPath, fncfg, dir, c.xenv);
+    return _callWorker(req, c.servicePath, c.importMapPath, fncfg, dir, c.xenv, name);
   };
   fnmap[`${name}${fncfg.function}`] = handler;
   fnmap[`${shortName}${fncfg.function}`] = handler;
@@ -671,7 +675,7 @@ export function _addFunction(
       });
 
       const c = cur();
-      const workerResponse = await _callWorker(webReq, c.servicePath, c.importMapPath, fncfg, dir, c.xenv, controller.signal);
+      const workerResponse = await _callWorker(webReq, c.servicePath, c.importMapPath, fncfg, dir, c.xenv, name, controller.signal);
 
       res.status(workerResponse.status);
       workerResponse.headers.forEach((value: string, key: string) => {
@@ -743,7 +747,8 @@ export async function addPlugin(
           xenv,
           r.eszip || null,
           dir,
-          r
+          r,
+          name
         );
 
         if (r.delay) {
