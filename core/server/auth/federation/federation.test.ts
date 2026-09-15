@@ -424,6 +424,7 @@ Deno.test("an algorithm the provider does not advertise is rejected", async () =
 const provider = (over: Partial<ProviderConfig> = {}): ProviderConfig => ({
   id: "logto", displayName: "Logto", clientId: "c", clientSecret: "s",
   issuer: "https://logto.test/oidc", discoveryUrl: "https://logto.test/d",
+  authorizationEndpoint: null,
   scopes: "openid profile email", claimMap: {}, groupsSource: "none",
   groupsClaim: null, linkPolicy: "verified_email", autoProvision: false,
   emailDomainAllowlist: null, allowElevatedAutoLink: false, ...over,
