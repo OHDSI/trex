@@ -24,6 +24,7 @@ import {
   consumeState,
   isSecureRequest,
   readBindingCookie,
+  refusalRedirect,
   safeRedirectTo,
   warnIfInsecureBinding,
 } from "./request.ts";
@@ -1212,4 +1213,26 @@ Deno.test("__Host- is used only where the cookie can carry Secure", () => {
   assertEquals(isSecureRequest({ headers: { "x-forwarded-proto": "https, http" } }, ""), true);
   assertEquals(isSecureRequest({ headers: {} }, ""), false);
   assertEquals(isSecureRequest({ headers: {} }, "1"), true);
+});
+
+Deno.test("refusalRedirect sends the browser to the login page with the code and return path", () => {
+  const url = new URL(refusalRedirect("https://d2e.test/d2e-login/", "no_account", "/trex/oidc/authorize?x=1")!);
+  assertEquals(url.origin + url.pathname, "https://d2e.test/d2e-login/");
+  assertEquals(url.searchParams.get("error"), "no_account");
+  assertEquals(url.searchParams.get("return_to"), "/trex/oidc/authorize?x=1");
+});
+
+Deno.test("refusalRedirect keeps a login URL's own query parameters", () => {
+  const url = new URL(refusalRedirect("https://d2e.test/login?theme=dark", "account_disabled", "/")!);
+  assertEquals(url.searchParams.get("theme"), "dark");
+  assertEquals(url.searchParams.get("error"), "account_disabled");
+});
+
+Deno.test("refusalRedirect never forwards an off-site return path", () => {
+  const url = new URL(refusalRedirect("https://d2e.test/d2e-login/", "no_account", "//evil.test/")!);
+  assertEquals(url.searchParams.get("return_to"), "/");
+});
+
+Deno.test("refusalRedirect is null without a login URL, so callers keep the JSON response", () => {
+  assertEquals(refusalRedirect(null, "no_account", "/"), null);
 });

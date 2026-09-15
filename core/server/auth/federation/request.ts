@@ -222,3 +222,17 @@ export function warnIfInsecureBinding(
 export function _resetInsecureBindingWarning(): void {
   warnedInsecureBinding = false;
 }
+
+/**
+ * Where a refused federated sign-in sends the browser: back to the deployment's
+ * login page, which can explain the refusal, instead of a bare JSON body. The
+ * code is one of trex's fixed refusal strings; the return path goes through
+ * safeRedirectTo so the login page cannot be used to leave the origin.
+ */
+export function refusalRedirect(login: string | null, code: string, redirectTo: string): string | null {
+  if (!login) return null;
+  const url = new URL(login);
+  url.searchParams.set("error", code);
+  url.searchParams.set("return_to", safeRedirectTo(redirectTo));
+  return url.toString();
+}
