@@ -58,12 +58,13 @@ export async function linkIdentity(client: PgClient, r: LinkRequest): Promise<Li
   await client.query("BEGIN");
   try {
     let result: LinkResult;
-    // Two advisory locks close the races READ COMMITTED leaves open between the
-    // check and the insert, since `account` has no unique index on
-    // ("userId","providerId") to serialize on:
-    //   - the (providerId, accountId) lock: two concurrent calls for the same
-    //     upstream account must not both fall through findLinkedUser's "no
-    //     existing link" branch and each provision/attach their own user.
+    // An advisory lock and a row lock close the races READ COMMITTED leaves
+    // open between the check and the insert, since `account` has no unique
+    // index on ("userId","providerId") to serialize on:
+    //   - the (providerId, accountId) advisory lock: two concurrent calls for
+    //     the same upstream account must not both fall through
+    //     findLinkedUser's "no existing link" branch and each provision/attach
+    //     their own user.
     //   - the row lock on the matched trexdb."user" row (FOR UPDATE below):
     //     two concurrent calls for the *same* accountId but different emails
     //     that resolve to different users must not both pass the "other
@@ -87,7 +88,8 @@ export async function linkIdentity(client: PgClient, r: LinkRequest): Promise<Li
           [userId, r.providerId],
         );
         if (other.rows[0] && other.rows[0].accountId !== r.accountId) {
-          await client.query("ROLLBACK");
+          // A rollback that itself fails must not replace this outcome.
+          await client.query("ROLLBACK").catch(() => {});
           return { conflict: true, userId };
         }
         outcome = "linked";
@@ -106,7 +108,8 @@ export async function linkIdentity(client: PgClient, r: LinkRequest): Promise<Li
     await client.query("COMMIT");
     return result;
   } catch (err) {
-    await client.query("ROLLBACK");
+    // A rollback that itself fails must not replace the real error.
+    await client.query("ROLLBACK").catch(() => {});
     throw err;
   }
 }

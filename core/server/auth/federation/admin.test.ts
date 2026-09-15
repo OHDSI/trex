@@ -100,6 +100,41 @@ Deno.test("linkIdentity bans the linked user when asked", async () => {
   assertEquals(c.ran.some((s) => s.startsWith('UPDATE trexdb."user" SET banned = true')), true);
 });
 
+// M-T3: a rollback that itself fails must not replace the real error — same
+// rule router.ts's /callback already follows (`.catch(() => {})` around its
+// ROLLBACK). Without the guard, linkIdentity would throw "rollback also
+// failed" instead of the actual write failure that triggered the rollback.
+Deno.test("linkIdentity surfaces the original error even when its ROLLBACK also fails", async () => {
+  const c = {
+    ran: [] as string[],
+    query(sql: string, _params?: unknown[]) {
+      const trimmed = sql.replace(/\s+/g, " ").trim();
+      c.ran.push(trimmed);
+      if (trimmed.includes("FROM trexdb.sso_provider")) {
+        return Promise.resolve({ rows: [{ id: "logto" }], rowCount: 1 });
+      }
+      if (trimmed.includes("FROM trexdb.account a")) {
+        return Promise.resolve({ rows: [{ userId: "u1", disabled: false }], rowCount: 1 });
+      }
+      if (trimmed.startsWith('UPDATE trexdb."user" SET banned')) {
+        return Promise.reject(new Error("banned update failed"));
+      }
+      if (trimmed === "ROLLBACK") {
+        return Promise.reject(new Error("rollback also failed"));
+      }
+      return Promise.resolve({ rows: [], rowCount: 0 });
+    },
+  };
+  let caught: unknown;
+  try {
+    await linkIdentity(c, { ...link, banned: true });
+  } catch (err) {
+    caught = err;
+  }
+  assertEquals((caught as Error)?.message, "banned update failed");
+  assertEquals(c.ran.at(-1), "ROLLBACK");
+});
+
 Deno.test("linkIdentity refuses an unknown provider", async () => {
   const c = fakeClient([]);
   assertEquals(await linkIdentity(c, link), { unknownProvider: true });
