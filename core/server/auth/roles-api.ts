@@ -8,31 +8,13 @@
 import { Router } from "express";
 import express from "express";
 import { pool } from "../db.ts";
-import { verifyAccessToken } from "./jwt.ts";
 import { apiLimiter } from "../middleware/rate-limit.ts";
+import { requireAdmin } from "./require-admin.ts";
 import { parseRoleAssignment } from "./roles-policy.ts";
 
 export { parseRoleAssignment };
 
 export const rolesRouter = Router();
-
-async function requireAdmin(req: express.Request, res: express.Response): Promise<boolean> {
-  const header = req.headers.authorization;
-  if (!header?.startsWith("Bearer ")) {
-    res.status(401).json({ error: "not_authenticated" });
-    return false;
-  }
-  const claims = await verifyAccessToken(header.slice(7));
-  if (!claims) {
-    res.status(401).json({ error: "not_authenticated" });
-    return false;
-  }
-  if (claims.app_metadata?.trex_role !== "admin" && claims.role !== "service_role") {
-    res.status(403).json({ error: "forbidden", error_description: "Admin access required" });
-    return false;
-  }
-  return true;
-}
 
 rolesRouter.post("/assign", apiLimiter, express.json(), async (req, res) => {
   if (!(await requireAdmin(req, res))) return;

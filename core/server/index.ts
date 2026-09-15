@@ -25,6 +25,7 @@ import { functionsRouter } from "./routes/functions.ts";
 import { cliLoginRouter } from "./routes/cli-login.ts";
 import { nativeIdpEnabled } from "./auth/native-idp.ts";
 import { rolesRouter } from "./auth/roles-api.ts";
+import { federationAdminRouter } from "./auth/federation/admin-api.ts";
 import { oidcProviderEnabled, registerOidcRoutes } from "./auth/oidc/router.ts";
 import { seedClientFromEnv } from "./auth/oidc/seed.ts";
 import { registerFederationRoutes } from "./auth/federation/router.ts";
@@ -194,6 +195,11 @@ if (nativeIdpEnabled()) {
 // the caller's own token, not part of the login surface the native IdP switch
 // turns off.
 app.use(`${BASE_PATH}/admin/roles`, rolesRouter);
+
+// Federation administration: provider registration and identity pre-linking.
+// Always mounted and admin-guarded, like the roles API above; it configures
+// federation rather than exposing a login surface.
+app.use(`${BASE_PATH}/admin/federation`, federationAdminRouter);
 
 // OIDC provider. Separate switch from the native IdP: a deployment may want the
 // protocol surface for its relying parties without exposing email/password
