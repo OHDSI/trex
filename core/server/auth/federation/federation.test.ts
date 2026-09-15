@@ -1,7 +1,7 @@
 import { assertEquals, assertNotEquals, assertRejects, assertStringIncludes, assertThrows } from "jsr:@std/assert";
 import { _resetDekCache, _setDekForTests, decryptWithDek } from "../dek.ts";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "npm:jose";
-import { applyClaimMap, federationEnabled } from "./config.ts";
+import { applyClaimMap, authorizationEndpointFor, federationEnabled } from "./config.ts";
 import { hashBinding, signState, stateKeys, verifyState } from "./state.ts";
 import { challengeFor, createVerifier } from "./pkce.ts";
 import { clearDiscoveryCache, loadDiscovery } from "./discovery.ts";
@@ -1140,6 +1140,48 @@ Deno.test("only the name this request's scheme mandates is read", () => {
   assertEquals(readBindingCookie("trex_federation=plain", true), null);
   assertEquals(readBindingCookie("__Host-trex_federation=prefixed", false), null);
   assertEquals(readBindingCookie(undefined, true), null);
+});
+
+Deno.test("authorizationEndpointFor uses discovery when no override is set", () => {
+  assertEquals(
+    authorizationEndpointFor({ authorizationEndpoint: null }, {
+      authorization_endpoint: "https://idp.internal:3001/oidc/auth",
+    }),
+    "https://idp.internal:3001/oidc/auth",
+  );
+});
+
+Deno.test("authorizationEndpointFor prefers the configured browser-facing URL", () => {
+  assertEquals(
+    authorizationEndpointFor({ authorizationEndpoint: "https://d2e.example/oidc/auth" }, {
+      authorization_endpoint: "https://idp.internal:3001/oidc/auth",
+    }),
+    "https://d2e.example/oidc/auth",
+  );
+});
+
+Deno.test("authorizationEndpointFor ignores a blank override", () => {
+  assertEquals(
+    authorizationEndpointFor({ authorizationEndpoint: "   " }, {
+      authorization_endpoint: "https://idp.internal:3001/oidc/auth",
+    }),
+    "https://idp.internal:3001/oidc/auth",
+  );
+});
+
+Deno.test("loadProviders maps authorization_endpoint, absent meaning null", async () => {
+  const row = (over: Record<string, unknown>) => ({
+    id: "logto", displayName: "Logto", clientId: "c", clientSecret: "s",
+    issuer: "https://logto.test/oidc", discovery_url: null,
+    scopes: "openid profile email", claim_map: {}, groups_source: "none",
+    groups_claim: null, link_policy: "verified_email", auto_provision: false, ...over,
+  });
+  const load = async (over: Record<string, unknown>) =>
+    (await loadProviders({ query: () => Promise.resolve({ rows: [row(over)] }) })).get("logto")!;
+
+  assertEquals((await load({ authorization_endpoint: "https://d2e.test/oidc/auth" })).authorizationEndpoint,
+    "https://d2e.test/oidc/auth");
+  assertEquals((await load({})).authorizationEndpoint, null);
 });
 
 Deno.test("the weak cookie name is announced once, not per request", () => {

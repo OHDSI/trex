@@ -11,7 +11,7 @@ import { Router } from "express";
 import { authLimiter } from "../../middleware/rate-limit.ts";
 import { createTokenResponse } from "../auth-router.ts";
 import { IDP_METADATA_KEY } from "../oidc/claims.ts";
-import { applyClaimMap, federationEnabled } from "./config.ts";
+import { applyClaimMap, authorizationEndpointFor, federationEnabled } from "./config.ts";
 import { loadDiscovery } from "./discovery.ts";
 import { resolveGroups } from "./groups.ts";
 import { challengeFor, createVerifier } from "./pkce.ts";
@@ -91,7 +91,7 @@ export function registerFederationRoutes(
         exp: Math.floor(Date.now() / 1000) + STATE_TTL_SECONDS,
       }, await stateKeys());
 
-      const url = new URL(doc.authorization_endpoint);
+      const url = new URL(authorizationEndpointFor(provider, doc));
       url.searchParams.set("response_type", "code");
       url.searchParams.set("client_id", provider.clientId);
       url.searchParams.set("redirect_uri", callbackUri(req, basePath));
