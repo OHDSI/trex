@@ -8,7 +8,7 @@
 import { Router } from "express";
 import express from "express";
 import { pool } from "../db.ts";
-import { apiLimiter } from "../middleware/rate-limit.ts";
+import { adminLimiter } from "../middleware/rate-limit.ts";
 import { requireAdmin } from "./require-admin.ts";
 import { parseRoleAssignment } from "./roles-policy.ts";
 
@@ -16,7 +16,7 @@ export { parseRoleAssignment };
 
 export const rolesRouter = Router();
 
-rolesRouter.post("/assign", apiLimiter, express.json(), async (req, res) => {
+rolesRouter.post("/assign", adminLimiter, express.json(), async (req, res) => {
   if (!(await requireAdmin(req, res))) return;
   const parsed = parseRoleAssignment(req.body);
   if (!parsed) {
@@ -44,7 +44,7 @@ rolesRouter.post("/assign", apiLimiter, express.json(), async (req, res) => {
   }
 });
 
-rolesRouter.post("/remove", apiLimiter, express.json(), async (req, res) => {
+rolesRouter.post("/remove", adminLimiter, express.json(), async (req, res) => {
   if (!(await requireAdmin(req, res))) return;
   const parsed = parseRoleAssignment(req.body);
   if (!parsed) {
