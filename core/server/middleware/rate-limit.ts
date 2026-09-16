@@ -1,4 +1,5 @@
 import rateLimit from "express-rate-limit";
+import { isServiceRoleBearer } from "./service-role-skip.ts";
 
 /**
  * Limiter for authentication endpoints (signup, token).
@@ -38,4 +39,30 @@ export const apiLimiter = rateLimit({
   skip: (req) =>
     (req.method === "GET" || req.method === "HEAD") &&
     (STATIC_ASSET_RE.test(req.path) || STATIC_PATH_RE.test(req.path)),
+});
+
+/**
+ * apiLimiter's ~5000-req/15min bucket is shared per IP across ~61 routes. The
+ * federation and roles admin routers (/trex/admin/federation, /trex/admin/roles)
+ * are also called by service-role scripts doing bulk work in-process — an
+ * identity migration issues one PUT /links plus one POST /assign per user, all
+ * from the same IP — and can trip that shared bucket partway through, 429ing
+ * the rest of the migration and throttling every other caller sharing the IP.
+ *
+ * adminLimiter is the same bucket (same window/max) except it skips a request
+ * whose bearer verifies as trex's service_role token (isServiceRoleBearer,
+ * service-role-skip.ts). Every other caller, including an admin's own bearer,
+ * is limited exactly as before.
+ *
+ * express-rate-limit's `skip` option accepts an async predicate
+ * (ValueDeterminingMiddleware<boolean> = (req, res) => boolean | Promise<boolean>,
+ * true since v6, and true of the ^7.5.0 pinned in package.json) so verifying
+ * the token here is safe to await.
+ */
+export const adminLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => isServiceRoleBearer(req.headers.authorization),
 });

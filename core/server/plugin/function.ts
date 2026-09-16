@@ -8,6 +8,9 @@ import { buildWorkerHeaders } from "./worker-headers.ts";
 import { PLUGINS_BASE_PATH } from "../config.ts";
 import { apiLimiter } from "../middleware/rate-limit.ts";
 import { buildDatabaseCredentials, getRegistrationEpoch } from "../d2e-compat/dbm-sync.ts";
+import { d2eWorkerEnv } from "./d2e-worker-env.ts";
+import { ensureAuthKeys } from "../auth/api-keys.ts";
+import { deferInit } from "./deferred-init.ts";
 
 // eszip bundles are immutable on disk for the life of the process, so read each
 // one once and cache the bytes in memory — re-reading the (brotli-compressed)
@@ -287,6 +290,8 @@ async function _callWorker(
   fncfg: any,
   dir: string,
   xenv: any,
+  pluginName?: string,
+  runtimeRegistered?: boolean,
   signal?: AbortSignal
 ): Promise<globalThis.Response> {
   const myenv = Object.assign(
@@ -295,20 +300,13 @@ async function _callWorker(
     fncfg.env in xenv ? xenv[fncfg.env] : {},
     {
       TREX_FUNCTION_PATH: dir,
-      // d2e functions build their `services` object from SERVICE_ROUTES; pass it
-      // through to the worker (the d2e fork did the same). Added only when set so
-      // @trex-only deployments are unaffected.
-      ...(Deno.env.get("SERVICE_ROUTES")
-        ? { SERVICE_ROUTES: Deno.env.get("SERVICE_ROUTES") as string }
-        : {}),
-      // Under d2e, provide the live DB registry to function workers the way d2e
-      // fed its services DATABASE_CREDENTIALS. The engine only PROVIDES the data
-      // (from Trex.DatabaseManager); the DATABASE_CREDENTIALS → VCAP_SERVICES
-      // mapping stays in the plugin's own envConverter. Already a JSON string
-      // (epoch-cached), so the _myenv builder passes it through unchanged.
-      ...(Deno.env.get("D2E_COMPAT") === "true"
-        ? { DATABASE_CREDENTIALS: cachedDatabaseCredentialsJson() }
-        : {}),
+      ...(await d2eWorkerEnv({
+        get: (k) => Deno.env.get(k),
+        databaseCredentialsJson: cachedDatabaseCredentialsJson,
+        serviceRoleKey: async () => (await ensureAuthKeys()).serviceRoleKey,
+        pluginName,
+        runtimeRegistered,
+      })),
     },
   );
   const _myenv = Object.keys(myenv).map((k) => [
@@ -426,7 +424,9 @@ async function _callInit(
   xenv: any,
   eszip: string | null,
   dir: string,
-  fncfg: any = {}
+  fncfg: any = {},
+  pluginName?: string,
+  runtimeRegistered?: boolean
 ) {
   const myenv = Object.assign(
     {},
@@ -434,20 +434,13 @@ async function _callInit(
     fnEnv in xenv ? xenv[fnEnv] : {},
     {
       TREX_FUNCTION_PATH: dir,
-      // d2e functions build their `services` object from SERVICE_ROUTES; pass it
-      // through to the worker (the d2e fork did the same). Added only when set so
-      // @trex-only deployments are unaffected.
-      ...(Deno.env.get("SERVICE_ROUTES")
-        ? { SERVICE_ROUTES: Deno.env.get("SERVICE_ROUTES") as string }
-        : {}),
-      // Under d2e, provide the live DB registry to function workers the way d2e
-      // fed its services DATABASE_CREDENTIALS. The engine only PROVIDES the data
-      // (from Trex.DatabaseManager); the DATABASE_CREDENTIALS → VCAP_SERVICES
-      // mapping stays in the plugin's own envConverter. Already a JSON string
-      // (epoch-cached), so the _myenv builder passes it through unchanged.
-      ...(Deno.env.get("D2E_COMPAT") === "true"
-        ? { DATABASE_CREDENTIALS: cachedDatabaseCredentialsJson() }
-        : {}),
+      ...(await d2eWorkerEnv({
+        get: (k) => Deno.env.get(k),
+        databaseCredentialsJson: cachedDatabaseCredentialsJson,
+        serviceRoleKey: async () => (await ensureAuthKeys()).serviceRoleKey,
+        pluginName,
+        runtimeRegistered,
+      })),
     },
   );
   const _myenv = Object.keys(myenv).map((k) => [
@@ -560,7 +553,8 @@ export function _addFunction(
   fncfg: any,
   dir: string,
   name: string,
-  xenv: any
+  xenv: any,
+  runtimeRegistered: boolean
 ) {
   REGISTERED_FUNCTIONS.push({ name, source: url, function: fncfg.function });
 
@@ -579,7 +573,7 @@ export function _addFunction(
     : name;
   const handler = (req: globalThis.Request) => {
     const c = cur();
-    return _callWorker(req, c.servicePath, c.importMapPath, fncfg, dir, c.xenv);
+    return _callWorker(req, c.servicePath, c.importMapPath, fncfg, dir, c.xenv, name, runtimeRegistered);
   };
   fnmap[`${name}${fncfg.function}`] = handler;
   fnmap[`${shortName}${fncfg.function}`] = handler;
@@ -687,7 +681,7 @@ export function _addFunction(
       });
 
       const c = cur();
-      const workerResponse = await _callWorker(webReq, c.servicePath, c.importMapPath, fncfg, dir, c.xenv, controller.signal);
+      const workerResponse = await _callWorker(webReq, c.servicePath, c.importMapPath, fncfg, dir, c.xenv, name, runtimeRegistered, controller.signal);
 
       res.status(workerResponse.status);
       workerResponse.headers.forEach((value: string, key: string) => {
@@ -736,36 +730,47 @@ export async function addPlugin(
   app: Express,
   value: any,
   dir: string,
-  name: string
+  name: string,
+  runtimeRegistered: boolean
 ) {
   const xenv = substituteEnvVarsInObject(value.env || {});
 
   if (value.init) {
     for (const r of value.init) {
       if (r.function) {
-        console.log(`add init fn @ ${dir}${r.function}`);
-        const waitforUrl = r.waitfor ??
-          (r.waitforEnvVar ? Deno.env.get(r.waitforEnvVar) ?? "" : "");
-        if (waitforUrl) await waitfor(waitforUrl);
+        const runInit = async () => {
+          console.log(`add init fn @ ${dir}${r.function}`);
+          const waitforUrl = r.waitfor ??
+            (r.waitforEnvVar ? Deno.env.get(r.waitforEnvVar) ?? "" : "");
+          if (waitforUrl) await waitfor(waitforUrl);
 
-        await _callInit(
-          `${dir}${r.function}`,
-          r.imports
-            ? r.imports.indexOf(":") < 0
-              ? `${dir}${r.imports}`
-              : r.imports
-            : null,
-          r.env,
-          xenv,
-          r.eszip || null,
-          dir,
-          r
-        );
+          await _callInit(
+            `${dir}${r.function}`,
+            r.imports
+              ? r.imports.indexOf(":") < 0
+                ? `${dir}${r.imports}`
+                : r.imports
+              : null,
+            r.env,
+            xenv,
+            r.eszip || null,
+            dir,
+            r,
+            name,
+            runtimeRegistered
+          );
 
-        if (r.delay) {
-          await new Promise((resolve) => setTimeout(resolve, r.delay));
+          if (r.delay) {
+            await new Promise((resolve) => setTimeout(resolve, r.delay));
+          }
+          console.log(`add init fn done @ ${dir}${r.function}`);
+        };
+        if (r.afterListen === true) {
+          console.log(`deferred init fn until listening @ ${dir}${r.function}`);
+          deferInit(`${dir}${r.function}`, runInit);
+        } else {
+          await runInit();
         }
-        console.log(`add init fn done @ ${dir}${r.function}`);
       }
     }
   }
@@ -794,7 +799,8 @@ export async function addPlugin(
           r,
           dir,
           name,
-          xenv
+          xenv,
+          runtimeRegistered
         );
       }
     }

@@ -14,6 +14,7 @@ type PgClient = any;
 export async function loadProviders(client: PgClient): Promise<Map<string, ProviderConfig>> {
   const { rows } = await client.query(
     `SELECT id, "displayName", "clientId", "clientSecret", issuer, discovery_url,
+            authorization_endpoint,
             scopes, claim_map, groups_source, groups_claim, link_policy, auto_provision,
             email_domain_allowlist, allow_elevated_auto_link
        FROM trexdb.sso_provider
@@ -31,6 +32,9 @@ export async function loadProviders(client: PgClient): Promise<Map<string, Provi
       // the odd one out needs discovery_url set explicitly.
       discoveryUrl: r.discovery_url ??
         r.issuer.replace(/\/+$/, "") + "/.well-known/openid-configuration",
+      authorizationEndpoint: typeof r.authorization_endpoint === "string" && r.authorization_endpoint.trim()
+        ? r.authorization_endpoint.trim()
+        : null,
       scopes: r.scopes,
       claimMap: r.claim_map ?? {},
       groupsSource: r.groups_source,

@@ -7,7 +7,7 @@ import cors from "cors";
 import { BASE_PATH } from "./config.ts";
 import { pool } from "./db.ts";
 import { authRouter } from "./auth/auth-router.ts";
-import { ensureAuthKeys } from "./auth/api-keys.ts";
+import { ensureAuthKeys, invalidateAuthKeysCache } from "./auth/api-keys.ts";
 import {
   ensureSbKeys,
   resolveApiCredential,
@@ -25,6 +25,7 @@ import { functionsRouter } from "./routes/functions.ts";
 import { cliLoginRouter } from "./routes/cli-login.ts";
 import { nativeIdpEnabled } from "./auth/native-idp.ts";
 import { rolesRouter } from "./auth/roles-api.ts";
+import { federationAdminRouter } from "./auth/federation/admin-api.ts";
 import { oidcProviderEnabled, registerOidcRoutes } from "./auth/oidc/router.ts";
 import { seedClientFromEnv } from "./auth/oidc/seed.ts";
 import { registerFederationRoutes } from "./auth/federation/router.ts";
@@ -37,6 +38,7 @@ import { collectProvisionTargets, runProvisionTargets } from "./plugin/provision
 import { collectNavEntries, mergeNav } from "./plugin/nav.ts";
 import { startNativeWebApi } from "./webapi-native.ts";
 import { handleRealtimeUpgrade, mountRealtime, startRealtimeService, stopRealtimeService } from "./realtime/index.ts";
+import { runDeferredInits } from "./plugin/deferred-init.ts";
 
 console.log("main function started");
 console.log(Deno.version);
@@ -194,6 +196,11 @@ if (nativeIdpEnabled()) {
 // the caller's own token, not part of the login surface the native IdP switch
 // turns off.
 app.use(`${BASE_PATH}/admin/roles`, rolesRouter);
+
+// Federation administration: provider registration and identity pre-linking.
+// Always mounted and admin-guarded, like the roles API above; it configures
+// federation rather than exposing a login surface.
+app.use(`${BASE_PATH}/admin/federation`, federationAdminRouter);
 
 // OIDC provider. Separate switch from the native IdP: a deployment may want the
 // protocol surface for its relying parties without exposing email/password
@@ -1405,6 +1412,16 @@ try {
     await pool.query(
       "DELETE FROM trexdb.setting WHERE key IN ('auth.anonKey', 'auth.serviceRoleKey', 'auth.jwtSecret')",
     );
+    // Plugin init (initPlugins, above) may already have called ensureAuthKeys()
+    // and filled authKeysCache with the now-purged, old-secret-signed values;
+    // drop it so the ensureAuthKeys() call below re-reads the empty rows and
+    // regenerates fresh keys instead of returning the stale cache.
+    invalidateAuthKeysCache();
+    // This only fixes the cache going forward: any ordinary (non-afterListen)
+    // init worker that already ran earlier in this same boot was handed the
+    // now-purged key in its env and still holds it in memory. Only an
+    // afterListen init (deferred-init.ts), which runs after this point, sees
+    // the fresh one.
   }
 } catch (err) {
   console.error("[boot] failed to reconcile stored JWT secret; continuing anyway:", err);
@@ -1471,6 +1488,9 @@ await runD2eBoot();
 
 server.listen(8000, () => {
   console.log("server listening on port 8000");
+
+  // Init functions that call trex's own HTTP API (see plugin/deferred-init.ts).
+  runDeferredInits().catch((e) => console.error("[plugins] deferred inits failed:", e));
 
   // The embedded WebAPI is part of the base image, not of d2e compatibility, so
   // it starts regardless of D2E_COMPAT (see WEBAPI_NATIVE_ENABLED). Starting it

@@ -396,6 +396,12 @@ export async function mountMemoryWorker(
     cfg.servicePath,
     MEMORY_PLUGIN_NAME,
     { _shared: { ...cfg.env, TREX_MEMORY_BASE: basePath } },
+    // mountMemoryWorker runs once at boot (Plugins.initPlugins), from the
+    // trusted directory scan — never reachable through Plugins.registerFromPath
+    // — so this is not runtime-registered. Not that it would matter for the
+    // service-role key either way: MEMORY_PLUGIN_NAME is the hardcoded
+    // "@trex/memory", which never falls in the "@data2evidence/" scope.
+    false,
   );
 }
 

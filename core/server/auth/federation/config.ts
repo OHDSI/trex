@@ -41,3 +41,16 @@ export function applyClaimMap(
     emailVerified: verified,
   };
 }
+
+/**
+ * The URL the browser is redirected to at the upstream. The configured
+ * override wins because discovery describes the provider as trex reaches it,
+ * which is not necessarily how a browser reaches it.
+ */
+export function authorizationEndpointFor(
+  provider: { authorizationEndpoint: string | null },
+  doc: { authorization_endpoint: string },
+): string {
+  const override = provider.authorizationEndpoint?.trim();
+  return override ? override : doc.authorization_endpoint;
+}
