@@ -1,7 +1,7 @@
 import { assertEquals, assertNotEquals, assertRejects, assertStringIncludes, assertThrows } from "jsr:@std/assert";
 import { _resetDekCache, _setDekForTests, decryptWithDek } from "../dek.ts";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "npm:jose";
-import { applyClaimMap, federationEnabled } from "./config.ts";
+import { applyClaimMap, authorizationEndpointFor, federationEnabled } from "./config.ts";
 import { hashBinding, signState, stateKeys, verifyState } from "./state.ts";
 import { challengeFor, createVerifier } from "./pkce.ts";
 import { clearDiscoveryCache, loadDiscovery } from "./discovery.ts";
@@ -24,6 +24,7 @@ import {
   consumeState,
   isSecureRequest,
   readBindingCookie,
+  refusalRedirect,
   safeRedirectTo,
   warnIfInsecureBinding,
 } from "./request.ts";
@@ -424,6 +425,7 @@ Deno.test("an algorithm the provider does not advertise is rejected", async () =
 const provider = (over: Partial<ProviderConfig> = {}): ProviderConfig => ({
   id: "logto", displayName: "Logto", clientId: "c", clientSecret: "s",
   issuer: "https://logto.test/oidc", discoveryUrl: "https://logto.test/d",
+  authorizationEndpoint: null,
   scopes: "openid profile email", claimMap: {}, groupsSource: "none",
   groupsClaim: null, linkPolicy: "verified_email", autoProvision: false,
   emailDomainAllowlist: null, allowElevatedAutoLink: false, ...over,
@@ -1142,6 +1144,48 @@ Deno.test("only the name this request's scheme mandates is read", () => {
   assertEquals(readBindingCookie(undefined, true), null);
 });
 
+Deno.test("authorizationEndpointFor uses discovery when no override is set", () => {
+  assertEquals(
+    authorizationEndpointFor({ authorizationEndpoint: null }, {
+      authorization_endpoint: "https://idp.internal:3001/oidc/auth",
+    }),
+    "https://idp.internal:3001/oidc/auth",
+  );
+});
+
+Deno.test("authorizationEndpointFor prefers the configured browser-facing URL", () => {
+  assertEquals(
+    authorizationEndpointFor({ authorizationEndpoint: "https://d2e.example/oidc/auth" }, {
+      authorization_endpoint: "https://idp.internal:3001/oidc/auth",
+    }),
+    "https://d2e.example/oidc/auth",
+  );
+});
+
+Deno.test("authorizationEndpointFor ignores a blank override", () => {
+  assertEquals(
+    authorizationEndpointFor({ authorizationEndpoint: "   " }, {
+      authorization_endpoint: "https://idp.internal:3001/oidc/auth",
+    }),
+    "https://idp.internal:3001/oidc/auth",
+  );
+});
+
+Deno.test("loadProviders maps authorization_endpoint, absent meaning null", async () => {
+  const row = (over: Record<string, unknown>) => ({
+    id: "logto", displayName: "Logto", clientId: "c", clientSecret: "s",
+    issuer: "https://logto.test/oidc", discovery_url: null,
+    scopes: "openid profile email", claim_map: {}, groups_source: "none",
+    groups_claim: null, link_policy: "verified_email", auto_provision: false, ...over,
+  });
+  const load = async (over: Record<string, unknown>) =>
+    (await loadProviders({ query: () => Promise.resolve({ rows: [row(over)] }) })).get("logto")!;
+
+  assertEquals((await load({ authorization_endpoint: "https://d2e.test/oidc/auth" })).authorizationEndpoint,
+    "https://d2e.test/oidc/auth");
+  assertEquals((await load({})).authorizationEndpoint, null);
+});
+
 Deno.test("the weak cookie name is announced once, not per request", () => {
   _resetInsecureBindingWarning();
   const said: string[] = [];
@@ -1169,4 +1213,26 @@ Deno.test("__Host- is used only where the cookie can carry Secure", () => {
   assertEquals(isSecureRequest({ headers: { "x-forwarded-proto": "https, http" } }, ""), true);
   assertEquals(isSecureRequest({ headers: {} }, ""), false);
   assertEquals(isSecureRequest({ headers: {} }, "1"), true);
+});
+
+Deno.test("refusalRedirect sends the browser to the login page with the code and return path", () => {
+  const url = new URL(refusalRedirect("https://d2e.test/d2e-login/", "no_account", "/trex/oidc/authorize?x=1")!);
+  assertEquals(url.origin + url.pathname, "https://d2e.test/d2e-login/");
+  assertEquals(url.searchParams.get("error"), "no_account");
+  assertEquals(url.searchParams.get("return_to"), "/trex/oidc/authorize?x=1");
+});
+
+Deno.test("refusalRedirect keeps a login URL's own query parameters", () => {
+  const url = new URL(refusalRedirect("https://d2e.test/login?theme=dark", "account_disabled", "/")!);
+  assertEquals(url.searchParams.get("theme"), "dark");
+  assertEquals(url.searchParams.get("error"), "account_disabled");
+});
+
+Deno.test("refusalRedirect never forwards an off-site return path", () => {
+  const url = new URL(refusalRedirect("https://d2e.test/d2e-login/", "no_account", "//evil.test/")!);
+  assertEquals(url.searchParams.get("return_to"), "/");
+});
+
+Deno.test("refusalRedirect is null without a login URL, so callers keep the JSON response", () => {
+  assertEquals(refusalRedirect(null, "no_account", "/"), null);
 });

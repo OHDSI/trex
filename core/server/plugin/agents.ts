@@ -567,6 +567,13 @@ export async function addAgentsPlugin(
         dir,
         name,
         live.xenv,
+        // Agents plugins are always trusted-scope (isTrustedScopeAgentsPlugin,
+        // checked above) — their package name never falls in the
+        // "@data2evidence/" scope d2e-worker-env.ts grants the service-role key
+        // to, so whether this counts as "runtime-registered" never changes the
+        // outcome. Not runtime-registered either way: agents mount from the
+        // boot-time plugin scan.
+        false,
       );
 
       if (gateway && signer) {

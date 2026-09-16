@@ -11,7 +11,8 @@ import { Router } from "express";
 import { authLimiter } from "../../middleware/rate-limit.ts";
 import { createTokenResponse } from "../auth-router.ts";
 import { IDP_METADATA_KEY } from "../oidc/claims.ts";
-import { applyClaimMap, federationEnabled } from "./config.ts";
+import { loginUrl } from "../oidc/config.ts";
+import { applyClaimMap, authorizationEndpointFor, federationEnabled } from "./config.ts";
 import { loadDiscovery } from "./discovery.ts";
 import { resolveGroups } from "./groups.ts";
 import { challengeFor, createVerifier } from "./pkce.ts";
@@ -22,6 +23,7 @@ import {
   callbackUri,
   consumeState,
   isSecureRequest,
+  refusalRedirect,
   safeErrorCode,
   safeRedirectTo,
   warnIfInsecureBinding,
@@ -31,7 +33,7 @@ import { verifyFederatedIdToken } from "./verify.ts";
 
 // Re-exported so these read as one unit from outside; request.ts exists only to
 // keep express out of the unit tests' module graph.
-export { bindingMatches, callbackUri, consumeState, safeErrorCode, safeRedirectTo };
+export { bindingMatches, callbackUri, consumeState, refusalRedirect, safeErrorCode, safeRedirectTo };
 
 // deno-lint-ignore no-explicit-any
 type Req = any;
@@ -91,7 +93,7 @@ export function registerFederationRoutes(
         exp: Math.floor(Date.now() / 1000) + STATE_TTL_SECONDS,
       }, await stateKeys());
 
-      const url = new URL(doc.authorization_endpoint);
+      const url = new URL(authorizationEndpointFor(provider, doc));
       url.searchParams.set("response_type", "code");
       url.searchParams.set("client_id", provider.clientId);
       url.searchParams.set("redirect_uri", callbackUri(req, basePath));
@@ -123,6 +125,11 @@ export function registerFederationRoutes(
       // The upstream declined (consent refused, and so on). Say so without
       // reflecting whatever text it chose to put in error_description.
       if (req.query.error) {
+        const target = refusalRedirect(loginUrl(), safeErrorCode(req.query.error), "/");
+        if (target) {
+          res.redirect(302, target);
+          return;
+        }
         res.status(401).json({
           error: safeErrorCode(req.query.error),
           error_description: "The identity provider refused the sign-in",
@@ -223,6 +230,11 @@ export function registerFederationRoutes(
       const decision = await resolveFederatedUser(client, provider, identity);
       if (decision.action === "refuse") {
         // The reasons are trex's own fixed codes, not upstream text.
+        const target = refusalRedirect(loginUrl(), decision.reason, state.redirectTo);
+        if (target) {
+          res.redirect(302, target);
+          return;
+        }
         res.status(403).json({ error: "access_denied", error_description: decision.reason });
         return;
       }

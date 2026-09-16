@@ -67,6 +67,30 @@ env vars:
 | Microsoft | `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET` |
 | Apple | (DB-driven only) |
 
+## Federation Administration
+
+Routes for administering OIDC federation (registering an upstream provider,
+pre-linking identities before a user's first sign-in). Mounted at
+`${BASE_PATH}/admin/federation`. Auth: a Bearer token that is either the
+service-role key or a trex admin's access token (`app_metadata.trex_role ===
+"admin"`) — the same check `POST /admin/roles/assign` uses.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| PUT | `/providers/:id` | Create or replace a provider's config (`displayName`, `clientId`, `clientSecret`, `issuer`, `discoveryUrl`, `authorizationEndpoint`, `scopes`, `groupsSource`, `groupsClaim`, `autoProvision`, `enabled`). 204 on success, 400 on an invalid body. |
+| PATCH | `/providers/:id` | Enable or disable a provider. Body `{ enabled: boolean }`. 204 on success, 404 if the provider is unknown, 400 on an invalid body. |
+| PUT | `/links` | Pre-link an upstream identity (`providerId`, `accountId`, `email`, `name?`, `banned?`) to a trex user ahead of its first sign-in — matches by email, or provisions a password-less user if none exists. 200 with `{ userId, outcome }` (`linked` \| `created` \| `already_linked`), 404 if the provider is unknown, 409 with `{ userId }` if the account is already linked to a *different* user at that provider. |
+
+`sso_provider.authorization_endpoint` is the URL a browser can actually reach
+for the authorize redirect — set it when the provider's OIDC discovery
+document advertises an endpoint that isn't reachable from outside the
+deployment (e.g. an internal-only issuer host).
+
+When a federated sign-in is refused (unknown account, disabled user, etc.) and
+`TREX_OIDC_LOGIN_URL` is set, trex redirects the browser back to that login
+page with `error` (one of trex's fixed refusal codes) and `return_to` query
+params instead of returning a bare JSON error.
+
 ## Tokens
 
 - Access tokens are JWTs signed with an HS256 key derived from `TREX_ROOT_KEY` via HKDF

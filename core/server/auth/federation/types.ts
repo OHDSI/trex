@@ -6,6 +6,11 @@ export interface ProviderConfig {
   clientSecret: string;
   issuer: string;
   discoveryUrl: string;
+  /**
+   * Browser-facing authorize URL, when the discovery document's is not
+   * reachable from a browser. `null` means use discovery.
+   */
+  authorizationEndpoint: string | null;
   scopes: string;
   claimMap: Record<string, string>;
   groupsSource: "claim" | "graph" | "none";
