@@ -1,7 +1,12 @@
 import { assertEquals, assertNotEquals, assertRejects, assertStringIncludes, assertThrows } from "jsr:@std/assert";
 import { _resetDekCache, _setDekForTests, decryptWithDek } from "../dek.ts";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "npm:jose";
-import { applyClaimMap, authorizationEndpointFor, federationEnabled } from "./config.ts";
+import {
+  applyClaimMap,
+  authorizationEndpointFor,
+  federationEnabled,
+  nativePasswordLoginEnabled,
+} from "./config.ts";
 import { hashBinding, signState, stateKeys, verifyState } from "./state.ts";
 import { challengeFor, createVerifier } from "./pkce.ts";
 import { clearDiscoveryCache, loadDiscovery } from "./discovery.ts";
@@ -36,6 +41,19 @@ Deno.test("federationEnabled is off unless explicitly enabled", () => {
   assertEquals(federationEnabled("false"), false);
   assertEquals(federationEnabled("true"), true);
   assertEquals(federationEnabled("1"), true);
+});
+
+// The opposite default to federationEnabled, and deliberately so: every
+// existing deployment signs in this way.
+Deno.test("nativePasswordLoginEnabled is on unless explicitly turned off", () => {
+  assertEquals(nativePasswordLoginEnabled(undefined), true);
+  assertEquals(nativePasswordLoginEnabled(""), true);
+  assertEquals(nativePasswordLoginEnabled("false"), false);
+  assertEquals(nativePasswordLoginEnabled("0"), false);
+  // A typo leaves sign-in working rather than locking everyone out of the
+  // installation they would need to reach to correct it.
+  assertEquals(nativePasswordLoginEnabled("FALSE"), true);
+  assertEquals(nativePasswordLoginEnabled("no"), true);
 });
 
 Deno.test("applyClaimMap renames upstream claims onto canonical fields", () => {
