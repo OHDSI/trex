@@ -170,16 +170,34 @@ export async function resolveFederatedUser(
   // anything, and only under the provider's link policy — and only here do the
   // domain allowlist and the elevated-account guard apply. An identity with an
   // account row above has already been through them and keeps signing in.
-  return decideLink(identity, provider, await findLinkCandidateByEmail(client, identity.email));
+  //
+  // With no address there is nothing to look a candidate up by, so the query is
+  // skipped rather than run with null and left to match whatever it would.
+  const candidate = identity.email === null
+    ? null
+    : await findLinkCandidateByEmail(client, identity.email);
+  return decideLink(identity, provider, candidate);
 }
 
-/** A federated user has no password: no row in account with providerId 'credential'. */
+/**
+ * A federated user has no password: no row in account with providerId 'credential'.
+ *
+ * An upstream that asserted no address leaves user.email NULL (V14 dropped the
+ * NOT NULL for exactly this). Deliberately not a synthetic stand-in such as
+ * `<sub>@example.invalid`: the column is UNIQUE and is what the password grant
+ * authenticates against, so a made-up address is a real address that happens to
+ * be wrong — it can collide, it can be mailed, and an administrator cannot tell
+ * it from one the person gave. An absent one is merely absent.
+ */
 export async function provisionUser(client: PgClient, identity: UpstreamIdentity): Promise<string> {
   const id = crypto.randomUUID();
   await client.query(
     `INSERT INTO trexdb."user" (id, name, email, "emailVerified", email_confirmed_at, role)
      VALUES ($1, $2, $3, true, NOW(), 'user')`,
-    [id, identity.name ?? identity.email, identity.email],
+    // The subject is the last fallback for the name: a row has to be
+    // identifiable in an administrator's list even with neither name nor
+    // address.
+    [id, identity.name ?? identity.email ?? identity.sub, identity.email],
   );
   return id;
 }

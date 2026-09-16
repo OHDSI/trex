@@ -41,7 +41,7 @@ export const router = Router();
 
 interface DbUserRow {
   id: string;
-  email: string;
+  email: string | null;
   name: string | null;
   role: string;
   emailVerified: boolean | null;
@@ -315,7 +315,10 @@ export function registerOidcRoutes(basePath: string) {
         const token = await signIdToken(
           {
             id: client.clientId,
-            email: "",
+            // A service client is not a person and has no address; null now
+            // says so, where the empty string was standing in for a type that
+            // did not allow it.
+            email: null,
             name: client.name ?? client.clientId,
             role: "service",
             appRoles: client.clientRoles,
@@ -500,10 +503,12 @@ export function registerOidcRoutes(basePath: string) {
         return;
       }
 
+      // Same rule as the id_token: a user with no address carries neither
+      // claim, rather than a null one.
       res.json({
         sub: user.id,
-        email: user.email,
-        email_verified: Boolean(user.emailVerified),
+        email: user.email ?? undefined,
+        email_verified: user.email ? Boolean(user.emailVerified) : undefined,
         name: user.name ?? undefined,
         trex_role: user.role,
       });

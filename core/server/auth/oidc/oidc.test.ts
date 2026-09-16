@@ -137,6 +137,18 @@ Deno.test("claims carry the role and honour the requested scopes", () => {
   assertEquals(minimal.trex_role, "admin");
 });
 
+// A federated user whose upstream asserted no address. A relying party keying
+// accounts off `email` must find no claim, not a null one, and must not be told
+// an address it never received is verified.
+Deno.test("a user with no email carries neither email claim, even when scoped", () => {
+  const claims = buildIdTokenClaims(
+    { id: "u", email: null, role: "user", appRoles: [], emailVerified: true },
+    { issuer: "https://example.test/trex", audience: "atlas", scopes: ["openid", "email"] },
+  );
+  assertEquals("email" in claims, false);
+  assertEquals("email_verified" in claims, false);
+});
+
 Deno.test("claims expire and are not issued in the past", () => {
   const now = Math.floor(Date.now() / 1000);
   const claims = buildIdTokenClaims(

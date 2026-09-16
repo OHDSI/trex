@@ -80,7 +80,11 @@ export interface AccessTokenClaims {
   iss: string;
   exp: number;
   iat: number;
-  email: string;
+  // Null for a federated user whose upstream asserted no address. Present and
+  // null rather than dropped: the claim is part of the GoTrue-compatible shape
+  // every consumer destructures, and `null` says "this user has none" where an
+  // absent key reads as "this token does not carry one".
+  email: string | null;
   app_metadata: { provider: string; providers: string[]; trex_role: string };
   user_metadata: Record<string, unknown>;
   session_id: string;
@@ -89,7 +93,7 @@ export interface AccessTokenClaims {
 export async function signAccessToken(
   user: {
     id: string;
-    email: string;
+    email: string | null;
     role: string;
     app_metadata?: Record<string, unknown>;
     user_metadata?: Record<string, unknown>;

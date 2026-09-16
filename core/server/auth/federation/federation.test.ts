@@ -1,7 +1,12 @@
 import { assertEquals, assertNotEquals, assertRejects, assertStringIncludes, assertThrows } from "jsr:@std/assert";
 import { _resetDekCache, _setDekForTests, decryptWithDek } from "../dek.ts";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "npm:jose";
-import { applyClaimMap, authorizationEndpointFor, federationEnabled } from "./config.ts";
+import {
+  applyClaimMap,
+  authorizationEndpointFor,
+  federationEnabled,
+  nativePasswordLoginEnabled,
+} from "./config.ts";
 import { hashBinding, signState, stateKeys, verifyState } from "./state.ts";
 import { challengeFor, createVerifier } from "./pkce.ts";
 import { clearDiscoveryCache, loadDiscovery } from "./discovery.ts";
@@ -38,6 +43,19 @@ Deno.test("federationEnabled is off unless explicitly enabled", () => {
   assertEquals(federationEnabled("1"), true);
 });
 
+// The opposite default to federationEnabled, and deliberately so: every
+// existing deployment signs in this way.
+Deno.test("nativePasswordLoginEnabled is on unless explicitly turned off", () => {
+  assertEquals(nativePasswordLoginEnabled(undefined), true);
+  assertEquals(nativePasswordLoginEnabled(""), true);
+  assertEquals(nativePasswordLoginEnabled("false"), false);
+  assertEquals(nativePasswordLoginEnabled("0"), false);
+  // A typo leaves sign-in working rather than locking everyone out of the
+  // installation they would need to reach to correct it.
+  assertEquals(nativePasswordLoginEnabled("FALSE"), true);
+  assertEquals(nativePasswordLoginEnabled("no"), true);
+});
+
 Deno.test("applyClaimMap renames upstream claims onto canonical fields", () => {
   const identity = applyClaimMap(
     { oid: "abc-123", upn: "jo@example.test", name: "Jo", email_verified: true },
@@ -67,6 +85,24 @@ Deno.test("applyClaimMap rejects a missing subject", () => {
     Error,
     "subject",
   );
+});
+
+// A username-only upstream account (64 of 69 on the d2e installation this was
+// written for) asserts no address. The subject alone is a complete identity.
+Deno.test("applyClaimMap accepts an id_token carrying no email", () => {
+  assertEquals(applyClaimMap({ sub: "s-1" }, {}), {
+    sub: "s-1",
+    email: null,
+    emailVerified: false,
+  });
+  // An empty string is no address either, not an address of length zero.
+  assertEquals(applyClaimMap({ sub: "s-1", email: "" }, {}).email, null);
+  // A mapped-but-absent claim behaves the same as an unmapped one.
+  assertEquals(applyClaimMap({ sub: "s-1" }, { email: "upn" }).email, null);
+});
+
+Deno.test("applyClaimMap still requires a subject when there is no email either", () => {
+  assertThrows(() => applyClaimMap({}, {}), Error, "subject");
 });
 
 Deno.test("applyClaimMap treats a missing email_verified as unverified", () => {
@@ -605,6 +641,46 @@ Deno.test("ordinary users are unaffected by the elevated guard", () => {
   }
 });
 
+// ── First-time identities carrying no address at all ────────────────────────
+
+const noEmail: UpstreamIdentity = { sub: "s-1", email: null, emailVerified: false };
+
+// The address is what an allowlist restricts, so with none there is no way to
+// tell whether the restriction is met — the same call this module already makes
+// for an address whose domain cannot be determined.
+Deno.test("a first-time identity with no email is refused under an allowlist", () => {
+  assertEquals(
+    decideLink(noEmail, provider({ emailDomainAllowlist: ["corp.test"] }), null),
+    { action: "refuse", reason: "email_domain_not_allowed" },
+  );
+  // Including where it would otherwise have been provisioned.
+  assertEquals(
+    decideLink(
+      noEmail,
+      provider({ emailDomainAllowlist: ["corp.test"], autoProvision: true }),
+      null,
+    ),
+    { action: "refuse", reason: "email_domain_not_allowed" },
+  );
+});
+
+// email_verified is absent from a token with no email, so the unverified rule
+// would refuse every such identity if it ran first. It is not the rule here:
+// an identity asserting no address can claim no existing account.
+Deno.test("a first-time identity with no email provisions under auto-provision", () => {
+  assertEquals(
+    decideLink(noEmail, provider({ autoProvision: true }), null),
+    { action: "provision" },
+  );
+});
+
+Deno.test("a first-time identity with no email and no auto-provision is refused", () => {
+  assertEquals(
+    decideLink(noEmail, provider(), null),
+    { action: "refuse", reason: "no_account" },
+  );
+});
+
 // ── Group resolution (groups.ts) ────────────────────────────────────────────
 
 Deno.test("groups_source 'claim' reads the configured claim, raw", () => {
@@ -732,6 +808,29 @@ Deno.test("an existing link does not re-ask the verified-email question", async 
       emailVerified: false,
     }),
     { action: "link", userId: "u-linked" },
+  );
+  assertEquals(client.seen, ["link"]);
+});
+
+// The case this whole change exists for. d2e's migration pre-links every Logto
+// user by subject before anyone signs in, and most of those accounts have no
+// address, so the established link has to carry the sign-in on its own.
+Deno.test("an established link signs in with no email whatsoever", async () => {
+  const client = stubClient({ linked: [{ userId: "u-linked", disabled: false }] });
+  assertEquals(
+    await resolveFederatedUser(client, provider(), noEmail),
+    { action: "link", userId: "u-linked" },
+  );
+  assertEquals(client.seen, ["link"]);
+});
+
+// Nothing to look one up by. The query is skipped rather than run with null and
+// left to match whatever `lower(NULL)` would.
+Deno.test("with no link and no email, no candidate is looked up", async () => {
+  const client = stubClient({ byEmail: [{ id: "u-2" }] });
+  assertEquals(
+    await resolveFederatedUser(client, provider({ autoProvision: true }), noEmail),
+    { action: "provision" },
   );
   assertEquals(client.seen, ["link"]);
 });

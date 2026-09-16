@@ -4,6 +4,10 @@
 // A provider that lets someone set an address they do not control would
 // otherwise be a takeover path into any existing account with that address.
 //
+// An identity carrying no address at all is a separate case, not a failure of
+// that rule: it can match no existing account, so it may only provision, and
+// only where the provider was configured to allow it.
+//
 // Two further guards, both optional and both applying ONLY to an upstream
 // identity seen for the first time (an identity that already has an account
 // row is an established link and never reaches this module):
@@ -91,6 +95,19 @@ export function decideLink(
   provider: ProviderConfig,
   existing: ExistingUser | null,
 ): LinkDecision {
+  // No address at all. Decided before the verified-email rule, which exists to
+  // stop an upstream claiming an account by asserting its address: with nothing
+  // asserted there is no account to claim and nothing to verify, so applying
+  // that rule here would refuse every username-only identity instead.
+  if (identity.email === null) {
+    // Same reasoning as an address with no determinable domain: a restriction
+    // that cannot be evaluated must not pass.
+    if (provider.emailDomainAllowlist && provider.emailDomainAllowlist.length > 0) {
+      return { action: "refuse", reason: "email_domain_not_allowed" };
+    }
+    if (provider.autoProvision) return { action: "provision" };
+    return { action: "refuse", reason: "no_account" };
+  }
   if (!identity.emailVerified) {
     return { action: "refuse", reason: "upstream_email_unverified" };
   }

@@ -11,6 +11,7 @@ import { hashPassword, verifyPassword } from "./password.ts";
 import { authLimiter, apiLimiter } from "../middleware/rate-limit.ts";
 import { isRefreshTokenExpired } from "./refresh-token-ttl.ts";
 import { loadExternalProviders } from "./settings-providers.ts";
+import { nativePasswordLoginEnabled } from "./federation/config.ts";
 import { IDP_METADATA_KEY } from "./oidc/claims.ts";
 
 const router = Router();
@@ -21,7 +22,10 @@ router.use(express.json());
 interface DbUser {
   id: string;
   name: string;
-  email: string;
+  // NULL for a federated user whose upstream asserted no address (V14). The
+  // key stays in every response that carries it, with a null value: a client
+  // reading `user.email` gets "absent", never the string "null".
+  email: string | null;
   image: string | null;
   role: string;
   banned: boolean;
@@ -170,6 +174,14 @@ async function migratePasswordHash(userId: string, newHash: string) {
 
 router.post("/signup", authLimiter, async (req, res) => {
   try {
+    // Before the self-registration setting, and before reading the body: a
+    // deployment with password sign-in off has no use for an account whose one
+    // credential is a password that could never be presented.
+    if (!nativePasswordLoginEnabled()) {
+      res.status(403).json({ error: "signup_disabled", error_description: "Password sign-in is disabled" });
+      return;
+    }
+
     const { email, password, data } = req.body;
 
     if (!email || !password) {
@@ -265,6 +277,20 @@ router.post("/token", authLimiter, async (req, res) => {
 
 async function handlePasswordGrant(req: any, res: any) {
   try {
+    // The switch has to bite here, not only on the sign-in page: hiding the
+    // form leaves the grant one POST away, and a deployment that turned
+    // password sign-in off did so to close it, not to decorate.
+    // unsupported_grant_type rather than a credential error: the grant itself is
+    // unavailable, and "invalid credentials" would send people hunting for a
+    // password that could never work.
+    if (!nativePasswordLoginEnabled()) {
+      res.status(400).json({
+        error: "unsupported_grant_type",
+        error_description: "Password sign-in is disabled",
+      });
+      return;
+    }
+
     const { email, password } = req.body;
 
     if (!email || !password) {
