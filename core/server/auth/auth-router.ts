@@ -21,7 +21,10 @@ router.use(express.json());
 interface DbUser {
   id: string;
   name: string;
-  email: string;
+  // NULL for a federated user whose upstream asserted no address (V14). The
+  // key stays in every response that carries it, with a null value: a client
+  // reading `user.email` gets "absent", never the string "null".
+  email: string | null;
   image: string | null;
   role: string;
   banned: boolean;

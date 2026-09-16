@@ -6,7 +6,8 @@
 
 export interface IdTokenUser {
   id: string;
-  email: string;
+  /** NULL for a federated user whose upstream asserted no address (V14). */
+  email: string | null;
   name?: string | null;
   /** trex's own admin/user role. Gates trex features; not application access. */
   role: string;
@@ -116,7 +117,11 @@ export function buildIdTokenClaims(user: IdTokenUser, opts: IdTokenOptions): IdT
   };
 
   if (opts.nonce) claims.nonce = opts.nonce;
-  if (opts.scopes.includes("email")) {
+  // A user with no address emits neither claim, rather than a null `email` or
+  // an `email_verified` about nothing: OIDC says an absent claim is simply
+  // omitted, and a relying party that keys accounts off `email` must fail to
+  // find one rather than key off a null.
+  if (opts.scopes.includes("email") && user.email) {
     claims.email = user.email;
     claims.email_verified = Boolean(user.emailVerified);
   }
