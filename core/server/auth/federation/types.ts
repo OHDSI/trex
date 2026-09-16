@@ -34,7 +34,14 @@ export interface ProviderConfig {
 /** What we learned about a person from an upstream id_token, normalised. */
 export interface UpstreamIdentity {
   sub: string;
-  email: string;
+  /**
+   * `null` when the upstream asserted no address at all. Common on a Logto
+   * installation whose accounts are username-only, and harmless for an
+   * identity that is already linked — the link, not the address, is what says
+   * which trex user this is. The key stays present so every reader has to
+   * decide what an absent address means rather than forget the case exists.
+   */
+  email: string | null;
   name?: string;
   emailVerified: boolean;
 }
