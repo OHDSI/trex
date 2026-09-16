@@ -8044,6 +8044,16 @@
     "allPublicConstructors": true
   },
   {
+    "name": "org.ohdsi.webapi.source.EncryptedStringConverter",
+    "allPublicMethods": true,
+    "queryAllPublicMethods": true,
+    "allDeclaredMethods": true,
+    "queryAllDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
     "name": "org.ohdsi.webapi.source.SourceDaimon",
     "allPublicMethods": true,
     "queryAllPublicMethods": true,
