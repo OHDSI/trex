@@ -27,7 +27,8 @@
     "edn-data": "npm:edn-data@^1",
     "better-auth": "npm:better-auth@1.7.5",
     "better-auth/api": "npm:better-auth@1.7.5/api",
-    "better-auth/plugins": "npm:better-auth@1.7.5/plugins"
+    "better-auth/plugins": "npm:better-auth@1.7.5/plugins",
+    "better-auth/db/migration": "npm:better-auth@1.7.5/db/migration"
   },
   "tasks": {
     "test": "deno test --allow-all",
