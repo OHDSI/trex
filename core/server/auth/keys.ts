@@ -24,6 +24,13 @@ export const LABELS = {
   // A separate label from federationState above: one key, two primitives is
   // exactly the key-reuse this scheme's per-purpose subkeys exist to avoid.
   federationStateEncryption: "trex.federation.state.enc.v1",
+  // Secret for the Better Auth engine behind /auth/v1 (cookie signing, its own
+  // internal token hashing). A third-party library gets a labelled subkey like
+  // everything else rather than the root key itself, so a weakness in its key
+  // handling cannot reach the material the DEK wrapping and the JWT signing
+  // keys are derived from. Distinct from betterAuthSession above, which belongs
+  // to the pre-fork instance in core/server/auth.ts.
+  betterAuthEngine: "trex.better-auth.engine.v1",
 } as const;
 
 export type SubkeyLabel = typeof LABELS[keyof typeof LABELS];
