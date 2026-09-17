@@ -28,8 +28,8 @@ export const LABELS = {
   // internal token hashing). A third-party library gets a labelled subkey like
   // everything else rather than the root key itself, so a weakness in its key
   // handling cannot reach the material the DEK wrapping and the JWT signing
-  // keys are derived from. Distinct from betterAuthSession above, which belongs
-  // to the pre-fork instance in core/server/auth.ts.
+  // keys are derived from. Distinct from betterAuthSession above, which is now
+  // unused: it belonged to the pre-fork instance that core/server/auth.ts held.
   betterAuthEngine: "trex.better-auth.engine.v1",
 } as const;
 
