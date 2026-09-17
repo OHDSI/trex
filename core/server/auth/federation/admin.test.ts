@@ -28,11 +28,35 @@ Deno.test("parseProviderUpsert refuses bad ids, missing fields and unknown group
 Deno.test("parseLinkRequest trims, lower-cases the email and defaults banned to false", () => {
   assertEquals(
     parseLinkRequest({ providerId: "logto", accountId: " abc ", email: " Admin@D2E.local " }),
-    { providerId: "logto", accountId: "abc", email: "admin@d2e.local", name: null, banned: false },
+    { providerId: "logto", accountId: "abc", email: "admin@d2e.local", name: null, banned: false, userId: null },
   );
   for (const body of [null, {}, { providerId: "logto", accountId: "a" },
                       { providerId: "logto", accountId: "a", email: "no-at-sign" }]) {
     assertEquals(parseLinkRequest(body), null, JSON.stringify(body));
+  }
+});
+
+const linkBody = { providerId: "logto", accountId: "abc", email: "a@x.test" };
+
+Deno.test("parseLinkRequest treats an absent or blank userId as none", () => {
+  for (const userId of [undefined, null, "", "   "]) {
+    assertEquals(parseLinkRequest({ ...linkBody, userId })?.userId, null, JSON.stringify(userId));
+  }
+});
+
+Deno.test("parseLinkRequest keeps a well-formed userId, trimmed", () => {
+  assertEquals(parseLinkRequest({ ...linkBody, userId: " x1y2z3a4b5c6 " })?.userId, "x1y2z3a4b5c6");
+  assertEquals(
+    parseLinkRequest({ ...linkBody, userId: "0b7e2d7c-4a1f-4c4e-9b8a-2f6d3c1e5a90" })?.userId,
+    "0b7e2d7c-4a1f-4c4e-9b8a-2f6d3c1e5a90",
+  );
+  assertEquals(parseLinkRequest({ ...linkBody, userId: "A_b-9" })?.userId, "A_b-9");
+  assertEquals(parseLinkRequest({ ...linkBody, userId: "a".repeat(128) })?.userId, "a".repeat(128));
+});
+
+Deno.test("parseLinkRequest rejects the whole request for a malformed userId", () => {
+  for (const userId of ["has space", "semi;colon", "slash/id", "dot.id", "ümlaut", "a".repeat(129), 12345, true, {}]) {
+    assertEquals(parseLinkRequest({ ...linkBody, userId }), null, JSON.stringify(userId));
   }
 });
 
@@ -52,7 +76,9 @@ function fakeClient(script: Array<[string, unknown[]]>) {
   };
 }
 
-const link = { providerId: "logto", accountId: "logto-1", email: "a@x.test", name: "A", banned: false };
+const link = {
+  providerId: "logto", accountId: "logto-1", email: "a@x.test", name: "A", banned: false, userId: null,
+};
 
 Deno.test("linkIdentity reports an existing link without writing", async () => {
   const c = fakeClient([
