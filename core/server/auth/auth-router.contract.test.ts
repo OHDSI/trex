@@ -506,8 +506,15 @@ contractTest("POST /signup returns 200 and the literal token envelope", async ({
   await createUser(pool);
   const email = uniqueEmail("signup");
 
+  // TREX_FORCE_SECURE_COOKIES forces the Secure flag on independently of the
+  // request, and the cookie flags are asserted literally below, so it is pinned
+  // rather than inherited from whatever machine runs the suite.
   await withEnv(
-    { TREX_NATIVE_PASSWORD_LOGIN_ENABLED: undefined, ADMIN_EMAIL: undefined },
+    {
+      TREX_NATIVE_PASSWORD_LOGIN_ENABLED: undefined,
+      ADMIN_EMAIL: undefined,
+      TREX_FORCE_SECURE_COOKIES: undefined,
+    },
     async () => {
       await withSetting(pool, "auth.selfRegistration", true, async () => {
         const before = Math.floor(Date.now() / 1000);
@@ -1033,18 +1040,23 @@ contractTest("POST /sync-cookie is 204 with the cookie lifetime taken from exp",
     session_id: crypto.randomUUID(),
   });
 
-  const res = await post(`${url}/sync-cookie`, undefined, token);
-  assertEquals(res.status, 204);
-  assertEquals(await res.text(), "");
+  // Secure is asserted below, and TREX_FORCE_SECURE_COOKIES forces it on
+  // independently of the request, so it has to be pinned rather than inherited
+  // from whatever machine runs the suite.
+  await withEnv({ TREX_FORCE_SECURE_COOKIES: undefined }, async () => {
+    const res = await post(`${url}/sync-cookie`, undefined, token);
+    assertEquals(res.status, 204);
+    assertEquals(await res.text(), "");
 
-  const cookie = setCookie(res, "sb-access-token");
-  assertEquals(cookie?.startsWith(`sb-access-token=${token};`), true);
-  assertEquals(cookieAttr(cookie!, "Path"), "/");
-  assertEquals(cookie!.includes("HttpOnly"), true);
-  assertEquals(cookieAttr(cookie!, "SameSite"), "Lax");
-  assertEquals(cookie!.includes("Secure"), false);
-  const maxAge = Number(cookieAttr(cookie!, "Max-Age"));
-  assertEquals(maxAge > 110 && maxAge <= 120, true);
+    const cookie = setCookie(res, "sb-access-token");
+    assertEquals(cookie?.startsWith(`sb-access-token=${token};`), true);
+    assertEquals(cookieAttr(cookie!, "Path"), "/");
+    assertEquals(cookie!.includes("HttpOnly"), true);
+    assertEquals(cookieAttr(cookie!, "SameSite"), "Lax");
+    assertEquals(cookie!.includes("Secure"), false);
+    const maxAge = Number(cookieAttr(cookie!, "Max-Age"));
+    assertEquals(maxAge > 110 && maxAge <= 120, true);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1295,6 +1307,24 @@ contractTest("PUT /user changes the email with no verification step", async ({ u
     ).then((r: Json) => r.rows[0].n),
     0,
   );
+});
+
+contractTest("PUT /user surfaces a duplicate address as the 500 catch-all", async ({ url, pool }) => {
+  // There is no uniqueness pre-check: trexdb."user".email is UNIQUE (V1), so
+  // taking someone else's address reaches Postgres and comes back as the
+  // generic catch-all rather than a conflict. An engine that answered 409 here
+  // would be changing the contract, so the 500 is pinned deliberately.
+  const user = await createUser(pool);
+  const other = await createUser(pool);
+
+  const res = await request("PUT", `${url}/user`, { email: other.email }, await tokenFor(user));
+  assertEquals(res.status, 500);
+  assertEquals(await res.json(), {
+    error: "server_error",
+    error_description: "Internal server error",
+  });
+
+  assertEquals((await readUser(pool, user.id)).email, user.email);
 });
 
 contractTest("PUT /user with no updates returns the current row untouched", async ({ url, pool }) => {
