@@ -21,9 +21,18 @@ export interface LinkRequest {
   email: string;
   name: string | null;
   banned: boolean;
+  /**
+   * The trex user id to link to, or to create the user under. Set when a
+   * migration must keep the id the identity already had upstream, since that
+   * id is the token `sub` everything downstream is keyed by.
+   */
+  userId: string | null;
 }
 
 const PROVIDER_ID = /^[a-z][a-z0-9_]*$/;
+// Wide enough for Logto's 12-character ids and for UUIDs; narrow enough that
+// the id is safe in a URL path, a JWT `sub` and a log line without escaping.
+const USER_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const GROUPS_SOURCES = new Set(["claim", "graph", "none"]);
 
 const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v.trim() : null);
@@ -63,5 +72,13 @@ export function parseLinkRequest(body: unknown): LinkRequest | null {
   if (!providerId || !PROVIDER_ID.test(providerId) || !accountId || !email || !email.includes("@")) {
     return null;
   }
-  return { providerId, accountId, email, name: str(b.name), banned: b.banned === true };
+  let userId: string | null = null;
+  if (b.userId !== undefined && b.userId !== null) {
+    if (typeof b.userId !== "string") return null;
+    userId = str(b.userId);
+    // A malformed id rejects the whole request rather than being dropped: a
+    // caller that asked for a specific id must not silently get a random one.
+    if (userId !== null && !USER_ID.test(userId)) return null;
+  }
+  return { providerId, accountId, email, name: str(b.name), banned: b.banned === true, userId };
 }

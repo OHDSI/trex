@@ -50,6 +50,10 @@ export type LinkResult =
  * it links regardless of email verification and of the elevated-account guard.
  * The one thing it refuses is re-pointing a user who is already linked to a
  * different account at the same provider: that is two people, not one.
+ *
+ * With `r.userId` set, the identity is bound to exactly that trex user id or to
+ * nothing. The id is the token `sub`; linking to a user with any other id would
+ * hand the person a different `sub` and orphan everything keyed by the old one.
  */
 export async function linkIdentity(client: PgClient, r: LinkRequest): Promise<LinkResult> {
   const provider = await client.query(`SELECT id FROM trexdb.sso_provider WHERE id = $1`, [r.providerId]);
@@ -71,36 +75,30 @@ export async function linkIdentity(client: PgClient, r: LinkRequest): Promise<Li
     //     account at this provider" check before either has inserted — one has
     //     to wait, see the other's account row, and get the 409.
     await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`${r.providerId}:${r.accountId}`]);
+    if (r.userId !== null) {
+      // A row lock cannot serialize two calls that both find no user with this
+      // id and both try to create it; this can. Always taken after the account
+      // lock, so the two levels are acquired in one order and cannot deadlock.
+      await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`user:${r.userId}`]);
+    }
     const existing = await findLinkedUser(client, r.providerId, r.accountId);
     if (existing) {
+      if (r.userId !== null && existing.userId !== r.userId) {
+        await client.query("ROLLBACK").catch(() => {});
+        return { conflict: true, userId: existing.userId };
+      }
       result = { userId: existing.userId, outcome: "already_linked" };
     } else {
-      const byEmail = await client.query(
-        `SELECT id FROM trexdb."user" WHERE lower(email) = lower($1) AND "deletedAt" IS NULL LIMIT 1 FOR UPDATE`,
-        [r.email],
-      );
-      let userId: string;
-      let outcome: "linked" | "created";
-      if (byEmail.rows[0]) {
-        userId = byEmail.rows[0].id;
-        const other = await client.query(
-          `SELECT "accountId" FROM trexdb.account WHERE "userId" = $1 AND "providerId" = $2 LIMIT 1`,
-          [userId, r.providerId],
-        );
-        if (other.rows[0] && other.rows[0].accountId !== r.accountId) {
-          // A rollback that itself fails must not replace this outcome.
-          await client.query("ROLLBACK").catch(() => {});
-          return { conflict: true, userId };
-        }
-        outcome = "linked";
-      } else {
-        userId = await provisionUser(client, {
-          sub: r.accountId, email: r.email, name: r.name ?? undefined, emailVerified: true,
-        });
-        outcome = "created";
+      const target = r.userId !== null
+        ? await resolveRequestedUser(client, r, r.userId)
+        : await resolveUserByEmail(client, r);
+      if ("conflict" in target) {
+        // A rollback that itself fails must not replace this outcome.
+        await client.query("ROLLBACK").catch(() => {});
+        return target;
       }
-      await upsertAccount(client, { userId, providerId: r.providerId, accountId: r.accountId });
-      result = { userId, outcome };
+      await upsertAccount(client, { userId: target.userId, providerId: r.providerId, accountId: r.accountId });
+      result = target;
     }
     if (r.banned) {
       await client.query(`UPDATE trexdb."user" SET banned = true WHERE id = $1`, [result.userId]);
@@ -112,4 +110,66 @@ export async function linkIdentity(client: PgClient, r: LinkRequest): Promise<Li
     await client.query("ROLLBACK").catch(() => {});
     throw err;
   }
+}
+
+type LinkTarget =
+  | { userId: string; outcome: "linked" | "created" }
+  | { conflict: true; userId: string };
+
+/** Refuses a user who already carries a different account at this provider. */
+async function otherAccountConflict(
+  client: PgClient,
+  userId: string,
+  r: LinkRequest,
+): Promise<LinkTarget | null> {
+  const other = await client.query(
+    `SELECT "accountId" FROM trexdb.account WHERE "userId" = $1 AND "providerId" = $2 LIMIT 1`,
+    [userId, r.providerId],
+  );
+  if (other.rows[0] && other.rows[0].accountId !== r.accountId) return { conflict: true, userId };
+  return null;
+}
+
+async function resolveUserByEmail(client: PgClient, r: LinkRequest): Promise<LinkTarget> {
+  const byEmail = await client.query(
+    `SELECT id FROM trexdb."user" WHERE lower(email) = lower($1) AND "deletedAt" IS NULL LIMIT 1 FOR UPDATE`,
+    [r.email],
+  );
+  if (byEmail.rows[0]) {
+    const userId: string = byEmail.rows[0].id;
+    return (await otherAccountConflict(client, userId, r)) ?? { userId, outcome: "linked" };
+  }
+  const userId = await provisionUser(client, {
+    sub: r.accountId, email: r.email, name: r.name ?? undefined, emailVerified: true,
+  });
+  return { userId, outcome: "created" };
+}
+
+async function resolveRequestedUser(client: PgClient, r: LinkRequest, userId: string): Promise<LinkTarget> {
+  const byId = await client.query(
+    `SELECT id, "deletedAt" FROM trexdb."user" WHERE id = $1 FOR UPDATE`,
+    [userId],
+  );
+  if (byId.rows[0]) {
+    // A soft-deleted row still owns the id, so creating would fail on the
+    // primary key; linking would resurrect an account an administrator
+    // removed. Neither is this call's decision to make.
+    if (byId.rows[0].deletedAt != null) return { conflict: true, userId };
+    return (await otherAccountConflict(client, userId, r)) ?? { userId, outcome: "linked" };
+  }
+  // No user has this id. One holding the address under a different id is the
+  // same person migrated some other way, or a different person; either way the
+  // requested id cannot be honoured without an administrator reconciling them.
+  // Deleted rows count too: user.email is UNIQUE across them, so the insert
+  // would fail anyway, and a 409 naming the row beats an opaque 500.
+  const byEmail = await client.query(
+    `SELECT id FROM trexdb."user" WHERE lower(email) = lower($1)
+      ORDER BY ("deletedAt" IS NULL) DESC LIMIT 1`,
+    [r.email],
+  );
+  if (byEmail.rows[0]) return { conflict: true, userId: byEmail.rows[0].id };
+  await provisionUser(client, {
+    sub: r.accountId, email: r.email, name: r.name ?? undefined, emailVerified: true,
+  }, { id: userId });
+  return { userId, outcome: "created" };
 }

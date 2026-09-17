@@ -189,8 +189,14 @@ export async function resolveFederatedUser(
  * be wrong — it can collide, it can be mailed, and an administrator cannot tell
  * it from one the person gave. An absent one is merely absent.
  */
-export async function provisionUser(client: PgClient, identity: UpstreamIdentity): Promise<string> {
-  const id = crypto.randomUUID();
+export async function provisionUser(
+  client: PgClient,
+  identity: UpstreamIdentity,
+  // Only the admin link path passes an id: a migrated user keeps the id it had
+  // at its previous identity provider, because that is its token `sub`.
+  opts: { id?: string } = {},
+): Promise<string> {
+  const id = opts.id ?? crypto.randomUUID();
   await client.query(
     `INSERT INTO trexdb."user" (id, name, email, "emailVerified", email_confirmed_at, role)
      VALUES ($1, $2, $3, true, NOW(), 'user')`,
