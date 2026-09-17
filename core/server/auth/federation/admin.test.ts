@@ -1,5 +1,5 @@
 import { assertEquals } from "jsr:@std/assert";
-import { parseLinkRequest, parseProviderUpsert } from "./admin-policy.ts";
+import { type LinkRequest, parseLinkRequest, parseProviderUpsert } from "./admin-policy.ts";
 import { linkIdentity, setProviderEnabled, upsertProvider } from "./admin-store.ts";
 
 const validProvider = {
@@ -64,10 +64,13 @@ Deno.test("parseLinkRequest rejects the whole request for a malformed userId", (
 // order, and every statement is recorded so the test can assert what ran.
 function fakeClient(script: Array<[string, unknown[]]>) {
   const ran: string[] = [];
+  const params: unknown[][] = [];
   return {
     ran,
-    query(sql: string, _params?: unknown[]) {
+    params,
+    query(sql: string, p?: unknown[]) {
       ran.push(sql.replace(/\s+/g, " ").trim());
+      params.push(p ?? []);
       const i = script.findIndex(([needle]) => sql.includes(needle));
       if (i === -1) return Promise.resolve({ rows: [], rowCount: 0 });
       const [, rows] = script.splice(i, 1)[0];
@@ -76,7 +79,7 @@ function fakeClient(script: Array<[string, unknown[]]>) {
   };
 }
 
-const link = {
+const link: LinkRequest = {
   providerId: "logto", accountId: "logto-1", email: "a@x.test", name: "A", banned: false, userId: null,
 };
 
@@ -198,4 +201,245 @@ Deno.test("upsertProvider writes every federation column in one statement", asyn
 Deno.test("setProviderEnabled reports whether the provider exists", async () => {
   assertEquals(await setProviderEnabled(fakeClient([["UPDATE trexdb.sso_provider", [{ id: "logto" }]]]), "logto", false), true);
   assertEquals(await setProviderEnabled(fakeClient([]), "logto", false), false);
+});
+
+// ── linkIdentity with a caller-chosen user id (scripted client) ─────────────
+
+const pinned = { ...link, userId: "x1y2z3a4b5c6" };
+
+Deno.test("linkIdentity with userId reports an existing link to that same user", async () => {
+  const c = fakeClient([
+    ["FROM trexdb.sso_provider", [{ id: "logto" }]],
+    ["FROM trexdb.account a", [{ userId: "x1y2z3a4b5c6", disabled: false }]],
+  ]);
+  assertEquals(await linkIdentity(c, pinned), { userId: "x1y2z3a4b5c6", outcome: "already_linked" });
+  assertEquals(c.ran.at(-1), "COMMIT");
+});
+
+Deno.test("linkIdentity with userId refuses an account already linked to a different user", async () => {
+  const c = fakeClient([
+    ["FROM trexdb.sso_provider", [{ id: "logto" }]],
+    ["FROM trexdb.account a", [{ userId: "someone-else", disabled: false }]],
+  ]);
+  assertEquals(await linkIdentity(c, { ...pinned, banned: true }), { conflict: true, userId: "someone-else" });
+  assertEquals(c.ran.some((s) => s.startsWith("INSERT") || s.startsWith("UPDATE")), false);
+  assertEquals(c.ran.at(-1), "ROLLBACK");
+});
+
+Deno.test("linkIdentity with userId attaches to the live user holding that id, under a row lock", async () => {
+  const c = fakeClient([
+    ["FROM trexdb.sso_provider", [{ id: "logto" }]],
+    ["WHERE id = $1 FOR UPDATE", [{ id: "x1y2z3a4b5c6", deletedAt: null }]],
+  ]);
+  assertEquals(await linkIdentity(c, pinned), { userId: "x1y2z3a4b5c6", outcome: "linked" });
+  assertEquals(c.ran.some((s) => s.startsWith('INSERT INTO trexdb."user"')), false);
+  assertEquals(c.ran.some((s) => s.startsWith("INSERT INTO trexdb.account")), true);
+  // The id decides; the address is never consulted once the id matched.
+  assertEquals(c.ran.some((s) => s.includes("lower(email)")), false);
+});
+
+Deno.test("linkIdentity with userId refuses a user already linked to another account at the provider", async () => {
+  const c = fakeClient([
+    ["FROM trexdb.sso_provider", [{ id: "logto" }]],
+    ["WHERE id = $1 FOR UPDATE", [{ id: "x1y2z3a4b5c6", deletedAt: null }]],
+    ['"userId" = $1 AND "providerId" = $2', [{ accountId: "logto-other" }]],
+  ]);
+  assertEquals(await linkIdentity(c, pinned), { conflict: true, userId: "x1y2z3a4b5c6" });
+  assertEquals(c.ran.some((s) => s.startsWith("INSERT")), false);
+  assertEquals(c.ran.at(-1), "ROLLBACK");
+});
+
+Deno.test("linkIdentity with userId refuses a soft-deleted user holding that id", async () => {
+  const c = fakeClient([
+    ["FROM trexdb.sso_provider", [{ id: "logto" }]],
+    ["WHERE id = $1 FOR UPDATE", [{ id: "x1y2z3a4b5c6", deletedAt: new Date() }]],
+  ]);
+  assertEquals(await linkIdentity(c, pinned), { conflict: true, userId: "x1y2z3a4b5c6" });
+  assertEquals(c.ran.some((s) => s.startsWith("INSERT")), false);
+});
+
+Deno.test("linkIdentity with userId refuses when a user with another id holds the email", async () => {
+  const c = fakeClient([
+    ["FROM trexdb.sso_provider", [{ id: "logto" }]],
+    ["lower(email) = lower($1)", [{ id: "random-uuid-user" }]],
+  ]);
+  assertEquals(await linkIdentity(c, pinned), { conflict: true, userId: "random-uuid-user" });
+  assertEquals(c.ran.some((s) => s.startsWith("INSERT")), false);
+  assertEquals(c.ran.at(-1), "ROLLBACK");
+});
+
+Deno.test("linkIdentity with userId creates the user under exactly that id", async () => {
+  const c = fakeClient([["FROM trexdb.sso_provider", [{ id: "logto" }]]]);
+  assertEquals(await linkIdentity(c, pinned), { userId: "x1y2z3a4b5c6", outcome: "created" });
+  const insert = c.ran.findIndex((s) => s.startsWith('INSERT INTO trexdb."user"'));
+  assertEquals(c.params[insert][0], "x1y2z3a4b5c6");
+  const account = c.ran.findIndex((s) => s.startsWith("INSERT INTO trexdb.account"));
+  assertEquals(c.params[account][1], "x1y2z3a4b5c6");
+});
+
+Deno.test("linkIdentity with userId takes a per-user lock after the per-account lock", async () => {
+  const c = fakeClient([["FROM trexdb.sso_provider", [{ id: "logto" }]]]);
+  await linkIdentity(c, pinned);
+  const locks = c.ran.flatMap((s, i) => s.startsWith("SELECT pg_advisory_xact_lock") ? [c.params[i][0]] : []);
+  assertEquals(locks, ["logto:logto-1", "user:x1y2z3a4b5c6"]);
+});
+
+Deno.test("linkIdentity without userId neither takes the per-user lock nor looks users up by id", async () => {
+  const c = fakeClient([["FROM trexdb.sso_provider", [{ id: "logto" }]]]);
+  await linkIdentity(c, link);
+  const locks = c.ran.filter((s) => s.startsWith("SELECT pg_advisory_xact_lock"));
+  assertEquals(locks.length, 1);
+  assertEquals(c.ran.some((s) => s.includes("WHERE id = $1 FOR UPDATE")), false);
+  const insert = c.ran.findIndex((s) => s.startsWith('INSERT INTO trexdb."user"'));
+  assertEquals(c.params[insert][0] !== "x1y2z3a4b5c6" && typeof c.params[insert][0], "string");
+});
+
+// ── linkIdentity against a real database ─────────────────────────────────────
+// Gated on DATABASE_URL, like the agents migration tests: a database with the
+// core trexdb schema (core/schema) applied, connected as a role that bypasses
+// RLS. Every row these tests write is scoped to a per-run provider and removed
+// afterwards.
+
+const dbUrl = Deno.env.get("DATABASE_URL");
+
+async function withDb(fn: (db: PgTestClient, ctx: DbCtx) => Promise<void>) {
+  const { Client } = await import("npm:pg");
+  const db = new Client({ connectionString: dbUrl });
+  await db.connect();
+  const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+  const ctx: DbCtx = {
+    providerId: `lt_${run}`,
+    // 12 lowercase alphanumerics, the shape of a Logto user id.
+    id: (n: number) => `${run}${String(n).padStart(2, "0")}`,
+    email: (n: number) => `u${n}-${run}@link.test`,
+  };
+  await db.query(
+    `INSERT INTO trexdb.sso_provider (id, "displayName", "clientId", "clientSecret", enabled)
+     VALUES ($1, 'Link test', 'cid', 'sec', true)`,
+    [ctx.providerId],
+  );
+  try {
+    await fn(db, ctx);
+  } finally {
+    await db.query(
+      `DELETE FROM trexdb."user" WHERE id LIKE $1 OR email LIKE $2
+          OR id IN (SELECT "userId" FROM trexdb.account WHERE "providerId" = $3)`,
+      [`${run}%`, `%-${run}@link.test`, ctx.providerId],
+    );
+    await db.query(`DELETE FROM trexdb.sso_provider WHERE id = $1`, [ctx.providerId]);
+    await db.end();
+  }
+}
+
+// deno-lint-ignore no-explicit-any
+type PgTestClient = any;
+interface DbCtx {
+  providerId: string;
+  id: (n: number) => string;
+  email: (n: number) => string;
+}
+
+async function insertUser(db: PgTestClient, id: string, email: string) {
+  await db.query(`INSERT INTO trexdb."user" (id, name, email) VALUES ($1, $1, $2)`, [id, email]);
+}
+
+async function accountsOf(db: PgTestClient, providerId: string) {
+  const { rows } = await db.query(
+    `SELECT "accountId", "userId" FROM trexdb.account WHERE "providerId" = $1 ORDER BY "accountId"`,
+    [providerId],
+  );
+  return rows;
+}
+
+const dbTest = (name: string, fn: (db: PgTestClient, ctx: DbCtx) => Promise<void>) =>
+  Deno.test({ name: `[db] ${name}`, ignore: !dbUrl, fn: () => withDb(fn) });
+
+const req = (ctx: DbCtx, n: number, extra: Partial<LinkRequest> = {}): LinkRequest => ({
+  providerId: ctx.providerId, accountId: ctx.id(n), email: ctx.email(n), name: null,
+  banned: false, userId: ctx.id(n), ...extra,
+});
+
+dbTest("linkIdentity creates a user whose id is exactly the requested one, then reports it linked", async (db, ctx) => {
+  const r = req(ctx, 1);
+  assertEquals(await linkIdentity(db, r), { userId: ctx.id(1), outcome: "created" });
+  const { rows } = await db.query(`SELECT id, email FROM trexdb."user" WHERE id = $1`, [ctx.id(1)]);
+  assertEquals(rows, [{ id: ctx.id(1), email: ctx.email(1) }]);
+  assertEquals(await accountsOf(db, ctx.providerId), [{ accountId: ctx.id(1), userId: ctx.id(1) }]);
+
+  assertEquals(await linkIdentity(db, r), { userId: ctx.id(1), outcome: "already_linked" });
+  assertEquals(await accountsOf(db, ctx.providerId), [{ accountId: ctx.id(1), userId: ctx.id(1) }]);
+});
+
+dbTest("linkIdentity refuses to re-point an existing link at a different user id", async (db, ctx) => {
+  await linkIdentity(db, req(ctx, 1));
+  await insertUser(db, ctx.id(2), ctx.email(2));
+  assertEquals(
+    await linkIdentity(db, req(ctx, 1, { userId: ctx.id(2), email: ctx.email(2) })),
+    { conflict: true, userId: ctx.id(1) },
+  );
+  assertEquals(await accountsOf(db, ctx.providerId), [{ accountId: ctx.id(1), userId: ctx.id(1) }]);
+});
+
+dbTest("linkIdentity attaches to an existing, unlinked user with the requested id", async (db, ctx) => {
+  // The stored address differs on purpose: the id, not the address, decides.
+  await insertUser(db, ctx.id(3), ctx.email(33));
+  assertEquals(await linkIdentity(db, req(ctx, 3)), { userId: ctx.id(3), outcome: "linked" });
+  assertEquals(await accountsOf(db, ctx.providerId), [{ accountId: ctx.id(3), userId: ctx.id(3) }]);
+});
+
+dbTest("linkIdentity refuses a user with the requested id already linked to another account", async (db, ctx) => {
+  await linkIdentity(db, req(ctx, 4));
+  assertEquals(
+    await linkIdentity(db, req(ctx, 5, { userId: ctx.id(4) })),
+    { conflict: true, userId: ctx.id(4) },
+  );
+  assertEquals(await accountsOf(db, ctx.providerId), [{ accountId: ctx.id(4), userId: ctx.id(4) }]);
+});
+
+dbTest("linkIdentity refuses when another user holds the email, and creates nobody", async (db, ctx) => {
+  const other = crypto.randomUUID();
+  await insertUser(db, other, ctx.email(6));
+  try {
+    assertEquals(await linkIdentity(db, req(ctx, 6)), { conflict: true, userId: other });
+    const { rows } = await db.query(`SELECT id FROM trexdb."user" WHERE id = $1`, [ctx.id(6)]);
+    assertEquals(rows, []);
+    assertEquals(await accountsOf(db, ctx.providerId), []);
+  } finally {
+    await db.query(`DELETE FROM trexdb."user" WHERE id = $1`, [other]);
+  }
+});
+
+dbTest("linkIdentity without userId keeps linking by email and minting a UUID", async (db, ctx) => {
+  const created = await linkIdentity(db, req(ctx, 7, { userId: null }));
+  assertEquals("outcome" in created && created.outcome, "created");
+  const createdId = (created as { userId: string }).userId;
+  assertEquals(/^[0-9a-f-]{36}$/.test(createdId), true);
+  try {
+    await insertUser(db, ctx.id(8), ctx.email(8));
+    assertEquals(
+      await linkIdentity(db, req(ctx, 8, { userId: null, accountId: "acct-8" })),
+      { userId: ctx.id(8), outcome: "linked" },
+    );
+  } finally {
+    await db.query(`DELETE FROM trexdb."user" WHERE id = $1`, [createdId]);
+  }
+});
+
+dbTest("concurrent links asking for the same new id yield one user and one 409", async (db, ctx) => {
+  const { Client } = await import("npm:pg");
+  const second = new Client({ connectionString: dbUrl });
+  await second.connect();
+  try {
+    const results = await Promise.all([
+      linkIdentity(db, req(ctx, 9)),
+      linkIdentity(second, req(ctx, 10, { userId: ctx.id(9), email: ctx.email(9) })),
+    ]);
+    const outcomes = results.map((r) => "outcome" in r ? r.outcome : "conflict" in r ? "conflict" : "other").sort();
+    assertEquals(outcomes, ["conflict", "created"]);
+    const { rows } = await db.query(`SELECT count(*)::int AS n FROM trexdb."user" WHERE id = $1`, [ctx.id(9)]);
+    assertEquals(rows[0].n, 1);
+    assertEquals((await accountsOf(db, ctx.providerId)).length, 1);
+  } finally {
+    await second.end();
+  }
 });
