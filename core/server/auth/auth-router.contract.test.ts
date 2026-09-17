@@ -23,6 +23,7 @@ import {
   signAccessToken,
 } from "./jwt.ts";
 import { hashPassword } from "./password.ts";
+import { nativeIdpEnabled } from "./native-idp.ts";
 
 // ── Harness ─────────────────────────────────────────────────────────────────
 
@@ -71,6 +72,36 @@ export async function startContractServer(): Promise<
   };
 }
 
+/**
+ * Reproduces index.ts:180-192, the only place nativeIdpEnabled() is read. The
+ * switch is a property of the mount, not of the router, so it can only be
+ * characterised by mounting the router the way the server does.
+ */
+export async function startMountedContractServer(): Promise<
+  { url: string; close: () => Promise<void> }
+> {
+  const { authRouter } = await import("./auth-router.ts");
+  const app = express();
+  if (nativeIdpEnabled()) {
+    app.use("/trex/auth/v1", authRouter);
+  } else {
+    app.use("/trex/auth/v1", (_req: Json, res: Json) => {
+      res.status(403).json({
+        error: "idp_disabled",
+        error_description:
+          "Native login is disabled. Set TREX_IDP_ENABLED=true to enable it.",
+      });
+    });
+  }
+  const server = app.listen(0);
+  await new Promise<void>((r) => server.once("listening", () => r()));
+  const { port } = server.address() as { port: number };
+  return {
+    url: `http://127.0.0.1:${port}/trex/auth/v1`,
+    close: () => new Promise<void>((r) => server.close(() => r())),
+  };
+}
+
 async function getPool(): Promise<PgPool> {
   return (await import("../db.ts")).pool;
 }
@@ -108,6 +139,21 @@ function contractTest(name: string, fn: (c: Ctx) => Promise<void>) {
         await server.close();
         await purgeFixtures(pool);
       }
+    },
+  });
+}
+
+/** Same gating, but the caller boots its own server (the mount-switch tests). */
+function mountTest(name: string, fn: (pool: PgPool) => Promise<void>) {
+  Deno.test({
+    name,
+    ignore: !DATABASE_URL,
+    sanitizeOps: false,
+    sanitizeResources: false,
+    fn: async () => {
+      pinRootKey();
+      const pool = await getPool();
+      await fn(pool);
     },
   });
 }
@@ -2055,4 +2101,43 @@ contractTest("DELETE /admin/users/:id is 404 User not found", async ({ url, pool
   );
   assertEquals(res.status, 404);
   assertEquals(await res.json(), { error: "User not found" });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The mount-level native IdP switch (index.ts:180-192)
+// ═══════════════════════════════════════════════════════════════════════════
+
+mountTest("the whole prefix is 403 idp_disabled while TREX_IDP_ENABLED is off", async () => {
+  await withEnv({ TREX_IDP_ENABLED: undefined }, async () => {
+    const server = await startMountedContractServer();
+    try {
+      for (const path of ["/health", "/settings", "/signup", "/token?grant_type=password"]) {
+        const res = await fetch(`${server.url}${path}`, { method: "POST" });
+        assertEquals(res.status, 403, path);
+        assertEquals(await res.json(), {
+          error: "idp_disabled",
+          error_description: "Native login is disabled. Set TREX_IDP_ENABLED=true to enable it.",
+        }, path);
+      }
+    } finally {
+      await server.close();
+    }
+  });
+});
+
+mountTest("the routes are reachable once TREX_IDP_ENABLED is on", async () => {
+  await withEnv({ TREX_IDP_ENABLED: "true" }, async () => {
+    const server = await startMountedContractServer();
+    try {
+      const res = await fetch(`${server.url}/health`);
+      assertEquals(res.status, 200);
+      assertEquals(await res.json(), {
+        version: "trex-gotrue-1.0.0",
+        name: "GoTrue",
+        description: "Trex GoTrue-compatible auth",
+      });
+    } finally {
+      await server.close();
+    }
+  });
 });
