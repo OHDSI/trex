@@ -15,6 +15,35 @@ export function authBasePath(): string {
   return `${BASE_PATH}/_auth`;
 }
 
+/**
+ * Without an explicit base URL Better Auth derives the origin from whichever
+ * request happens to arrive, which is how callbacks and redirects come to work
+ * in development and break behind an ingress.
+ *
+ * Only the origin of BETTER_AUTH_URL is used, because that variable already
+ * carries a path elsewhere in trex — index.ts defaults it to
+ * `http://localhost:8001${BASE_PATH}` for the edge-function workers — and
+ * concatenating that with a base path that also starts with BASE_PATH would
+ * yield /trex/trex/_auth. auth/jwt.ts narrows the same variable the same way
+ * when it builds the token issuer.
+ */
+function authBaseUrl(): string {
+  const raw = Deno.env.get("BETTER_AUTH_URL") || "http://localhost:8000";
+  let origin: string;
+  try {
+    origin = new URL(raw).origin;
+  } catch {
+    origin = raw;
+  }
+  return `${origin}${authBasePath()}`;
+}
+
+// The same variable and the same split as the CORS allow-list in index.ts, so
+// an origin trusted for one cannot silently differ from the other.
+const trustedOrigins = (Deno.env.get("BETTER_AUTH_TRUSTED_ORIGINS") || "")
+  .split(",")
+  .filter(Boolean);
+
 // Better Auth wants a string; the root key is 32 raw bytes and is never handed
 // to a third party directly.
 const secret = await deriveSubkeyBase64(LABELS.betterAuthEngine);
@@ -36,6 +65,8 @@ function infrastructureFailure(message: string, cause: unknown): APIError {
 export const auth = betterAuth({
   database: pool,
   basePath: authBasePath(),
+  baseURL: authBaseUrl(),
+  trustedOrigins,
   secret,
   emailAndPassword: {
     enabled: nativePasswordLoginEnabled(),
@@ -69,8 +100,10 @@ export const auth = betterAuth({
       email_confirmed_at: { type: "date", required: false, input: false },
       last_sign_in_at: { type: "date", required: false, input: false },
       phone: { type: "string", required: false, input: false },
-      user_metadata: { type: "string", required: false, input: false },
-      app_metadata: { type: "string", required: false, input: false },
+      // jsonb columns. Better Auth maps `json` to jsonb and `string` to text
+      // unconditionally, so `string` here would describe the wrong column type.
+      user_metadata: { type: "json", required: false, input: false },
+      app_metadata: { type: "json", required: false, input: false },
       mustChangePassword: { type: "boolean", required: false, input: false },
       is_placeholder_email: { type: "boolean", required: false, input: false },
     },
