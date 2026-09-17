@@ -443,3 +443,102 @@ dbTest("concurrent links asking for the same new id yield one user and one 409",
     await second.end();
   }
 });
+
+dbTest("a pre-linked user with a 12-character id signs in end to end", async (db, ctx) => {
+  if (!Deno.env.get("TREX_ROOT_KEY")) {
+    Deno.env.set("TREX_ROOT_KEY", btoa(String.fromCharCode(...new Uint8Array(32).map((_, i) => i))));
+  }
+  // Imported here, not at the top: db.ts refuses to load without DATABASE_URL,
+  // and every test above has to run without one. The express-based modules go
+  // through a computed specifier so the type check does not follow them:
+  // auth-router.ts does not type-check on its own (untyped express handlers),
+  // and that must not fail this whole file.
+  const runtimeImport = (spec: string) => import(spec.startsWith(".") ? new URL(spec, import.meta.url).href : spec);
+  const { resolveFederatedUser } = await import("./providers.ts");
+  const { createTokenResponse, authRouter } = await runtimeImport("../auth-router.ts");
+  const express = (await runtimeImport("express")).default;
+  const { verifyAccessToken } = await import("../jwt.ts");
+  const { issueCode, consumeCode } = await import("../oidc/codes.ts");
+  const { buildIdTokenClaims } = await import("../oidc/claims.ts");
+
+  const id = ctx.id(11);
+  assertEquals(/^[a-z0-9]{12}$/.test(id), true);
+  assertEquals(await linkIdentity(db, req(ctx, 11, { accountId: "logto-sub-11" })), { userId: id, outcome: "created" });
+
+  // First sign-in at /callback resolves through the link to the same id.
+  const decision = await resolveFederatedUser(
+    db,
+    { id: ctx.providerId, linkPolicy: "none", autoProvision: false } as unknown as Parameters<typeof resolveFederatedUser>[1],
+    { sub: "logto-sub-11", email: ctx.email(11), emailVerified: true },
+  );
+  assertEquals(decision, { action: "link", userId: id });
+
+  // The session /callback issues: access token `sub` and the refresh token row.
+  const { rows: [row] } = await db.query(
+    `SELECT id, name, email, image, role, banned, "emailVerified", email_confirmed_at,
+            last_sign_in_at, "mustChangePassword", user_metadata, app_metadata,
+            password_hash, "createdAt", "updatedAt"
+       FROM trexdb."user" WHERE id = $1`,
+    [id],
+  );
+  const session = await createTokenResponse(row);
+  assertEquals((await verifyAccessToken(session.access_token))?.sub, id);
+  assertEquals(session.user.id, id);
+  const refresh = await db.query(`SELECT "userId" FROM trexdb.refresh_token WHERE "userId" = $1`, [id]);
+  assertEquals(refresh.rows.length, 1);
+
+  // GoTrue-compatible GET /user with that token.
+  const app = express();
+  app.use(authRouter);
+  const server = app.listen(0);
+  try {
+    const port = (server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/user`, {
+      headers: { authorization: `Bearer ${session.access_token}` },
+    });
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assertEquals(body.id, id);
+    assertEquals(body.email, ctx.email(11));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  // OIDC authorization code for the same user (V15 made user_id TEXT).
+  const clientId = `link-test-${ctx.providerId}`;
+  await db.query(
+    `INSERT INTO trexdb.oidc_client (client_id, name, redirect_uris) VALUES ($1, 'link test', ARRAY['https://rp.test/cb'])`,
+    [clientId],
+  );
+  try {
+    const { code } = await issueCode({
+      clientId, userId: id, redirectUri: "https://rp.test/cb", scope: "openid",
+      nonce: null, codeChallenge: null, codeChallengeMethod: null,
+    });
+    const consumed = await consumeCode(code);
+    assertEquals(consumed.ok && consumed.record.userId, id);
+  } finally {
+    // Codes cascade with their client.
+    await db.query(`DELETE FROM trexdb.oidc_client WHERE client_id = $1`, [clientId]);
+  }
+  assertEquals(
+    buildIdTokenClaims(
+      { id, email: ctx.email(11), role: "user", appRoles: [] },
+      { issuer: "https://trex.test", audience: clientId, scopes: ["openid"] },
+    ).sub,
+    id,
+  );
+
+  // auth.uid() is what RLS policies compare row owners against.
+  await db.query("BEGIN");
+  try {
+    await db.query(`SELECT set_config('request.jwt.claims', $1, true)`, [JSON.stringify({ sub: id })]);
+    const { rows: [uid] } = await db.query(`SELECT auth.uid() AS uid`);
+    assertEquals(uid.uid, id);
+  } finally {
+    await db.query("ROLLBACK");
+  }
+
+  const { pool } = await runtimeImport("../../db.ts");
+  await pool.end();
+});
