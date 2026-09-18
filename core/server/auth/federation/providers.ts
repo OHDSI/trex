@@ -68,10 +68,20 @@ export async function findLinkCandidateByEmail(
     // that address at the identity provider. Both columns are nullable with
     // NULL meaning "not disabled", so `banned = false` alone would wrongly
     // drop NULL rows; `IS NOT TRUE` treats NULL and false as not-banned.
+    //
+    // A placeholder address is trex's own invention for a user whose upstream
+    // asserted none (see provisionUser, and V16 for the rows it backfilled).
+    // Nobody asserted it and nobody can be reached at it, so it is an internal
+    // identifier rather than a claim to an identity: matching on it would hand
+    // an upstream that asserts <someone else's subject>@d2e.local as verified
+    // that person's account. Excluded here rather than in decideLink because
+    // decideLink's verified-email rule tests the *incoming* identity and never
+    // the stored row, so it has nothing to test this against.
     `SELECT id, role FROM trexdb."user"
       WHERE lower(email) = lower($1)
         AND "deletedAt" IS NULL
         AND banned IS NOT TRUE
+        AND is_placeholder_email IS NOT TRUE
       LIMIT 1`,
     [email],
   );
@@ -278,24 +288,29 @@ async function synthesisePlaceholderEmail(
  * collide, it can be mailed, and an administrator cannot tell it from one the
  * person gave.
  *
- * Two of those three are met. The address is minted from the upstream subject
- * under a domain that resolves nowhere, and a collision is refused instead of
- * attaching one person's identity to another's row; `is_placeholder_email`
- * marks the row so an administrator and every mail path can tell.
+ * All three are met. The address is minted from the upstream subject under a
+ * domain that resolves nowhere, and a collision is refused instead of attaching
+ * one person's identity to another's row; `is_placeholder_email` marks the row
+ * so an administrator and every mail path can tell.
  *
- * The third is not met, and the difference is real rather than cosmetic: an
- * absent address could not be matched at all, a synthesised one can be. Nothing
- * on the link path reads `is_placeholder_email` or the stored `"emailVerified"`
- * — findLinkCandidateByEmail filters on lower(email), "deletedAt" and banned
- * only, and decideLink's verified-email rule tests the *incoming*
- * identity.emailVerified, never the row it is about to link to. So a
- * placeholder is claimable by any provider that asserts that exact
- * <subject>@d2e.local address as verified. What stands in the way is that an
- * upstream has no reason to know an address under a domain trex invented, and
- * the provider's emailDomainAllowlist — which is the actual control, and which
- * permits everything when it is unset (emailDomainAllowed returns true for an
- * empty list). Anything that later wants a placeholder to be unclaimable has to
- * say so on the link path; writing it on the row is not enough.
+ * The third — that a synthesised address can be *matched* where an absent one
+ * could not — is met on the link path rather than on the row, because that is
+ * where it has to be met: findLinkCandidateByEmail excludes placeholders, so an
+ * upstream asserting <someone else's subject>@d2e.local as verified resolves to
+ * nothing. The flag on the row is what that query reads; writing it alone would
+ * not have been enough, and the domain and emailDomainAllowlist are defence in
+ * depth behind it rather than the control (emailDomainAllowed permits
+ * everything when the list is unset, which is the default).
+ *
+ * The exclusion costs a migrated user nothing: resolveFederatedUser answers
+ * from the (providerId, accountId) account row first and only asks about email
+ * for an upstream identity it has never seen.
+ *
+ * The federation *admin* API's linkIdentity (admin-store.ts) still matches a
+ * placeholder by address, through email lookups of its own that never reach
+ * this function. Left that way on purpose: that caller is an authenticated
+ * administrator asserting a link, not an upstream claiming one, and a migration
+ * pre-linking the rows V16 backfilled is exactly what it is for.
  */
 export async function provisionUser(
   client: PgClient,
