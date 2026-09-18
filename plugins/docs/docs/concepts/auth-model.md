@@ -7,6 +7,39 @@ sidebar_position: 2
 This page explains *how* Trex authenticates users and authorizes requests. For
 the endpoint-by-endpoint reference, see [APIs → Auth](../apis/auth).
 
+## The Engine and the Compatibility Surface
+
+Two different things own authentication, and it is worth being precise about
+which does what:
+
+- **Better Auth is the engine.** It owns `trexdb.user`, `trexdb.session`,
+  `trexdb.account` and `trexdb.verification`, and it is the only thing that
+  verifies a password. A credential lives in `trexdb.account.password` for
+  `providerId = 'credential'`; the engine hashes and verifies it with trex's own
+  scrypt, through hooks installed in `core/server/auth/better-auth.ts`, so the
+  hashes that existed before the cutover verify unchanged.
+- **`/trex/auth/v1` is the compatibility surface.** It is a GoTrue-shaped
+  router — `/token`, `/signup`, `/user`, `/change-password`, `/admin/users` —
+  that reads and writes through the engine and then answers in Supabase's
+  vocabulary.
+
+Both exist because the clients and the engine disagree about the wire, not
+about the model. Everything already pointed at trex — `supabase-js`, the web
+UI, the CLI, the MCP server, every plugin — speaks GoTrue: a JWT access token,
+an opaque rotating refresh token, `error`/`error_description` bodies. Better
+Auth speaks none of that; it issues a session cookie and has no refresh-token
+concept for this path. Replacing the wire would have meant changing every
+caller at once. So the router kept its wire contract (pinned test-by-test in
+`core/server/auth/auth-router.contract.test.ts`) and had its insides replaced:
+credential verification, user reads and writes, and the admin block all go
+through the engine now, and the JWT the caller receives is still minted by
+`core/server/auth/jwt.ts`.
+
+The practical consequence for an operator: the session cookie Better Auth sets
+alongside the JWT is not decoration. It is what the OIDC provider
+(`/trex/auth/v1/oauth2/authorize`) authenticates against, and it is signed with
+the `trex.better-auth.engine.v1` subkey rather than the JWT signing key.
+
 ## Two Identity Surfaces
 
 Trex carries two parallel identity surfaces, both backed by Postgres tables in
@@ -137,6 +170,33 @@ each provider, settings come from one of two sources:
 Enabled providers appear in the login page. The actual OAuth dance is driven
 by the auth router's social provider plumbing.
 
+### Placeholder Addresses
+
+Better Auth requires an address on every user, but an upstream identity
+provider is free to assert none — and plenty do, for service accounts and for
+directory entries that were never mailboxes. Those users get a synthesised
+address of the form `<slug>@d2e.local`, where the slug comes from the
+identifier they actually sign in with (the upstream subject), and the row is
+marked `is_placeholder_email = true`.
+
+**A placeholder is an internal identifier, not a contact address.** Nobody
+asserted it and nothing resolves it. Two rules follow:
+
+- **Nothing may mail it.** trex sends no mail today, so this is a constraint on
+  whatever is added next — a password-reset mail, a notification plugin, an
+  export that feeds a mailing list. Branch on `is_placeholder_email`, not on the
+  domain, and skip the row. `d2e.local` does not resolve, so the best outcome is
+  a bounce; the worst is mis-delivery if the domain is ever registered.
+- **Federated sign-in never matches a candidate user on one.** Enforced in
+  `core/server/auth/federation/providers.ts`: an upstream asserting
+  `<someone else's subject>@d2e.local` as a verified address would otherwise be
+  handed that person's account.
+
+Rows that existed before the cutover were backfilled by `V17`; rows that arrive
+afterwards are minted by the federation provisioning path, under the same
+domain and the same slug rule, so a row from either is indistinguishable from a
+row from the other. `PUT /user` clears the flag when a real address is set.
+
 ## API Keys for MCP & CLI
 
 API keys give code paths the same authorization story as user sessions, with
@@ -166,7 +226,7 @@ sequenceDiagram
 
     U->>W: Open admin UI
     W->>A: POST /auth/v1/token (password grant)
-    A->>DB: Verify trexdb.user.password_hash
+    A->>DB: Engine verifies trexdb.account.password
     A->>DB: INSERT trexdb.refresh_token
     A-->>W: { access_token, refresh_token }
     W->>API: GET /trex/graphql<br/>Authorization: Bearer access_token
