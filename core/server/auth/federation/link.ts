@@ -27,7 +27,10 @@
 // otherwise create exactly the row V17 refuses to migrate, after V17 has run.
 // See isEngineAddressable for the other five routes that ask the same rule.
 import type { ProviderConfig, UpstreamIdentity } from "./types.ts";
-import { isEngineAddressable } from "../engine-address.ts";
+import { emailDomain, isEngineAddressable } from "../engine-address.ts";
+// Re-exported: emailDomain's rule is an address rule and now lives beside the
+// other two, but federation is where its callers and its tests look for it.
+export { emailDomain };
 
 /** The trex user an upstream address resolved to, as far as linking cares. */
 export interface ExistingUser {
@@ -45,22 +48,6 @@ export type LinkDecision =
   // "no_account" from here, and "account_disabled" from
   // resolveFederatedUser's existing-link path.
   | { action: "refuse"; reason: string };
-
-/**
- * The domain part of an address, lower-cased, or null if there isn't one.
- *
- * Split on the LAST '@', not the first: a local part may legitimately contain
- * one when quoted (`"a@b"@example.test`), and an attacker who controls the
- * local part at a permissive upstream would otherwise choose what trex reads
- * as the domain — `"victim@allowed.test"@attacker.test` must resolve to
- * attacker.test, never allowed.test.
- */
-export function emailDomain(email: string): string | null {
-  const at = email.lastIndexOf("@");
-  // at <= 0 covers both "no @ at all" and an empty local part.
-  if (at <= 0 || at === email.length - 1) return null;
-  return email.slice(at + 1).toLowerCase();
-}
 
 /**
  * `null`/empty allowlist means unrestricted, which is the pre-existing

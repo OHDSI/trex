@@ -103,3 +103,62 @@ dbTest("user-create still creates a user with a servable address", async (db, ru
   assertEquals(res.isError, undefined);
   assertEquals((await rowsFor(db, email)).length, 1);
 });
+
+// ── The placeholder domain ──────────────────────────────────────────────────
+//
+// user-create is POST /admin/users' MCP twin and answers the same way: an
+// address on d2e.local is synthetic whoever typed it, so the row is flagged,
+// unverified and unconfirmed. An operator migrating a directory through this
+// tool would otherwise create exactly the claimable population the flag exists
+// to mark. The domain is written out rather than imported, so a test cannot
+// pass merely because the constant moved and a route did not.
+
+async function marking(db: PgTestClient, email: string) {
+  const { rows } = await db.query(
+    `SELECT "emailVerified", is_placeholder_email, email_confirmed_at IS NULL AS unconfirmed
+       FROM trexdb."user" WHERE email = $1`,
+    [email],
+  );
+  return rows[0];
+}
+
+dbTest("user-create flags an address on the placeholder domain", async (db, run) => {
+  const create = await userCreate();
+  const email = `mcp-ph-${run}@d2e.local`;
+
+  const res = await create({ name: "Jo", email, password: "a-long-password" });
+  assertEquals(res.isError, undefined);
+  assertEquals(await marking(db, email), {
+    emailVerified: false,
+    is_placeholder_email: true,
+    unconfirmed: true,
+  });
+});
+
+// Both INSERT branches carry the marking: the credential-less one is the shape
+// an SSO-only migration uses, which is precisely the population at issue.
+dbTest("user-create flags a placeholder address on the password-less branch too", async (db, run) => {
+  const create = await userCreate();
+  const email = `mcp-ph-nopw-${run}@d2e.local`;
+
+  const res = await create({ name: "Jo", email });
+  assertEquals(res.isError, undefined);
+  assertEquals(await marking(db, email), {
+    emailVerified: false,
+    is_placeholder_email: true,
+    unconfirmed: true,
+  });
+});
+
+dbTest("user-create leaves an ordinary address genuine", async (db, run) => {
+  const create = await userCreate();
+  const email = `mcp-ok2-${run}@example.test`;
+
+  const res = await create({ name: "Jo", email, password: "a-long-password" });
+  assertEquals(res.isError, undefined);
+  assertEquals(await marking(db, email), {
+    emailVerified: true,
+    is_placeholder_email: false,
+    unconfirmed: false,
+  });
+});
