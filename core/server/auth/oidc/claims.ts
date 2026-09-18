@@ -122,7 +122,7 @@ export function buildIdTokenClaims(user: IdTokenUser, opts: IdTokenOptions): IdT
   // omitted, and a relying party that keys accounts off `email` must fail to
   // find one rather than key off a null.
   //
-  // Since V16 restored user.email NOT NULL, no user reaches that branch: a
+  // Since V17 restored user.email NOT NULL, no user reaches that branch: a
   // federated user whose upstream asserted no address carries a synthesised
   // <subject>@d2e.local, so trex emits it outbound. This is the mirror of the
   // inbound hole findLinkCandidateByEmail closes — a relying party that links

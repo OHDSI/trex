@@ -322,11 +322,11 @@ jobs:
   # Better Auth schema-drift check and the federation link rules. Its own job
   # rather than another suite on core-server-tests above, because the two want
   # incompatible databases: this one needs the WHOLE control plane (core/schema
-  # V1..V16 — the trexdb tables, four cluster roles, the RLS policies, and the
+  # V1..V17 — the trexdb tables, four cluster roles, the RLS policies, and the
   # auth/storage compatibility schemas), while core-server-tests deliberately
   # applies a fragment (a hand-made trexdb schema, a hand-made `authenticated`
   # role, V6 and the agents migrations) into a pgvector image the gbrain suite
-  # pins to pg16. Pouring V1..V16 into that database would change the
+  # pins to pg16. Pouring V1..V17 into that database would change the
   # environment the memory and agents suites are asserted against for a reason
   # that has nothing to do with them. The price is a second checkout and
   # `npm ci`; the jobs then run in parallel and a red X names which suite broke.
@@ -410,10 +410,11 @@ jobs:
           deno test --no-check --allow-all auth/ 2>&1 | tee "$log"
 
           # The files below carry the wire contract, the Better Auth engine
-          # construction, the schema-drift guard, the federation link rules and
-          # the V16 slug parity. All of them gate on DATABASE_URL and SKIP
-          # without one, so a service that never came up, a half-applied schema
-          # or a renamed variable would report green while testing none of it.
+          # construction, the schema-drift guard, the federation link rules, the
+          # V17 slug parity and the email-case account takeover. All of them
+          # gate on DATABASE_URL and SKIP without one, so a service that never
+          # came up, a half-applied schema or a renamed variable would report
+          # green while testing none of it.
           #
           # Asserted per file and with a floor on the count, not over the run
           # above: an aggregate cannot tell "nothing was ignored" from "nothing
@@ -426,7 +427,8 @@ jobs:
                    auth/better-auth.test.ts \
                    auth/schema-validate.test.ts \
                    auth/federation/federation.test.ts \
-                   auth/federation/placeholder-slug-parity.test.ts; do
+                   auth/federation/placeholder-slug-parity.test.ts \
+                   auth/email-case.test.ts; do
             # `|| true` so a no-match grep does not kill the script under
             # `bash -e {0}` before the diagnosis below can be printed. A run
             # that FAILED prints no `ok |` line either, so it lands on the same

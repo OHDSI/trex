@@ -1341,12 +1341,12 @@ Deno.test("refusalRedirect is null without a login URL, so callers keep the JSON
 
 // ── Placeholder addresses (providers.ts) ─────────────────────────────────────
 //
-// V16 restored user.email NOT NULL, so the branch decideLink routes an
+// V17 restored user.email NOT NULL, so the branch decideLink routes an
 // address-less identity down — {action:"provision"} under autoProvision —
 // cannot write a NULL any more. These pin the rule that replaced it, which is
-// shared by hand with V16's DO block.
+// shared by hand with V17's DO block.
 
-Deno.test("the placeholder local part is the slug V16 computes", () => {
+Deno.test("the placeholder local part is the slug V17 computes", () => {
   assertEquals(placeholderLocalPart("Alice.Example"), "alice.example");
   assertEquals(placeholderLocalPart("alice example"), "alice-example");
   assertEquals(placeholderLocalPart("carol@corp.example"), "carol-corp.example");
@@ -1440,13 +1440,13 @@ Deno.test("an identity that asserts an address is provisioned with it, verified 
 });
 
 // Gated on DATABASE_URL like admin.test.ts's [db] block: the stubs above pin
-// which address is computed, but only a real database proves the row V16's
+// which address is computed, but only a real database proves the row V17's
 // NOT NULL constraints will actually accept — which is the difference between
 // a placeholder and a 500 on the first sign-in of a username-only user.
 const provisionDbUrl = Deno.env.get("DATABASE_URL");
 
 Deno.test({
-  name: "[db] provisioning an address-less identity writes a row V16 accepts",
+  name: "[db] provisioning an address-less identity writes a row V17 accepts",
   ignore: !provisionDbUrl,
   fn: async () => {
     const { Client } = await import("npm:pg");
@@ -1511,7 +1511,7 @@ Deno.test({
   },
 });
 
-// The migrated users V16 backfilled are the population this exclusion could
+// The migrated users V17 backfilled are the population this exclusion could
 // plausibly break, so prove the ordering that spares them rather than assert
 // it: resolveFederatedUser answers from the (providerId, accountId) account
 // row and never reaches the email query.
@@ -1554,7 +1554,7 @@ Deno.test({
   },
 });
 
-// The exclusion is only correct while the address is still synthesised. V16's
+// The exclusion is only correct while the address is still synthesised. V17's
 // column comment defines the flag as "the address is synthesised, not a contact
 // address", so an address the account holder supplied has to clear it — and
 // PUT /user is the one route that writes a caller-supplied address. Without the

@@ -70,21 +70,49 @@ export async function findLinkCandidateByEmail(
     // drop NULL rows; `IS NOT TRUE` treats NULL and false as not-banned.
     //
     // A placeholder address is trex's own invention for a user whose upstream
-    // asserted none (see provisionUser, and V16 for the rows it backfilled).
+    // asserted none (see provisionUser, and V17 for the rows it backfilled).
     // Nobody asserted it and nobody can be reached at it, so it is an internal
     // identifier rather than a claim to an identity: matching on it would hand
     // an upstream that asserts <someone else's subject>@d2e.local as verified
     // that person's account. Excluded here rather than in decideLink because
     // decideLink's verified-email rule tests the *incoming* identity and never
     // the stored row, so it has nothing to test this against.
+    //
+    // The two filters answer different questions and neither substitutes for
+    // the other: the placeholder clause decides which rows may be a candidate
+    // at all, and LIMIT 2 exists so the count of the rows that survive it can
+    // be checked below. Excluding placeholders cannot hide an ambiguity the
+    // check would have caught — a placeholder is minted only by provisionUser,
+    // under a domain nobody registers at, so it is never the row an attacker
+    // planted, and two of them matching would resolve to nothing rather than to
+    // a guess.
     `SELECT id, role FROM trexdb."user"
       WHERE lower(email) = lower($1)
         AND "deletedAt" IS NULL
         AND banned IS NOT TRUE
         AND is_placeholder_email IS NOT TRUE
-      LIMIT 1`,
+      LIMIT 2`,
     [email],
   );
+  // Two rows mean two accounts hold one address, which V16's unique index on
+  // lower(email) forbids — so this is reachable only on a database missing that
+  // index (a migration not run, a dump restored without it) and is exactly the
+  // state the takeover needed: the victim's account and an attacker's case
+  // variant, both matching the address the upstream just verified.
+  //
+  // Deliberately not an ORDER BY. An ordering would only make the choice
+  // repeatable, and there is nothing to order by that distinguishes the victim
+  // from the attacker: the attacker registers whenever they like, so neither
+  // oldest-first nor id order is safe. The one correct answer to "which of
+  // these two accounts is this identity?" is that nobody can tell, so this
+  // refuses and takes the sign-in with it. The caller logs it and shows a
+  // generic failure, which is a sign-in an operator must fix rather than a
+  // silent link onto the wrong account.
+  if (rows.length > 1) {
+    throw new Error(
+      `more than one trex user holds ${email}; refusing to guess which one this identity is`,
+    );
+  }
   const row = rows[0];
   if (!row) return null;
   return { id: row.id, role: row.role ?? null };
@@ -193,8 +221,8 @@ export async function resolveFederatedUser(
  * The domain every synthesised address sits under.
  *
  * Identical to the `placeholder_domain` constant in
- * core/schema/V16__better_auth_canonical_tables.sql, and it has to stay that
- * way: V16 backfilled the users that existed when Better Auth took the tables
+ * core/schema/V17__better_auth_canonical_tables.sql, and it has to stay that
+ * way: V17 backfilled the users that existed when Better Auth took the tables
  * over, this module mints the ones that arrive afterwards, and a row from
  * either must be indistinguishable from a row from the other. It cannot be
  * read from configuration on this side because it cannot be on that one —
@@ -211,7 +239,7 @@ export const PLACEHOLDER_EMAIL_DOMAIN = "d2e.local";
  * The local part of a placeholder address, from the identifier the user signs
  * in with.
  *
- * Mirrors the `regexp_replace`/`btrim` pair in V16's DO block, and is verified
+ * Mirrors the `regexp_replace`/`btrim` pair in V17's DO block, and is verified
  * identical to it for every ASCII shape. Not for every input: JS
  * `toLowerCase()` expands U+0130 (İ) to `i` + U+0307, so `İstanbul` slugifies
  * to `i-stanbul` here and to `istanbul` in Postgres, whose `lower()` is
@@ -235,7 +263,7 @@ export function placeholderLocalPart(signInId: string): string {
 }
 
 /**
- * An address for an identity that asserted none, under the rule V16 uses: the
+ * An address for an identity that asserted none, under the rule V17 uses: the
  * upstream subject, else the user id, and a collision refused rather than
  * resolved in anyone's favour.
  */
@@ -245,9 +273,11 @@ async function synthesisePlaceholderEmail(
   userId: string,
 ): Promise<string> {
   const taken = async (address: string): Promise<boolean> => {
-    // Case-insensitively, though the UNIQUE index is not: an address that
+    // Case-insensitively, matching V16's user_email_lower_key: an address that
     // differs from a real one only in case is a lookalike, and handing one out
-    // is the thing this whole path exists to avoid.
+    // is the thing this whole path exists to avoid. Asking the same way the
+    // index does means this refuses before the INSERT rather than after it,
+    // with an error naming the address instead of a constraint name.
     const { rows } = await client.query(
       `SELECT 1 FROM trexdb."user" WHERE lower(email) = $1 LIMIT 1`,
       [address],
@@ -281,7 +311,7 @@ async function synthesisePlaceholderEmail(
  * A federated user has no password: no row in account with providerId 'credential'.
  *
  * An upstream that asserts no address gets a synthesised one. V14 had let
- * user.email be NULL for exactly that case; V16 restored NOT NULL because
+ * user.email be NULL for exactly that case; V17 restored NOT NULL because
  * Better Auth requires an address on every user, so absence is no longer
  * available and V14's objection has to be met rather than avoided. It recorded
  * that a made-up address is a real address that happens to be wrong: it can
@@ -315,7 +345,7 @@ async function synthesisePlaceholderEmail(
  * placeholder by address, through email lookups of its own that never reach
  * this function. Left that way on purpose: that caller is an authenticated
  * administrator asserting a link, not an upstream claiming one, and a migration
- * pre-linking the rows V16 backfilled is exactly what it is for.
+ * pre-linking the rows V17 backfilled is exactly what it is for.
  */
 export async function provisionUser(
   client: PgClient,

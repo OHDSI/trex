@@ -122,12 +122,25 @@ export async function createTokenResponse(user: DbUser, sessionId?: string, res?
   };
 }
 
+/**
+ * The user holding this address, matched the way federation already matches it:
+ * case-insensitively, because `Victim@corp.com` and `victim@corp.com` are one
+ * mailbox and so one identity.
+ *
+ * This being case-SENSITIVE was half of an account takeover. /signup uses it as
+ * its duplicate check and V1's UNIQUE(email) was case-sensitive too, so with
+ * self-registration on an attacker could register a case variant of a victim's
+ * address; the victim's next federated sign-in then lower-matched (see
+ * findLinkCandidateByEmail) and could link their verified upstream identity
+ * onto the attacker's row. V17's unique index on lower(email) is what makes
+ * this match at most one user.
+ */
 async function fetchUserByEmail(email: string): Promise<DbUser | null> {
   const result = await pool.query(
     `SELECT id, name, email, image, role, banned, "emailVerified", email_confirmed_at,
             last_sign_in_at, "mustChangePassword", user_metadata, app_metadata,
             password_hash, "createdAt", "updatedAt"
-     FROM trexdb."user" WHERE email = $1 AND "deletedAt" IS NULL`,
+     FROM trexdb."user" WHERE lower(email) = lower($1) AND "deletedAt" IS NULL`,
     [email],
   );
   return result.rows[0] || null;
@@ -219,7 +232,13 @@ router.post("/signup", authLimiter, async (req, res) => {
     const countResult = await pool.query('SELECT COUNT(*)::int AS count FROM trexdb."user"');
     const isFirstUser = countResult.rows[0].count === 0;
     const adminEmail = Deno.env.get("ADMIN_EMAIL");
-    const shouldBeAdmin = isFirstUser || (adminEmail && email === adminEmail);
+    // Compared case-insensitively for the same reason the lookup above is: the
+    // operator named a mailbox, not a spelling. A case-sensitive test here let
+    // the designated administrator register their own address in another case,
+    // land as an ordinary user, and — since the address is then taken — never
+    // be able to create the admin account at all.
+    const shouldBeAdmin = isFirstUser ||
+      (adminEmail && email.toLowerCase() === adminEmail.toLowerCase());
     const userRole = shouldBeAdmin ? "admin" : "user";
 
     await pool.query(
@@ -534,7 +553,7 @@ router.put("/user", apiLimiter, async (req, res) => {
       updates.push(`email = $${paramIdx++}`);
       values.push(email);
       // The flag means "this address is synthesised, not one anybody gave"
-      // (V16's column comment), and this is the one route that writes an
+      // (V17's column comment), and this is the one route that writes an
       // address the account holder chose. It has to come off with the old
       // value: findLinkCandidateByEmail excludes flagged rows, so a federated
       // user who sets a real address here and stayed flagged could never be
