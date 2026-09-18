@@ -14,11 +14,12 @@ import {
   generateRefreshToken,
   hashRefreshToken,
 } from "./jwt.ts";
-import { hashPassword, verifyPassword } from "./password.ts";
+import { hashPassword } from "./password.ts";
 import { authLimiter, apiLimiter } from "../middleware/rate-limit.ts";
 import { isRefreshTokenExpired } from "./refresh-token-ttl.ts";
 import { loadExternalProviders } from "./settings-providers.ts";
 import { nativePasswordLoginEnabled } from "./federation/config.ts";
+import { requireAdmin } from "./require-admin.ts";
 import { IDP_METADATA_KEY } from "./oidc/claims.ts";
 
 const router = Router();
@@ -130,6 +131,26 @@ export async function createTokenResponse(user: DbUser, sessionId?: string, res?
 }
 
 /**
+ * The engine, resolved on use rather than imported at the top of the file:
+ * better-auth.ts derives its secret from TREX_ROOT_KEY while it evaluates, and
+ * this module is pulled in by callers that arrange that variable only
+ * afterwards.
+ */
+async function engine() {
+  return (await import("./better-auth.ts")).auth;
+}
+
+/** The engine's request-independent internals: its data access and its hasher. */
+async function engineContext() {
+  return await (await engine()).$context;
+}
+
+/** Where users and accounts now live. */
+async function engineAdapter() {
+  return (await engineContext()).internalAdapter;
+}
+
+/**
  * The user holding this address, matched the way federation already matches it:
  * case-insensitively, because `Victim@corp.com` and `victim@corp.com` are one
  * mailbox and so one identity.
@@ -141,6 +162,14 @@ export async function createTokenResponse(user: DbUser, sessionId?: string, res?
  * findLinkCandidateByEmail) and could link their verified upstream identity
  * onto the attacker's row. V17's unique index on lower(email) is what makes
  * this match at most one user.
+ *
+ * DELIBERATELY NOT the engine's findUserByEmail, which lower-cases the address
+ * it was given and then matches it exactly. That resolves a stored spelling
+ * only once canonicaliseLoginAddress has folded it — and canonicalisation runs
+ * after this lookup, because it needs the row this lookup finds. Handing the
+ * question to the engine would therefore lock out precisely the accounts the
+ * fold exists to rescue, and would drop the soft-delete and ban pre-checks that
+ * keep a retired row from reaching the engine at all.
  */
 async function fetchUserByEmail(email: string): Promise<DbUser | null> {
   const result = await pool.query(
@@ -153,25 +182,39 @@ async function fetchUserByEmail(email: string): Promise<DbUser | null> {
   return result.rows[0] || null;
 }
 
+/**
+ * Every read of a user by subject in this router, answered by the engine.
+ *
+ * The columns trex serves are all declared as additionalFields in
+ * better-auth.ts, so the row comes back whole rather than as Better Auth's own
+ * eight fields — the GoTrue body is pinned to the literal object, and a missing
+ * user_metadata or email_confirmed_at would be visible on the wire.
+ *
+ * The soft-delete filter is trex's and stays trex's: the engine will happily
+ * return a row V1's delete_user() retired, so the marker is declared on the
+ * user model purely to be tested here. Without it a deleted account answers
+ * GET /user, changes its own password and is visible to the admin block.
+ */
 async function fetchUserById(id: string): Promise<DbUser | null> {
-  const result = await pool.query(
-    `SELECT id, name, email, image, role, banned, "emailVerified", email_confirmed_at,
-            last_sign_in_at, "mustChangePassword", user_metadata, app_metadata,
-            password_hash, "createdAt", "updatedAt"
-     FROM trexdb."user" WHERE id = $1 AND "deletedAt" IS NULL`,
-    [id],
-  );
-  return result.rows[0] || null;
+  const user = await (await engineAdapter()).findUserById(id) as
+    | (DbUser & { deletedAt: Date | null })
+    | null;
+  return !user || user.deletedAt ? null : user;
 }
 
 /**
- * Get password for verification. Checks user.password_hash first,
- * falls back to Better Auth's account.password (graceful migration).
+ * The account's password, in whichever of its two homes holds one:
+ * user.password_hash is the pre-V17 column and account.password is where the
+ * engine keeps it. Returning null is what distinguishes an account with no
+ * credential from a wrong password, which /change-password is pinned to report
+ * as two different sentences — the engine reports both the same way.
  */
-async function getPasswordHash(userId: string, userPasswordHash: string | null): Promise<string | null> {
+async function storedPasswordHash(
+  userId: string,
+  userPasswordHash: string | null,
+): Promise<string | null> {
   if (userPasswordHash) return userPasswordHash;
 
-  // Fallback: Better Auth stores passwords in the account table
   const result = await pool.query(
     `SELECT password FROM trexdb.account WHERE "userId" = $1 AND "providerId" = 'credential'`,
     [userId],
@@ -299,7 +342,7 @@ async function writePassword(
 
 /**
  * The reverse mirror: user.password_hash is the pre-V17 home of the credential
- * and is still what getPasswordHash prefers, so a user whose password lives
+ * and is still what storedPasswordHash prefers, so a user whose password lives
  * only in account.password gets it copied back on their way through. Both
  * columns therefore hold the same value on every row this router has seen, and
  * the mirror can be dropped with the column rather than before it.
@@ -377,10 +420,7 @@ async function authenticateUser(
   const email = await canonicaliseLoginAddress(user);
   await adoptLegacyCredential(user);
 
-  // Imported here rather than at the top: better-auth.ts derives its secret
-  // from TREX_ROOT_KEY while it evaluates, and this module is pulled in by
-  // callers that arrange that variable only afterwards.
-  const { auth } = await import("./better-auth.ts");
+  const auth = await engine();
 
   let signedIn;
   try {
@@ -808,6 +848,14 @@ router.get("/user", apiLimiter, async (req, res) => {
 });
 
 // ── PUT /user ────────────────────────────────────────────────────────────────
+//
+// The row read comes from the engine; the write deliberately does not.
+// auth.api.updateUser accepts only the additionalFields declared for input —
+// user_metadata is declared `input: false` and would be refused outright — it
+// answers `{status}` rather than the user this route returns, and it routes an
+// address change through a confirmation flow that GoTrue has no step for. The
+// shallow `user_metadata || $n::jsonb` merge below is the whole point of the
+// route and there is nothing in the engine that expresses it.
 
 router.put("/user", apiLimiter, async (req, res) => {
   try {
@@ -993,14 +1041,27 @@ router.post("/change-password", apiLimiter, async (req, res) => {
       return;
     }
 
-    const storedHash = await getPasswordHash(user.id, user.password_hash);
+    const storedHash = await storedPasswordHash(user.id, user.password_hash);
     if (!storedHash) {
       res.status(400).json({ error: "No password set for this account" });
       return;
     }
 
-    const valid = await verifyPassword(currentPassword, storedHash);
-    if (!valid) {
+    // The last credential check in this router, now the engine's. The verifier
+    // is whichever one better-auth.ts wired — trex's scrypt today — so a change
+    // of hashing algorithm reaches this route by construction instead of
+    // leaving it verifying against the old one and answering "Current password
+    // is incorrect" to everybody.
+    //
+    // NOT authenticateUser, deliberately. That signs in, and a sign-in reads
+    // account.password alone, so it would refuse an account whose password
+    // reached only user.password_hash — the state a node that has not restarted
+    // into the V17 code still writes, and the one the wire contract pins this
+    // route to accept. The resolution order above is trex's answer to which of
+    // the two columns holds the password; the engine's answer is what verifies
+    // it.
+    const { password: credential } = await engineContext();
+    if (!(await credential.verify({ hash: storedHash, password: currentPassword }))) {
       res.status(400).json({ error: "Current password is incorrect" });
       return;
     }
@@ -1109,6 +1170,12 @@ router.post("/revoke-session", apiLimiter, async (req, res) => {
 });
 
 // ── Custom: GET /accounts (linked accounts) ─────────────────────────────────
+//
+// Four columns, named, rather than the engine's findAccounts: that returns the
+// account row whole, and the account row is where the credential lives. The
+// engine strips the password only inside its own endpoint, which needs the
+// session cookie this route does not have — so listing through it would put a
+// projection between the hash and the wire and pin nothing to keep it there.
 
 router.get("/accounts", apiLimiter, async (req, res) => {
   try {
@@ -1178,29 +1245,22 @@ router.get("/health", (_req, res) => {
   res.json({ version: "trex-gotrue-1.0.0", name: "GoTrue", description: "Trex GoTrue-compatible auth" });
 });
 
+// ── The admin block ─────────────────────────────────────────────────────────
+//
+// requireAdmin stays in front of every route here and is not handed to Better
+// Auth's admin plugin. The plugin authorizes one way only — a session cookie
+// whose user passes a permission check — and has no service-role path at all;
+// `adminUserIds` names users, it does not bypass the session. d2e's usermgmt
+// calls these routes with the service-role key and never with a cookie, so
+// authorization is trex's and the engine is only asked for the data access
+// underneath it. The plugin's own endpoints are reached here through
+// auth.api.*, which skips the session check precisely because nothing is
+// forwarded to it: no headers, no request, no caller identity.
+
 // /admin/users is the GoTrue-compatible alias supabase-js POSTs to.
 router.post(["/admin/create-user", "/admin/users"], apiLimiter, async (req, res) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith("Bearer ")) {
-      res.status(401).json({ error: "not_authenticated" });
-      return;
-    }
-
-    const token = authHeader.slice(7);
-    const claims = await verifyAccessToken(token);
-    if (!claims) {
-      res.status(401).json({ error: "not_authenticated" });
-      return;
-    }
-
-    // service_role bypasses RLS/admin checks (Supabase convention).
-    const callerRole = claims.app_metadata?.trex_role;
-    const isServiceRole = claims.role === "service_role";
-    if (callerRole !== "admin" && !isServiceRole) {
-      res.status(403).json({ error: "forbidden", error_description: "Admin access required" });
-      return;
-    }
+    if (!(await requireAdmin(req, res))) return;
 
     const { email, password, data } = req.body;
 
@@ -1209,27 +1269,51 @@ router.post(["/admin/create-user", "/admin/users"], apiLimiter, async (req, res)
       return;
     }
 
-    // Check if user already exists
+    // Asked before anything is written, for the reason /signup and V17 ask it:
+    // createUser runs zod's z.email() itself and would refuse the address after
+    // the fact, and an administrator who got one past it would have created an
+    // account that can never sign in.
+    if (!isEngineAddressable(email)) {
+      res.status(422).json({ error: "validation_failed", error_description: "Email must be a valid address" });
+      return;
+    }
+
+    // Kept ahead of the engine's own duplicate check, which reports a taken
+    // address as a 400 in Better Auth's vocabulary rather than the 422
+    // user_already_exists this route is pinned to.
     const existing = await fetchUserByEmail(email);
     if (existing) {
       res.status(422).json({ error: "user_already_exists", error_description: "A user with this email already exists" });
       return;
     }
 
-    const userId = crypto.randomUUID();
-    const passwordHash = await hashPassword(password);
-    const userName = data?.name || email.split("@")[0];
-    const userRole = data?.role || "user";
+    // The engine creates the user and links the credential, hashing with trex's
+    // own scrypt through better-auth.ts's hook. `data` carries the columns
+    // GoTrue's admin create is expected to set outright — an address an
+    // administrator typed is confirmed, with no verification round-trip — and
+    // the whole `data` object is kept as user_metadata, which is what the wire
+    // contract returns. app_metadata is left to V1's column default so the
+    // provider keys stay what every other row has.
+    const created = await (await engine()).api.createUser({
+      body: {
+        email,
+        password,
+        name: data?.name || email.split("@")[0],
+        role: data?.role || "user",
+        data: {
+          emailVerified: true,
+          email_confirmed_at: new Date(),
+          user_metadata: data || {},
+        },
+      },
+    });
 
-    await pool.query(
-      `INSERT INTO trexdb."user" (id, name, email, "emailVerified", email_confirmed_at, role, password_hash, user_metadata)
-       VALUES ($1, $2, $3, true, NOW(), $4, $5, $6)`,
-      [userId, userName, email, userRole, passwordHash, JSON.stringify(data || {})],
-    );
+    // account.password is now the credential; this fills the pre-V17 mirror so
+    // the two columns agree from the first moment, as they do on every other
+    // path that writes a password.
+    await mirrorCredentialOntoUser(created.user.id);
 
-    await writeCredential(userId, passwordHash);
-
-    const user = await fetchUserById(userId);
+    const user = await fetchUserById(created.user.id);
     if (!user) {
       res.status(500).json({ error: "server_error", error_description: "Failed to create user" });
       return;
@@ -1248,26 +1332,7 @@ router.post(["/admin/create-user", "/admin/users"], apiLimiter, async (req, res)
 // /change-password rather than a duplicate of it.
 router.put("/admin/users/:id", apiLimiter, async (req, res) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith("Bearer ")) {
-      res.status(401).json({ error: "not_authenticated" });
-      return;
-    }
-
-    const token = authHeader.slice(7);
-    const claims = await verifyAccessToken(token);
-    if (!claims) {
-      res.status(401).json({ error: "not_authenticated" });
-      return;
-    }
-
-    // service_role bypasses RLS/admin checks (Supabase convention).
-    const callerRole = claims.app_metadata?.trex_role;
-    const isServiceRole = claims.role === "service_role";
-    if (callerRole !== "admin" && !isServiceRole) {
-      res.status(403).json({ error: "forbidden", error_description: "Admin access required" });
-      return;
-    }
+    if (!(await requireAdmin(req, res))) return;
 
     const { password, banned } = req.body ?? {};
     if (password === undefined && banned === undefined) {
@@ -1333,26 +1398,7 @@ router.put("/admin/users/:id", apiLimiter, async (req, res) => {
 // holding only a subject has no way to resolve the account behind it.
 router.get("/admin/users/:id", apiLimiter, async (req, res) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith("Bearer ")) {
-      res.status(401).json({ error: "not_authenticated" });
-      return;
-    }
-
-    const token = authHeader.slice(7);
-    const claims = await verifyAccessToken(token);
-    if (!claims) {
-      res.status(401).json({ error: "not_authenticated" });
-      return;
-    }
-
-    // service_role bypasses RLS/admin checks (Supabase convention).
-    const callerRole = claims.app_metadata?.trex_role;
-    const isServiceRole = claims.role === "service_role";
-    if (callerRole !== "admin" && !isServiceRole) {
-      res.status(403).json({ error: "forbidden", error_description: "Admin access required" });
-      return;
-    }
+    if (!(await requireAdmin(req, res))) return;
 
     const user = await fetchUserById(req.params.id);
     if (!user) {
@@ -1373,26 +1419,7 @@ router.get("/admin/users/:id", apiLimiter, async (req, res) => {
 // rather than colliding with the account left behind.
 router.delete("/admin/users/:id", apiLimiter, async (req, res) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith("Bearer ")) {
-      res.status(401).json({ error: "not_authenticated" });
-      return;
-    }
-
-    const token = authHeader.slice(7);
-    const claims = await verifyAccessToken(token);
-    if (!claims) {
-      res.status(401).json({ error: "not_authenticated" });
-      return;
-    }
-
-    // service_role bypasses RLS/admin checks (Supabase convention).
-    const callerRole = claims.app_metadata?.trex_role;
-    const isServiceRole = claims.role === "service_role";
-    if (callerRole !== "admin" && !isServiceRole) {
-      res.status(403).json({ error: "forbidden", error_description: "Admin access required" });
-      return;
-    }
+    if (!(await requireAdmin(req, res))) return;
 
     const user = await fetchUserById(req.params.id);
     if (!user) {
@@ -1400,13 +1427,11 @@ router.delete("/admin/users/:id", apiLimiter, async (req, res) => {
       return;
     }
 
-    // Sessions, credentials and tokens are all ON DELETE CASCADE from the user
-    // row, so removing it takes the account's refresh tokens with it rather than
-    // leaving any able to mint access tokens for a user that no longer exists.
-    await pool.query(
-      `DELETE FROM trexdb."user" WHERE id = $1`,
-      [user.id],
-    );
+    // The engine removes the sessions and the credential explicitly and the
+    // user row last. trex's refresh tokens are not a Better Auth model, but
+    // they are ON DELETE CASCADE from the user row, so none survives able to
+    // mint access tokens for a user that no longer exists.
+    await (await engineAdapter()).deleteUser(user.id);
 
     res.status(200).json({});
   } catch (err) {

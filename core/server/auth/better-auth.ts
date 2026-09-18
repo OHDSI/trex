@@ -113,6 +113,13 @@ export const auth = betterAuth({
       // it would reopen the takeover on exactly these rows. Any such provider
       // has to arrive with its own placeholder rule.
       is_placeholder_email: { type: "boolean", required: false, input: false },
+      // trex's soft-delete marker (V1's delete_user()). Better Auth has no
+      // concept of one, and its adapter returns only the fields it has been
+      // told about — so without this declaration a user read routed through
+      // the engine would hand back a retired account as a live one, and
+      // GET /user, /change-password and the admin block all pin a 404 for
+      // exactly those rows.
+      deletedAt: { type: "date", required: false, input: false },
     },
   },
   plugins: [admin()],
