@@ -35,9 +35,24 @@ HINT:   Better Auth validates the address before it looks a user up, so each
         still holds the address. Re-run the migration after.
 ```
 
-**The refusal leaves nothing behind.** Every statement in the file runs in one
-implicit transaction, so a V17 that aborts has applied none of itself and no
-history row is written. Fix the addresses and re-run.
+**The refusal leaves nothing behind — if the whole file is one transaction.**
+V17 contains no explicit `BEGIN`/`COMMIT` of its own, and the check above comes
+*after* four mutating statements (the credential move, the placeholder backfill,
+the address fold). What discards them is the runner submitting the file as a
+single query: trex's migration plugin does that, so a V17 that aborts in normal
+operation has applied none of itself and written no history row.
+
+**Re-running it by hand does not get that for free.** `psql -f
+core/schema/V17__better_auth_canonical_tables.sql` runs each statement in its
+own implicit transaction, so a refusal would leave the four statements above it
+committed. Pass `--single-transaction`:
+
+```sh
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction \
+  -f core/schema/V17__better_auth_canonical_tables.sql
+```
+
+Fix the addresses and re-run.
 
 **The remedy, per address named:**
 
@@ -53,13 +68,26 @@ free it, either `DELETE` the row or rewrite its `email` to something the engine
 accepts (`ops+retired-2026@example.com` keeps the row auditable and frees
 nothing anybody wants).
 
-The same rule is asked on every other door onto the table, so an installation
-cannot walk back into the state V17 refused: `/signup`, `POST /admin/users`,
-`PUT /user` and the federation admin link at `PUT /federation/links` all answer
-`422` for an address the engine cannot serve. The federation one matters most
-during a migration — it is the route a bulk import drives, and it runs *after*
-V17 — so it refuses per identity, naming the address, and the import records the
-skip and keeps going.
+The same rule is asked on every other door onto `trexdb.user`, so an
+installation cannot walk back into the state V17 refused:
+
+| Door | Answer |
+|------|--------|
+| `POST /signup` | `422 signup_invalid` |
+| `POST /admin/users` | `422 validation_failed` |
+| `PUT /user` | `422 validation_failed` |
+| `PUT /federation/links` (admin pre-link) | `422 unaddressable_email`, naming the address |
+| Federated sign-in with `auto_provision` | refused with the code `upstream_email_unusable` — a 302 back to the login page carrying `?error=…`, or a `403 access_denied` where no login URL is configured |
+
+The last two are the ones that matter after the deploy. `PUT /federation/links`
+is what a bulk import drives, and it runs *after* V17, so it refuses per
+identity and the import records the skip and keeps going. The federated
+sign-in door is the only one reached with no administrator in the loop: an
+upstream asserts the address itself (trex takes the `email` claim verbatim,
+because it is an identifier and not trex's to rewrite), so an upstream
+asserting `alice@localhost` at a provider with `auto_provision` on would
+otherwise create the row V17 exists to prevent. That sign-in is refused instead, and the user
+learns at once rather than through a support ticket.
 
 ## The configuration trap: a single-label domain
 
@@ -86,8 +114,12 @@ succeed.
 `/change-password` and sign-in trust different columns, and during a rolling
 deploy they can briefly disagree.
 
-- **Sign-in** (`POST /token`, password grant) reads `trexdb.account.password`
-  and nothing else. That is the engine's column.
+- **Sign-in** (`POST /token`, password grant) *verifies* against
+  `trexdb.account.password` and nothing else. That is the engine's column. It
+  does read `user.password_hash` on the way past, in `adoptLegacyCredential`,
+  but only to fill an account row that has no credential yet — the copy is
+  guarded by `WHERE account.password IS NULL`, so it can never overwrite a
+  current credential with a stale one, and the conclusion below holds.
 - **`/change-password`** resolves `trexdb.user.password_hash` first and only
   falls back to `account.password`. That is the pre-V17 column, and the wire
   contract pins it, because it is the column a node that has not yet restarted

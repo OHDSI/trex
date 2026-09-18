@@ -67,9 +67,11 @@ the old key but does NOT require re-encrypting stored secrets.
    so the new `LABELS.jwtHs256` value is picked up by both `core/server`
    AND `scripts/derive-secrets.ts` running in the `trex-init` sidecar.
 3. Delete `./secrets/derived.env` (or `docker compose run --rm trex-init`)
-   so the `trex-init` one-shot regenerates the derived file with the new
-   `PGRST_JWT_SECRET` / `AUTH_JWT_SECRET` / `API_JWT_SECRET` /
-   `METRICS_JWT_SECRET`. The `root.env` is preserved — only the derived
+   so the `trex-init` one-shot regenerates the derived file. The two values
+   that change are `PGRST_JWT_SECRET` and `AUTH_JWT_SECRET` — the JWT signing
+   key under the two names that consume it. `PG_META_CRYPTO_KEY` and
+   `DEVX_ENCRYPTION_KEY` are regenerated too but derive from other labels, so
+   they come back identical. The `root.env` is preserved; only the derived
    subkeys change.
 4. Restart every service that reads `derived.env` (the trex server —
    whose in-process `@trex/postgrest` and storage plugins consume
