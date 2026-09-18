@@ -120,10 +120,10 @@ Deno.test("linkIdentity refuses an email already linked to another account at th
   assertEquals(c.ran.at(-1), "ROLLBACK");
 });
 
-// The fourth door onto trexdb."user". V17 refuses to migrate an installation
-// the engine cannot serve, and /signup, /admin/create-user and PUT /user all
-// refuse to create or set such an address — but this route runs AFTER V17, in
-// bulk, driven by a migration, and used to create the user regardless.
+// One of the six routes that write a login address (all enumerated on
+// isEngineAddressable), and the one a migration drives: it runs AFTER V17 has
+// refused the installations the engine cannot serve, in bulk, and used to
+// create the user regardless.
 Deno.test("linkIdentity refuses to create a user under an address the engine cannot serve", async () => {
   const c = fakeClient([["FROM trexdb.sso_provider", [{ id: "logto" }]]]);
   // Single-label domain: parseLinkRequest accepts it (it has an @), the engine

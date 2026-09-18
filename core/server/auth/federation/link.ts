@@ -25,6 +25,7 @@
 // claim verbatim — it has to, since it is an identifier and not trex's to
 // rewrite — so an IdP asserting `alice@localhost` with auto_provision on would
 // otherwise create exactly the row V17 refuses to migrate, after V17 has run.
+// See isEngineAddressable for the other five routes that ask the same rule.
 import type { ProviderConfig, UpstreamIdentity } from "./types.ts";
 import { isEngineAddressable } from "../engine-address.ts";
 
@@ -132,8 +133,9 @@ export function decideLink(
     return { action: "link", userId: existing.id };
   }
   if (provider.autoProvision) {
-    // THE FIFTH DOOR ONTO trexdb."user", and the only one reached without an
-    // administrator: an upstream asserts the address and this branch writes it.
+    // The only one of the six address-writing routes (enumerated on
+    // isEngineAddressable) reached without an administrator: an upstream
+    // asserts the address and this branch writes it.
     //
     // Refused rather than repaired, for the reason V17 refuses rather than
     // repairs: an address is an identity and trex cannot pick a different one.
@@ -145,8 +147,8 @@ export function decideLink(
     //
     // Only the provision branch asks it. An identity already linked never
     // reaches this module at all, and the `existing` branch above writes no
-    // address — it matched one already stored, which every other door has
-    // already vetted. The address-less branch above is exempt for a different
+    // address — it matched one already stored, which whichever route created it
+    // has already vetted. The address-less branch above is exempt for a different
     // reason: it provisions a synthesised placeholder, and the slug rule is
     // pinned addressable by placeholder-slug-parity.test.ts.
     if (!isEngineAddressable(identity.email)) {

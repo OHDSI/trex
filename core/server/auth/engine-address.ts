@@ -21,17 +21,36 @@
  * those exist to prevent, one request after the migration refused it, and the
  * account that walked through it could never sign in again.
  *
- * Five doors write an address onto trexdb."user" behind V17, and all five ask
- * this: POST /signup, POST /admin/users, PUT /user, the federation admin link
- * at PUT /federation/links (see linkIdentity — the one a migration drives at
- * volume) and federated sign-in's auto-provision branch (see decideLink — the
- * only one reached with no administrator in the loop, since the upstream
- * asserts the address itself and trex stores that claim verbatim). A sixth
- * means asking it there too.
+ * SIX ROUTES trex serves create or change a login address, and all six ask
+ * this:
  *
- * Its own module rather than the router's, because the rule now governs three
- * subsystems (the /auth/v1 routes, federation, and V17's twin) and the
- * federation paths have no other reason to load a 60KB express router.
+ *   POST /auth/v1/signup
+ *   POST /auth/v1/admin/users
+ *   PUT  /auth/v1/user
+ *   PUT  /auth/v1/federation/links  (linkIdentity — what a migration drives at
+ *                                    volume, after V17 has already run)
+ *   federated sign-in, auto-provision branch (decideLink — the only one reached
+ *                                    with no administrator in the loop, since
+ *                                    the upstream asserts the address itself
+ *                                    and trex stores that claim verbatim)
+ *   the MCP tool user-create         (mcp/tools/users.ts — an admin API key,
+ *                                    the same privilege tier as /admin/users)
+ *
+ * A seventh means asking it there too.
+ *
+ * WHAT THIS IS NOT is a guarantee about the table. PostGraphile mounts trexdb
+ * (index.ts), trexdb."user" carries no @omit, and V3 leaves service_role with
+ * GRANT ALL on it — so a service-role token can UPDATE email directly and this
+ * predicate never runs. That is not a door left open; it is what service_role
+ * means, and the same holds for psql. The invariant this file supports is
+ * "every route trex serves asks the rule", not "no unservable address can exist
+ * in the table". V17 is what checks the second, over the whole population, at
+ * the one moment trex can still refuse to proceed.
+ *
+ * Its own module rather than the router's, because the rule now governs four
+ * subsystems (the /auth/v1 routes, federation, the MCP tools, and V17's twin)
+ * and none of the last three has any other reason to load a 60KB express
+ * router.
  */
 const ENGINE_EMAIL =
   /^(?:[A-Za-z0-9_'+\-]+\.)*[A-Za-z0-9_'+\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$/;

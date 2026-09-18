@@ -37,14 +37,26 @@ HINT:   Better Auth validates the address before it looks a user up, so each
 
 **The refusal leaves nothing behind — if the whole file is one transaction.**
 V17 contains no explicit `BEGIN`/`COMMIT` of its own, and the check above comes
-*after* four mutating statements (the credential move, the placeholder backfill,
-the address fold). What discards them is the runner submitting the file as a
-single query: trex's migration plugin does that, so a V17 that aborts in normal
-operation has applied none of itself and written no history row.
+*after* five mutating statements: the credential move into `trexdb.account`
+(`V17:13`, `V17:22`), the two `ALTER TABLE`s that add `session."impersonatedBy"`
+and `user.is_placeholder_email` (`V17:31`, `V17:38`), and the placeholder
+backfill block (`V17:41`). What discards them is the runner submitting the file
+as one simple query, leaving atomicity to Postgres's implicit transaction over
+it: `execute_migrations_in_schema`'s Postgres branch
+(`plugins/migration/src/lib.rs:829-845`) issues no `BEGIN` — see its comment,
+"Postgres handles transactions internally via postgres_execute". So a V17 that
+aborts in normal operation has applied none of itself and written no history
+row.
+
+> Do not "correct" that to the explicit `BEGIN`/`COMMIT` at `lib.rs:388-406`.
+> That is the sibling function `execute_migrations`, reached from
+> `trex_migration_run`; `core/schema` goes through `trex_migration_run_schema`
+> and never takes it. Two reviews have now confused the pair, which is why the
+> line numbers are here.
 
 **Re-running it by hand does not get that for free.** `psql -f
 core/schema/V17__better_auth_canonical_tables.sql` runs each statement in its
-own implicit transaction, so a refusal would leave the four statements above it
+own implicit transaction, so a refusal would leave the five statements above it
 committed. Pass `--single-transaction`:
 
 ```sh
@@ -68,8 +80,9 @@ free it, either `DELETE` the row or rewrite its `email` to something the engine
 accepts (`ops+retired-2026@example.com` keeps the row auditable and frees
 nothing anybody wants).
 
-The same rule is asked on every other door onto `trexdb.user`, so an
-installation cannot walk back into the state V17 refused:
+Every route trex serves that creates or changes a login address asks the same
+rule, so an installation cannot walk back into the state V17 refused through
+one of them:
 
 | Door | Answer |
 |------|--------|
@@ -78,16 +91,28 @@ installation cannot walk back into the state V17 refused:
 | `PUT /user` | `422 validation_failed` |
 | `PUT /federation/links` (admin pre-link) | `422 unaddressable_email`, naming the address |
 | Federated sign-in with `auto_provision` | refused with the code `upstream_email_unusable` — a 302 back to the login page carrying `?error=…`, or a `403 access_denied` where no login URL is configured |
+| MCP tool `user-create` | tool error naming the address, before either insert |
 
-The last two are the ones that matter after the deploy. `PUT /federation/links`
+**This is a claim about the routes trex serves, not about the table.**
+PostGraphile mounts `trexdb`, `trexdb."user"` carries no `@omit`, and `V3`
+leaves `service_role` with `GRANT ALL` on it — so a service-role token can
+`UPDATE` the address directly, and so can anyone with `psql`. That is not a gap
+to close; it is what `service_role` means. V17 is what checks the *table*, over
+the whole population, at the one moment trex can still refuse to proceed. If
+something outside trex writes addresses into `trexdb."user"`, it owns this rule
+itself.
+
+The last three are the ones that matter after the deploy. `PUT /federation/links`
 is what a bulk import drives, and it runs *after* V17, so it refuses per
 identity and the import records the skip and keeps going. The federated
 sign-in door is the only one reached with no administrator in the loop: an
 upstream asserts the address itself (trex takes the `email` claim verbatim,
 because it is an identifier and not trex's to rewrite), so an upstream
 asserting `alice@localhost` at a provider with `auto_provision` on would
-otherwise create the row V17 exists to prevent. That sign-in is refused instead, and the user
-learns at once rather than through a support ticket.
+otherwise create the row V17 exists to prevent. That sign-in is refused
+instead, and the user learns at once rather than through a support ticket. And
+`user-create` is `POST /admin/users`' privilege tier by another route — an
+admin API key over MCP — so it answers the same way.
 
 ## The configuration trap: a single-label domain
 
