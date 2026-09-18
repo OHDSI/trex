@@ -191,9 +191,9 @@ export async function resolveFederatedUser(
  * trex's migration runner substitutes nothing into a V-file and checksums the
  * text it executes (plugins/migration/src/lib.rs).
  *
- * Never resolvable and never routed to. `is_placeholder_email` is what code
- * branches on; the domain is only what makes the address inert if something
- * tries anyway.
+ * Never resolvable and never routed to. `is_placeholder_email` is the flag
+ * code should branch on — nothing does yet — and the domain is only what makes
+ * the address inert if something tries anyway.
  */
 export const PLACEHOLDER_EMAIL_DOMAIN = "d2e.local";
 
@@ -201,10 +201,18 @@ export const PLACEHOLDER_EMAIL_DOMAIN = "d2e.local";
  * The local part of a placeholder address, from the identifier the user signs
  * in with.
  *
- * Mirrors the `regexp_replace`/`btrim` pair in V16's DO block character for
- * character. The two run in different languages over the same rows, so a
- * change to either is a change to both: a user backfilled by the migration and
- * the same user re-provisioned here have to land on the same address.
+ * Mirrors the `regexp_replace`/`btrim` pair in V16's DO block, and is verified
+ * identical to it for every ASCII shape. Not for every input: JS
+ * `toLowerCase()` expands U+0130 (İ) to `i` + U+0307, so `İstanbul` slugifies
+ * to `i-stanbul` here and to `istanbul` in Postgres, whose `lower()` is
+ * locale-dependent besides. Known and accepted rather than fixed — the
+ * divergence is bounded to identifiers holding a character whose lowercase is
+ * more than one code point, and chasing Unicode parity across two languages
+ * costs more than it buys. Read "mirrors" as ASCII, not as a guarantee.
+ *
+ * The two still run over the same rows, so a change to either is a change to
+ * both: a user backfilled by the migration and the same user re-provisioned
+ * here have to land on the same address.
  *
  * Returns "" when nothing usable survives, which the caller must handle — an
  * empty local part would produce the address `@d2e.local`.
@@ -262,20 +270,32 @@ async function synthesisePlaceholderEmail(
 /**
  * A federated user has no password: no row in account with providerId 'credential'.
  *
- * An upstream that asserted no address leaves user.email NULL (V14 dropped the
- * NOT NULL for exactly this).
+ * An upstream that asserts no address gets a synthesised one. V14 had let
+ * user.email be NULL for exactly that case; V16 restored NOT NULL because
+ * Better Auth requires an address on every user, so absence is no longer
+ * available and V14's objection has to be met rather than avoided. It recorded
+ * that a made-up address is a real address that happens to be wrong: it can
+ * collide, it can be mailed, and an administrator cannot tell it from one the
+ * person gave.
  *
- * V14's absent address is no longer available: V16 restored NOT NULL because
- * Better Auth requires an address on every user, so an upstream that asserts
- * none gets a synthesised one. The objection V14 recorded — that a made-up
- * address is a real address that happens to be wrong, since it can collide,
- * it can be mailed, and an administrator cannot tell it from one the person
- * gave — is answered rather than overruled: the address is minted from the
- * upstream subject under a domain that resolves nowhere, the row is marked
- * `is_placeholder_email` so an administrator and every mail path can tell,
- * `"emailVerified"` stays false so it can never claim an account through the
- * verified-email rule, and a collision is refused instead of attaching one
- * person's identity to another's row.
+ * Two of those three are met. The address is minted from the upstream subject
+ * under a domain that resolves nowhere, and a collision is refused instead of
+ * attaching one person's identity to another's row; `is_placeholder_email`
+ * marks the row so an administrator and every mail path can tell.
+ *
+ * The third is not met, and the difference is real rather than cosmetic: an
+ * absent address could not be matched at all, a synthesised one can be. Nothing
+ * on the link path reads `is_placeholder_email` or the stored `"emailVerified"`
+ * — findLinkCandidateByEmail filters on lower(email), "deletedAt" and banned
+ * only, and decideLink's verified-email rule tests the *incoming*
+ * identity.emailVerified, never the row it is about to link to. So a
+ * placeholder is claimable by any provider that asserts that exact
+ * <subject>@d2e.local address as verified. What stands in the way is that an
+ * upstream has no reason to know an address under a domain trex invented, and
+ * the provider's emailDomainAllowlist — which is the actual control, and which
+ * permits everything when it is unset (emailDomainAllowed returns true for an
+ * empty list). Anything that later wants a placeholder to be unclaimable has to
+ * say so on the link path; writing it on the row is not enough.
  */
 export async function provisionUser(
   client: PgClient,
@@ -289,9 +309,9 @@ export async function provisionUser(
     ? await synthesisePlaceholderEmail(client, identity.sub, id)
     : null;
   await client.query(
-    // A placeholder was asserted by nobody, so it is never confirmed: that is
-    // what keeps it out of findLinkCandidateByEmail's reach and out of the
-    // verified-email rule.
+    // A placeholder was asserted by nobody, so it is never confirmed. That is a
+    // true statement about the row and not a protection: see the note above for
+    // what the link path does and does not read.
     `INSERT INTO trexdb."user" (id, name, email, "emailVerified", email_confirmed_at, role,
                                 is_placeholder_email)
      VALUES ($1, $2, $3, $4::boolean, CASE WHEN $4::boolean THEN NOW() END, 'user', $5::boolean)`,
