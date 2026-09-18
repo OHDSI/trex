@@ -316,7 +316,50 @@ cutoverTest("an address stored in another case still signs in, folded", async ({
   assertEquals(await sessionCount(pool, user.id), 1);
 });
 
+// ── A failed request changes nothing ────────────────────────────────────────
+
+cutoverTest("a PUT /user that fails leaves the old password working", async ({ url, pool }) => {
+  const taken = await createLegacyUser(pool);
+  const user = await createLegacyUser(pool);
+
+  // The contract-pinned 500: the address is already held, so the row UPDATE
+  // violates user_email_lower_key. account.password is the column sign-in reads
+  // now, so a credential written before that failure does not leave a stale
+  // mirror — it changes the password of a request the caller was told had done
+  // nothing, and the mirror's IS NULL guard cannot repair a column that is
+  // merely out of date.
+  const res = await request(
+    "PUT",
+    `${url}/user`,
+    { email: taken.email, password: "a-brand-new-password" },
+    await bearer(user),
+  );
+  assertEquals(res.status, 500);
+  await res.text();
+
+  assertEquals((await grant(url, user.email, "a-brand-new-password")).status, 400);
+  const signedIn = await grant(url, user.email, PASSWORD);
+  assertEquals(signedIn.status, 200);
+  await signedIn.text();
+  assertEquals(await credential(pool, user.id), await storedHash(pool, user.id));
+});
+
 // ── Verification failures are the caller's, or nobody's ─────────────────────
+
+cutoverTest("a password that is not a string is invalid_grant, not a 500", async ({ url, pool }) => {
+  const user = await createLegacyUser(pool);
+
+  // Better Auth raises a body-schema failure from better-call, whose APIError
+  // is the base class of the one better-auth exports, so an `instanceof` test
+  // against the subclass misses it and this route answers 500 for the one case
+  // that is plainly the caller's fault.
+  const res = await grant(url, user.email, 12345 as unknown as string);
+  assertEquals(res.status, 400);
+  assertEquals(await res.json(), {
+    error: "invalid_grant",
+    error_description: "Invalid login credentials",
+  });
+});
 
 cutoverTest("an engine failure is a 500, not a wrong password", async ({ url, pool }) => {
   const user = await createLegacyUser(pool);
@@ -344,6 +387,85 @@ cutoverTest("an engine failure is a 500, not a wrong password", async ({ url, po
     await pool.query(`DROP TRIGGER cutover_break_session ON trexdb.session`);
     await pool.query(`DROP FUNCTION trexdb.cutover_break_session()`);
   }
+});
+
+// ── The address rule, and who owns it ───────────────────────────────────────
+
+/**
+ * Addresses the engine accepts and rejects. The rejected ones are what a signup
+ * used to write rows for and then delete again under a 500.
+ */
+const ADDRESSES: Array<[string, boolean]> = [
+  ["plain@example.test", true],
+  ["dotted.local.part@sub.example.test", true],
+  ["plus+tag@example.test", true],
+  ["synthesised-placeholder@d2e.local", true],
+  ["not-an-address", false],
+  ["no-domain@", false],
+  ["@no-local.test", false],
+  ["spaces in@example.test", false],
+  ["trailing.dot.@example.test", false],
+  ["no.tld@localhost", false],
+];
+
+cutoverTest("signup refuses an address the engine could never resolve", async ({ url, pool }) => {
+  const { rows: before } = await pool.query(
+    `SELECT value FROM trexdb.setting WHERE key = 'auth.selfRegistration'`,
+  );
+  await pool.query(
+    `INSERT INTO trexdb.setting (key, value) VALUES ('auth.selfRegistration', 'true'::jsonb)
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+  );
+  try {
+    // 422 before anything is written, not a 500 after a user and an account
+    // have been created and deleted again. Registering an address nobody could
+    // ever sign in with was never right; this is the route saying so.
+    const res = await post(`${url}/signup`, { email: "not-an-address", password: PASSWORD });
+    assertEquals(res.status, 422);
+    assertEquals(await res.json(), {
+      error: "signup_invalid",
+      error_description: "Email must be a valid address",
+    });
+    const { rows } = await pool.query(
+      `SELECT count(*)::int AS n FROM trexdb."user" WHERE email = 'not-an-address'`,
+    );
+    assertEquals(rows[0].n, 0);
+  } finally {
+    if (before.length > 0) {
+      await pool.query(
+        `UPDATE trexdb.setting SET value = $1::jsonb WHERE key = 'auth.selfRegistration'`,
+        [JSON.stringify(before[0].value)],
+      );
+    } else {
+      await pool.query(`DELETE FROM trexdb.setting WHERE key = 'auth.selfRegistration'`);
+    }
+  }
+});
+
+cutoverTest("trex's address rule is the engine's, over the same table", async ({ pool }) => {
+  // isEngineAddressable is a copy of zod's z.email(), which is what Better Auth
+  // checks first on every credential endpoint. A copy can drift with a zod
+  // upgrade, and the way it would drift is silent: an address trex accepts and
+  // the engine does not is a registration that writes rows and then fails. So
+  // the copy is asked the question and the engine is asked the same question,
+  // and they have to agree.
+  const { isEngineAddressable } = await import("./auth-router.ts");
+  const { auth } = await import("./better-auth.ts");
+
+  for (const [address, valid] of ADDRESSES) {
+    assertEquals(isEngineAddressable(address), valid, `trex: ${address}`);
+
+    // Nobody holds any of these, so a well-formed one reaches the engine's
+    // "no such user" and a malformed one is refused before that. Either way
+    // it throws, and the code says which question it answered.
+    const refusal = await auth.api.signInEmail({
+      body: { email: address, password: "long-enough-password" },
+    }).then(() => null, (err: { body?: { code?: string } }) => err.body?.code);
+    assertEquals(refusal !== "INVALID_EMAIL", valid, `engine: ${address}`);
+  }
+  // Guard against the loop silently doing nothing.
+  assertEquals(ADDRESSES.length, 10);
+  void pool;
 });
 
 Deno.test("a password that is not a string is a credential failure, not a throw", async () => {

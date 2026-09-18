@@ -1,6 +1,12 @@
 import { Router } from "express";
 import express from "express";
-import { APIError } from "better-auth/api";
+// isAPIError, never `instanceof APIError`. Better Auth raises a body-schema
+// failure from better-call, which throws better-call's own APIError, and the
+// class better-auth exports merely extends it — so an instanceof check on the
+// subclass is false for exactly the errors a malformed request produces, and
+// they would be re-thrown as 500s. The name-based test also survives two copies
+// of @better-auth/core on disk, which an identity check would not.
+import { isAPIError } from "better-auth/api";
 import { pool } from "../db.ts";
 import {
   signAccessToken,
@@ -185,9 +191,16 @@ async function getPasswordHash(userId: string, userPasswordHash: string | null):
  * predates V17. The new password went only to user.password_hash, so the moment
  * sign-in moved to the engine the old password kept working and the new one did
  * not. An upsert cannot miss.
+ *
+ * `db` is the caller's transaction wherever the same request also writes
+ * user.password_hash. account.password is the column sign-in reads, so a
+ * credential that outlives a failed request is not a stale mirror — it is the
+ * password, rotated by a request that answered 500 and told the caller nothing
+ * had happened.
  */
-async function writeCredential(userId: string, hash: string) {
-  await pool.query(
+// deno-lint-ignore no-explicit-any
+async function writeCredential(userId: string, hash: string, db: any = pool) {
+  await db.query(
     `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId", password, "createdAt", "updatedAt")
      VALUES ($1, $2, $2, 'credential', $3, NOW(), NOW())
      ON CONFLICT ("providerId", "accountId")
@@ -207,6 +220,15 @@ async function writeCredential(userId: string, hash: string) {
  * Copied rather than re-hashed. The stored value is trex's own scrypt, which
  * better-auth.ts's hooks verify unchanged, so re-hashing would spend a second
  * scrypt to arrive at an equivalent string.
+ *
+ * DELIBERATELY BEFORE THE PASSWORD IS CHECKED, so an unauthenticated request
+ * can cause this write. It has to be: the engine is what verifies, and it
+ * cannot verify a credential it cannot see. The write is bounded and
+ * idempotent — one row per user, whose contents are a copy of a column that
+ * account already mirrors, carrying no information the requester supplied — and
+ * the route is behind authLimiter. It is accepted, not overlooked. Anything
+ * added here that is unbounded, or that records what an anonymous caller sent,
+ * would be a different question.
  */
 async function adoptLegacyCredential(user: DbUser) {
   if (!user.password_hash) return;
@@ -227,6 +249,38 @@ async function adoptLegacyCredential(user: DbUser) {
  * columns therefore hold the same value on every row this router has seen, and
  * the mirror can be dropped with the column rather than before it.
  */
+/**
+ * Both halves of a password change, or neither.
+ *
+ * account.password is what sign-in reads and user.password_hash is its mirror,
+ * so a request that writes one and then fails does not leave a stale copy — it
+ * leaves the account holding a password nobody was told about. `PUT /user` can
+ * fail after the credential is written (a duplicate address violates
+ * user_email_lower_key and the route answers 500), and the mirror's IS NULL
+ * guard cannot repair a column that is merely out of date.
+ */
+async function writePassword(
+  userId: string,
+  hash: string,
+  // The row work that has to land with it: the caller's own UPDATE of
+  // trexdb."user", run on the transaction rather than on the pool.
+  // deno-lint-ignore no-explicit-any
+  alsoInTransaction: (db: any) => Promise<void>,
+) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await alsoInTransaction(client);
+    await writeCredential(userId, hash, client);
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 async function mirrorCredentialOntoUser(userId: string) {
   await pool.query(
     `UPDATE trexdb."user" u
@@ -258,6 +312,14 @@ async function mirrorCredentialOntoUser(userId: string) {
  * pinned to that by the wire contract, so a row the engine cannot resolve can
  * be re-introduced at any time. Removing either leaves a way for an account to
  * be invisible to the engine.
+ *
+ * DELIBERATELY BEFORE THE PASSWORD IS CHECKED, so an unauthenticated request
+ * can cause this write. It cannot move after verification without defeating
+ * itself: the verification is the engine's, and the engine cannot find the row
+ * until it is folded. The write is bounded and idempotent — it fires at most
+ * once per account, replaces an address with its own case-folding, and records
+ * nothing the requester supplied — and the route is behind authLimiter. It is
+ * accepted, not overlooked.
  */
 async function canonicaliseLoginAddress(user: DbUser): Promise<string> {
   const folded = (user.email || "").toLowerCase();
@@ -301,7 +363,7 @@ async function authenticateUser(
   try {
     signedIn = await auth.api.signInEmail({ body: { email, password }, returnHeaders: true });
   } catch (err) {
-    if (err instanceof APIError && err.statusCode < 500) return null;
+    if (isAPIError(err) && err.statusCode < 500) return null;
     throw err;
   }
 
@@ -310,6 +372,28 @@ async function authenticateUser(
   }
   await mirrorCredentialOntoUser(user.id);
   return { userId: user.id, sessionToken: signedIn.response.token };
+}
+
+/**
+ * Whether the engine will accept this as an address at all.
+ *
+ * A twin of zod's `z.email()` — the check Better Auth runs first on every
+ * credential endpoint — copied from zod v4's regexes.ts rather than invented,
+ * because an address trex accepts and the engine does not is a registration
+ * that gets as far as writing rows and then fails. Kept honest by a parity test
+ * that drives the real engine over the same table of addresses; if a zod
+ * upgrade moves the rule, that test fails rather than this drifting quietly.
+ *
+ * The routes that need it are the ones that hand an address to the engine.
+ * PUT /user does not: it is pinned by the wire contract, an address it writes
+ * is not verified anywhere today, and rejecting one here would be a separate
+ * decision about existing accounts rather than about new ones.
+ */
+const ENGINE_EMAIL =
+  /^(?:[A-Za-z0-9_'+\-]+\.)*[A-Za-z0-9_'+\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$/;
+
+export function isEngineAddressable(email: unknown): boolean {
+  return typeof email === "string" && ENGINE_EMAIL.test(email);
 }
 
 /**
@@ -354,6 +438,16 @@ router.post("/signup", authLimiter, async (req, res) => {
 
     if (password.length < 8) {
       res.status(422).json({ error: "signup_invalid", error_description: "Password must be at least 8 characters" });
+      return;
+    }
+
+    // Refused here, before anything is written. The engine runs this same check
+    // on the sign-in that completes a registration, so an address it will not
+    // accept used to get as far as creating a user and an account and then have
+    // them deleted again under a 500. Registering an address nobody could ever
+    // sign in with was never right; saying so plainly is the change.
+    if (!isEngineAddressable(email)) {
+      res.status(422).json({ error: "signup_invalid", error_description: "Email must be a valid address" });
       return;
     }
 
@@ -610,9 +704,15 @@ router.post("/logout", apiLimiter, async (req, res) => {
     // trex's half would leave someone who has logged out still signed in to the
     // OAuth provider. The engine is handed the request's own cookies because it
     // is the only thing that knows which of its sessions they name.
-    const { auth } = await import("./better-auth.ts");
+    //
+    // Behind the same switch as every other engine call, and not only because
+    // a deployment with password sign-in off has no engine session to end:
+    // better-auth.ts reads that switch once, while it evaluates, so whichever
+    // request imports it first decides emailAndPassword.enabled for the life of
+    // the process. An ungated logout could be that request.
     const engineCookies = req.headers.cookie;
-    if (engineCookies) {
+    if (nativePasswordLoginEnabled() && engineCookies) {
+      const { auth } = await import("./better-auth.ts");
       const signedOut = await auth.api.signOut({
         headers: new Headers({ cookie: engineCookies }),
         returnHeaders: true,
@@ -726,33 +826,41 @@ router.put("/user", apiLimiter, async (req, res) => {
       updates.push(`is_placeholder_email = false`);
     }
 
+    let newHash: string | null = null;
     if (password) {
       if (password.length < 8) {
         res.status(422).json({ error: "validation_failed", error_description: "Password must be at least 8 characters" });
         return;
       }
-      const newHash = await hashPassword(password);
+      newHash = await hashPassword(password);
       updates.push(`password_hash = $${paramIdx++}`);
       values.push(newHash);
-
-      await writeCredential(claims.sub, newHash);
-
-      // Revoke all outstanding refresh tokens so a stolen token doesn't survive
-      // a password change.
-      await pool.query(
-        `UPDATE trexdb.refresh_token SET revoked = true, "updatedAt" = NOW()
-         WHERE "userId" = $1 AND revoked = false`,
-        [claims.sub],
-      );
     }
 
     if (updates.length > 0) {
       updates.push(`"updatedAt" = NOW()`);
       values.push(claims.sub);
-      await pool.query(
-        `UPDATE trexdb."user" SET ${updates.join(", ")} WHERE id = $${paramIdx}`,
-        values,
-      );
+      const update = `UPDATE trexdb."user" SET ${updates.join(", ")} WHERE id = $${paramIdx}`;
+
+      // The credential is written inside the same transaction as the row, and
+      // only ever after it. This route can fail on the row — a duplicate
+      // address violates user_email_lower_key and the catch below answers 500 —
+      // and a credential that survived that would have silently changed the
+      // password of a request the caller was told had done nothing.
+      if (newHash) {
+        await writePassword(claims.sub, newHash, (db) => db.query(update, values));
+
+        // Outside the transaction: revoking is idempotent, and a revocation
+        // that outlives a rolled-back password change costs a re-login rather
+        // than leaving a stolen token alive.
+        await pool.query(
+          `UPDATE trexdb.refresh_token SET revoked = true, "updatedAt" = NOW()
+           WHERE "userId" = $1 AND revoked = false`,
+          [claims.sub],
+        );
+      } else {
+        await pool.query(update, values);
+      }
     }
 
     const user = await fetchUserById(claims.sub);
@@ -854,11 +962,11 @@ router.post("/change-password", apiLimiter, async (req, res) => {
     }
 
     const newHash = await hashPassword(newPassword);
-    await pool.query(
-      `UPDATE trexdb."user" SET password_hash = $1, "updatedAt" = NOW() WHERE id = $2`,
-      [newHash, user.id],
-    );
-    await writeCredential(user.id, newHash);
+    await writePassword(user.id, newHash, (db) =>
+      db.query(
+        `UPDATE trexdb."user" SET password_hash = $1, "updatedAt" = NOW() WHERE id = $2`,
+        [newHash, user.id],
+      ));
 
     // Revoke all outstanding refresh tokens so a stolen token doesn't survive
     // a password change.
@@ -1144,11 +1252,11 @@ router.put("/admin/users/:id", apiLimiter, async (req, res) => {
 
     if (password !== undefined) {
       const newHash = await hashPassword(password);
-      await pool.query(
-        `UPDATE trexdb."user" SET password_hash = $1, "updatedAt" = NOW() WHERE id = $2`,
-        [newHash, user.id],
-      );
-      await writeCredential(user.id, newHash);
+      await writePassword(user.id, newHash, (db) =>
+        db.query(
+          `UPDATE trexdb."user" SET password_hash = $1, "updatedAt" = NOW() WHERE id = $2`,
+          [newHash, user.id],
+        ));
     }
 
     if (banned !== undefined) {
