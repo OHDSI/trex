@@ -250,6 +250,14 @@ async function mirrorCredentialOntoUser(userId: string) {
  * here settles no question and can collide with nothing: it is the row catching
  * up with the rule that already governed it. "updatedAt" is deliberately left
  * alone for the same reason — nobody edited this account.
+ *
+ * V17 folds the same way, and both are needed. V17 settles the population that
+ * existed at the deploy, so nobody has to sign in once to become visible and
+ * nothing reading user.email sees a mixture. This settles what is written
+ * afterwards: PUT /user stores the spelling the account holder typed and is
+ * pinned to that by the wire contract, so a row the engine cannot resolve can
+ * be re-introduced at any time. Removing either leaves a way for an account to
+ * be invisible to the engine.
  */
 async function canonicaliseLoginAddress(user: DbUser): Promise<string> {
   const folded = (user.email || "").toLowerCase();
