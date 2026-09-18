@@ -212,9 +212,17 @@ asserted it and nothing resolves it. Two rules follow:
    purpose:** an account somebody registers for themselves — the bootstrap
    administrator among them — should not be written `emailVerified = false`, and
    it is the one route where the flag costs nothing anyway, because
-   `user_email_lower_key` stops an attacker registering an address a row already
+   `user_email_lower_key` stops a registration taking an address a row already
    holds and the placeholder slug falls back to `<id>@d2e.local` when one is
-   taken. A hostile upstream can only ever link onto the attacker's own row.
+   taken, so such an address cannot be used to reach anybody else's row.
+
+   **The exception rests on both of those facts and dies with either** — add a
+   mail path that reads the column, or relax the unique index, and `/signup`
+   has to join the other five. It also does not claim squatting is harmless:
+   registering an address before its owner arrives puts their federated identity
+   inside the squatter's account. That is `decideLink`'s posture on every
+   domain, with `emailDomainAllowlist` as the intended control, so `d2e.local`
+   is neither more nor less exposed than any other.
 
 The second case is not hypothetical: it is how 66 of 69 users looked in a
 migration rehearsal, and before the domain rule they were written
