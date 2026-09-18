@@ -10,7 +10,7 @@
 // check can only be made against a real database, and inventing a URL would
 // un-gate every later suite in the same process against a database that does
 // not exist.
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals, assertStrictEquals } from "jsr:@std/assert";
 // better-auth/db exports getSchema (what Better Auth *wants*); the plan that
 // compares it with what the database *has* is a separate entry point.
 import { getMigrations } from "better-auth/db/migration";
@@ -101,5 +101,10 @@ schemaTest("Better Auth's own schema check passes", async (auth) => {
   // runtime check looks for those, and it is the check that actually runs in
   // production, so assert the real thing rather than a reconstruction of it.
   const ctx = await auth.$context as { checkSchema?: () => Promise<void> | undefined };
-  await ctx.checkSchema?.();
+  // Better Auth registers no check for an adapter it cannot introspect, and
+  // says so only at debug level — so `ctx.checkSchema?.()` would quietly
+  // resolve and this case, the only one that sees `unexpected-required-column`,
+  // would stop testing anything. Assert the check exists before running it.
+  assertStrictEquals(typeof ctx.checkSchema, "function");
+  await ctx.checkSchema!();
 });
