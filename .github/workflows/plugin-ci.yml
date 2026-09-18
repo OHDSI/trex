@@ -408,23 +408,50 @@ jobs:
           cd core/server
           log="${RUNNER_TEMP:-/tmp}/auth-test.log"
           deno test --no-check --allow-all auth/ 2>&1 | tee "$log"
-          # Every database-backed suite here gates on DATABASE_URL and SKIPS
-          # without one, so a service that fails to come up, a schema step that
-          # half-applies or a renamed variable would turn this leg green while
-          # testing none of the contract it exists to protect. An ignored test
-          # is therefore a failure in this job, not a neutral outcome.
-          summary=$(grep -E '^(ok|FAILED) \| [0-9]+ passed' "$log" | tail -1)
-          if [ -z "$summary" ]; then
-            echo "::error::could not read a deno test summary line — the suite did not run to completion"
-            exit 1
-          fi
-          echo "summary: $summary"
-          case "$summary" in
-            *ignored*)
-              echo "::error::the auth suite skipped tests ($summary); DATABASE_URL is not reaching a usable database"
-              exit 1
-              ;;
-          esac
+
+          # The files below carry the wire contract, the Better Auth engine
+          # construction, the schema-drift guard, the federation link rules and
+          # the V16 slug parity. All of them gate on DATABASE_URL and SKIP
+          # without one, so a service that never came up, a half-applied schema
+          # or a renamed variable would report green while testing none of it.
+          #
+          # Asserted per file and with a floor on the count, not over the run
+          # above: an aggregate cannot tell "nothing was ignored" from "nothing
+          # was collected", so a file renamed or moved out of auth/ would take
+          # its tests with it and leave the summary green. Naming the files is
+          # also what keeps this guard from objecting to an unconditionally
+          # ignored test somebody adds elsewhere under auth/ for its own good
+          # reasons.
+          for f in auth/auth-router.contract.test.ts \
+                   auth/better-auth.test.ts \
+                   auth/schema-validate.test.ts \
+                   auth/federation/federation.test.ts \
+                   auth/federation/placeholder-slug-parity.test.ts; do
+            # `|| true` so a no-match grep does not kill the script under
+            # `bash -e {0}` before the diagnosis below can be printed. A run
+            # that FAILED prints no `ok |` line either, so it lands on the same
+            # branch rather than escaping the loop.
+            summary=$(deno test --no-check --allow-all "$f" 2>&1 | tee -a "$log" \
+              | grep -E '^ok \| [0-9]+ passed' | tail -1) || true
+            echo "$f -> ${summary:-<no ok summary>}"
+            case "$summary" in
+              "")
+                echo "::error file=$f::no passing deno test summary — the file failed or did not run to completion"
+                exit 1
+                ;;
+              # Before the count floor below: a wholly gated file reports both
+              # `0 passed` and an ignored count, and the missing database is the
+              # diagnosis worth printing.
+              *ignored*)
+                echo "::error file=$f::skipped tests ($summary); DATABASE_URL is not reaching a usable database"
+                exit 1
+                ;;
+              "ok | 0 passed"*)
+                echo "::error file=$f::collected no tests; it has been renamed, moved, or emptied"
+                exit 1
+                ;;
+            esac
+          done
 
   build:
     needs: [pick_runner]
