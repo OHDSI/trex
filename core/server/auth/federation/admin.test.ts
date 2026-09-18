@@ -120,6 +120,48 @@ Deno.test("linkIdentity refuses an email already linked to another account at th
   assertEquals(c.ran.at(-1), "ROLLBACK");
 });
 
+// The fourth door onto trexdb."user". V17 refuses to migrate an installation
+// the engine cannot serve, and /signup, /admin/create-user and PUT /user all
+// refuse to create or set such an address — but this route runs AFTER V17, in
+// bulk, driven by a migration, and used to create the user regardless.
+Deno.test("linkIdentity refuses to create a user under an address the engine cannot serve", async () => {
+  const c = fakeClient([["FROM trexdb.sso_provider", [{ id: "logto" }]]]);
+  // Single-label domain: parseLinkRequest accepts it (it has an @), the engine
+  // does not — the same shape an IDP__INITIAL_USER__DOMAIN of "localhost" makes.
+  assertEquals(
+    await linkIdentity(c, { ...link, email: "a@localhost" }),
+    { unaddressableEmail: true, email: "a@localhost" },
+  );
+  assertEquals(c.ran.some((s) => s.startsWith("INSERT")), false);
+  // Refused before the lookup, not after it: the address is not a key either.
+  assertEquals(c.ran.some((s) => s.includes("lower(email) = lower($1)")), false);
+  assertEquals(c.ran.at(-1), "ROLLBACK");
+});
+
+Deno.test("linkIdentity refuses an unservable address on the id-pinned create too", async () => {
+  const c = fakeClient([["FROM trexdb.sso_provider", [{ id: "logto" }]]]);
+  assertEquals(
+    await linkIdentity(c, { ...link, email: "a@localhost", userId: "u9" }),
+    { unaddressableEmail: true, email: "a@localhost" },
+  );
+  assertEquals(c.ran.some((s) => s.startsWith("INSERT")), false);
+});
+
+// Idempotence: a migration re-run over identities it already created must not
+// start failing them. This branch never reads the address, so it never judges it.
+Deno.test("linkIdentity still links to an existing user pinned by id whatever the address says", async () => {
+  const c = fakeClient([
+    ["FROM trexdb.sso_provider", [{ id: "logto" }]],
+    ["WHERE id = $1 FOR UPDATE", [{ id: "u4", deletedAt: null }]],
+  ]);
+  assertEquals(
+    await linkIdentity(c, { ...link, email: "a@localhost", userId: "u4" }),
+    { userId: "u4", outcome: "linked" },
+  );
+  assertEquals(c.ran.some((s) => s.startsWith("INSERT INTO trexdb.account")), true);
+  assertEquals(c.ran.at(-1), "COMMIT");
+});
+
 Deno.test("linkIdentity bans the linked user when asked", async () => {
   const c = fakeClient([
     ["FROM trexdb.sso_provider", [{ id: "logto" }]],
