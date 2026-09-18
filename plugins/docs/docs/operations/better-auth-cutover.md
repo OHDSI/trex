@@ -189,10 +189,63 @@ address links to the row holding it, and the provider's
 nor less exposed than `example.com`. The flag is about what a row *means*; the
 squat is a separate question with a separate answer.
 
-**So: if you bootstrap with `IDP__INITIAL_USER__DOMAIN=d2e.local`, the initial
-administrator is created verified and unflagged.** That is intended. Everything
-migrated afterwards, through any of the other five routes, is flagged. Only the
-dotted-domain requirement is load-bearing for the 422.
+**So, for `IDP__INITIAL_USER__DOMAIN=d2e.local`, it depends which you are
+doing:**
+
+- **A fresh install.** `/signup` creates the initial administrator verified and
+  unflagged, and that is intended — the first admin should not land unverified
+  on their own installation.
+- **An upgrade.** V17's sweep runs over the population that already exists, and
+  it does not ask which route wrote a row. An administrator already holding
+  `admin@d2e.local` is flagged and set unverified like everybody else on that
+  domain. The account still works — the flag and `emailVerified` govern linking
+  and mail, not sign-in — but it will not look the way a freshly bootstrapped
+  one does.
+
+Everything migrated afterwards, through any of the other five routes, is
+flagged. Only the dotted-domain requirement is load-bearing for the 422.
+
+## `email_verified` changes for most of a migrated installation
+
+**Read this before upgrading an installation whose users came from an IdP
+migration.** It is the one change on this page with an effect outside trex, and
+that effect has not been verified.
+
+V17's placeholder sweep sets `emailVerified = false` on every row whose address
+is on the placeholder domain. Those rows were `emailVerified = true` before —
+that is the defect it fixes, since nobody ever proved those addresses. But
+`emailVerified` is what trex's OIDC provider emits as the `email_verified`
+claim, in the id_token (`auth/oidc/claims.ts`) and from `/userinfo`
+(`auth/oidc/router.ts`). So:
+
+> **After the upgrade, those users' id_tokens carry `email_verified: false`
+> where they previously carried `true`.**
+
+**How many.** On the installation rehearsed for this work, **66 of 69 users** —
+everyone whose directory entry had no address of its own. Expect the proportion
+to be similar wherever the IdP migration filled addresses in, and near zero
+where every user had a real one.
+
+**What we have not checked.** Nothing in this repository consumes the claim, so
+nothing here can tell you what the relying parties do with it. **The effect on
+WebAPI and Atlas is unverified.** A relying party is *required* to treat an
+unverified address as not an identifier, and that requirement is exactly the
+protection the flag provides — but a relying party that keys on `email` and
+ignores `email_verified` will not notice, while one that refuses an unverified
+address may start rejecting sign-ins that worked the day before. Both are
+plausible and neither has been tested.
+
+**What to do.** Before upgrading a production installation, check how each
+relying party treats `email_verified: false` — whether it gates on it, logs it,
+or ignores it — on a staging copy rather than in production. If one of them
+gates on it, that is a change to make on its side before this lands, not after.
+
+**Why the claim is not simply left alone.** `emailVerified = true` on a
+synthesised address is a false statement: it says somebody proved control of a
+mailbox that does not belong to them and in most cases does not exist. Emitting
+it keeps a relying party that trusts the claim linking accounts on an address
+nobody owns, which is the account-takeover this whole area exists to prevent.
+The claim going false is the fix, not a side effect of it.
 
 ## The two password columns, and the rows that already disagree
 
