@@ -180,14 +180,102 @@ export async function resolveFederatedUser(
 }
 
 /**
+ * The domain every synthesised address sits under.
+ *
+ * Identical to the `placeholder_domain` constant in
+ * core/schema/V16__better_auth_canonical_tables.sql, and it has to stay that
+ * way: V16 backfilled the users that existed when Better Auth took the tables
+ * over, this module mints the ones that arrive afterwards, and a row from
+ * either must be indistinguishable from a row from the other. It cannot be
+ * read from configuration on this side because it cannot be on that one —
+ * trex's migration runner substitutes nothing into a V-file and checksums the
+ * text it executes (plugins/migration/src/lib.rs).
+ *
+ * Never resolvable and never routed to. `is_placeholder_email` is what code
+ * branches on; the domain is only what makes the address inert if something
+ * tries anyway.
+ */
+export const PLACEHOLDER_EMAIL_DOMAIN = "d2e.local";
+
+/**
+ * The local part of a placeholder address, from the identifier the user signs
+ * in with.
+ *
+ * Mirrors the `regexp_replace`/`btrim` pair in V16's DO block character for
+ * character. The two run in different languages over the same rows, so a
+ * change to either is a change to both: a user backfilled by the migration and
+ * the same user re-provisioned here have to land on the same address.
+ *
+ * Returns "" when nothing usable survives, which the caller must handle — an
+ * empty local part would produce the address `@d2e.local`.
+ */
+export function placeholderLocalPart(signInId: string): string {
+  return signInId
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "");
+}
+
+/**
+ * An address for an identity that asserted none, under the rule V16 uses: the
+ * upstream subject, else the user id, and a collision refused rather than
+ * resolved in anyone's favour.
+ */
+async function synthesisePlaceholderEmail(
+  client: PgClient,
+  subject: string,
+  userId: string,
+): Promise<string> {
+  const taken = async (address: string): Promise<boolean> => {
+    // Case-insensitively, though the UNIQUE index is not: an address that
+    // differs from a real one only in case is a lookalike, and handing one out
+    // is the thing this whole path exists to avoid.
+    const { rows } = await client.query(
+      `SELECT 1 FROM trexdb."user" WHERE lower(email) = $1 LIMIT 1`,
+      [address],
+    );
+    return rows.length > 0;
+  };
+
+  // The id is the only identifier guaranteed distinct, so it is the backbone
+  // of the scheme rather than merely a fallback: without a usable one there is
+  // nothing left to fall back to.
+  const fromId = placeholderLocalPart(userId);
+  if (fromId === "") {
+    throw new Error(
+      `cannot synthesise a placeholder address for user ${userId}: its id yields no usable local part`,
+    );
+  }
+
+  const fromSubject = placeholderLocalPart(subject);
+  let candidate = `${fromSubject || fromId}@${PLACEHOLDER_EMAIL_DOMAIN}`;
+  // Two upstream subjects can slugify to the same local part.
+  if (await taken(candidate)) candidate = `${fromId}@${PLACEHOLDER_EMAIL_DOMAIN}`;
+  if (await taken(candidate)) {
+    throw new Error(
+      `cannot synthesise a placeholder address for user ${userId}: ${candidate} is already taken`,
+    );
+  }
+  return candidate;
+}
+
+/**
  * A federated user has no password: no row in account with providerId 'credential'.
  *
  * An upstream that asserted no address leaves user.email NULL (V14 dropped the
- * NOT NULL for exactly this). Deliberately not a synthetic stand-in such as
- * `<sub>@example.invalid`: the column is UNIQUE and is what the password grant
- * authenticates against, so a made-up address is a real address that happens to
- * be wrong — it can collide, it can be mailed, and an administrator cannot tell
- * it from one the person gave. An absent one is merely absent.
+ * NOT NULL for exactly this).
+ *
+ * V14's absent address is no longer available: V16 restored NOT NULL because
+ * Better Auth requires an address on every user, so an upstream that asserts
+ * none gets a synthesised one. The objection V14 recorded — that a made-up
+ * address is a real address that happens to be wrong, since it can collide,
+ * it can be mailed, and an administrator cannot tell it from one the person
+ * gave — is answered rather than overruled: the address is minted from the
+ * upstream subject under a domain that resolves nowhere, the row is marked
+ * `is_placeholder_email` so an administrator and every mail path can tell,
+ * `"emailVerified"` stays false so it can never claim an account through the
+ * verified-email rule, and a collision is refused instead of attaching one
+ * person's identity to another's row.
  */
 export async function provisionUser(
   client: PgClient,
@@ -197,13 +285,26 @@ export async function provisionUser(
   opts: { id?: string } = {},
 ): Promise<string> {
   const id = opts.id ?? crypto.randomUUID();
+  const placeholder = identity.email === null
+    ? await synthesisePlaceholderEmail(client, identity.sub, id)
+    : null;
   await client.query(
-    `INSERT INTO trexdb."user" (id, name, email, "emailVerified", email_confirmed_at, role)
-     VALUES ($1, $2, $3, true, NOW(), 'user')`,
+    // A placeholder was asserted by nobody, so it is never confirmed: that is
+    // what keeps it out of findLinkCandidateByEmail's reach and out of the
+    // verified-email rule.
+    `INSERT INTO trexdb."user" (id, name, email, "emailVerified", email_confirmed_at, role,
+                                is_placeholder_email)
+     VALUES ($1, $2, $3, $4::boolean, CASE WHEN $4::boolean THEN NOW() END, 'user', $5::boolean)`,
     // The subject is the last fallback for the name: a row has to be
     // identifiable in an administrator's list even with neither name nor
     // address.
-    [id, identity.name ?? identity.email ?? identity.sub, identity.email],
+    [
+      id,
+      identity.name ?? identity.email ?? identity.sub,
+      placeholder ?? identity.email,
+      placeholder === null,
+      placeholder !== null,
+    ],
   );
   return id;
 }
