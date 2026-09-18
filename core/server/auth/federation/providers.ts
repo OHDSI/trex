@@ -72,9 +72,28 @@ export async function findLinkCandidateByEmail(
       WHERE lower(email) = lower($1)
         AND "deletedAt" IS NULL
         AND banned IS NOT TRUE
-      LIMIT 1`,
+      LIMIT 2`,
     [email],
   );
+  // Two rows mean two accounts hold one address, which V16's unique index on
+  // lower(email) forbids — so this is reachable only on a database missing that
+  // index (a migration not run, a dump restored without it) and is exactly the
+  // state the takeover needed: the victim's account and an attacker's case
+  // variant, both matching the address the upstream just verified.
+  //
+  // Deliberately not an ORDER BY. An ordering would only make the choice
+  // repeatable, and there is nothing to order by that distinguishes the victim
+  // from the attacker: the attacker registers whenever they like, so neither
+  // oldest-first nor id order is safe. The one correct answer to "which of
+  // these two accounts is this identity?" is that nobody can tell, so this
+  // refuses and takes the sign-in with it. The caller logs it and shows a
+  // generic failure, which is a sign-in an operator must fix rather than a
+  // silent link onto the wrong account.
+  if (rows.length > 1) {
+    throw new Error(
+      `more than one trex user holds ${email}; refusing to guess which one this identity is`,
+    );
+  }
   const row = rows[0];
   if (!row) return null;
   return { id: row.id, role: row.role ?? null };
