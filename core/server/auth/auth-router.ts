@@ -1,5 +1,6 @@
 import { Router } from "express";
 import express from "express";
+import { APIError } from "better-auth/api";
 import { pool } from "../db.ts";
 import {
   signAccessToken,
@@ -172,15 +173,156 @@ async function getPasswordHash(userId: string, userPasswordHash: string | null):
   return result.rows[0]?.password || null;
 }
 
+// ── The credential, and the engine that verifies it ─────────────────────────
+
 /**
- * After successful login with a legacy password, migrate the hash
- * to user.password_hash for future logins.
+ * Write a password where the engine reads it.
+ *
+ * Better Auth takes the credential from account.password, so that row is what a
+ * password change has to land on. Every route below used to UPDATE it, which
+ * silently changed nothing for a user who had no credential row yet — a
+ * federated account setting its first password, or a row written by a path that
+ * predates V17. The new password went only to user.password_hash, so the moment
+ * sign-in moved to the engine the old password kept working and the new one did
+ * not. An upsert cannot miss.
  */
-async function migratePasswordHash(userId: string, newHash: string) {
+async function writeCredential(userId: string, hash: string) {
   await pool.query(
-    `UPDATE trexdb."user" SET password_hash = $1, "updatedAt" = NOW() WHERE id = $2`,
-    [newHash, userId],
+    `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId", password, "createdAt", "updatedAt")
+     VALUES ($1, $2, $2, 'credential', $3, NOW(), NOW())
+     ON CONFLICT ("providerId", "accountId")
+       DO UPDATE SET password = EXCLUDED.password, "updatedAt" = NOW()`,
+    [crypto.randomUUID(), userId, hash],
   );
+}
+
+/**
+ * V17 moved every password it found onto account.password. A row can still
+ * carry one only on user.password_hash — written by a node that had not
+ * restarted into this code, or by a fixture — and to the engine that account
+ * simply has no password, which it reports as a wrong one. Filled in on the way
+ * past, never overwritten: a credential that is already there is the current
+ * one, and user.password_hash is only a mirror of it.
+ *
+ * Copied rather than re-hashed. The stored value is trex's own scrypt, which
+ * better-auth.ts's hooks verify unchanged, so re-hashing would spend a second
+ * scrypt to arrive at an equivalent string.
+ */
+async function adoptLegacyCredential(user: DbUser) {
+  if (!user.password_hash) return;
+  await pool.query(
+    `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId", password, "createdAt", "updatedAt")
+     VALUES ($1, $2, $2, 'credential', $3, NOW(), NOW())
+     ON CONFLICT ("providerId", "accountId")
+       DO UPDATE SET password = EXCLUDED.password, "updatedAt" = NOW()
+       WHERE account.password IS NULL`,
+    [crypto.randomUUID(), user.id, user.password_hash],
+  );
+}
+
+/**
+ * The reverse mirror: user.password_hash is the pre-V17 home of the credential
+ * and is still what getPasswordHash prefers, so a user whose password lives
+ * only in account.password gets it copied back on their way through. Both
+ * columns therefore hold the same value on every row this router has seen, and
+ * the mirror can be dropped with the column rather than before it.
+ */
+async function mirrorCredentialOntoUser(userId: string) {
+  await pool.query(
+    `UPDATE trexdb."user" u
+        SET password_hash = a.password, "updatedAt" = NOW()
+       FROM trexdb.account a
+      WHERE u.id = $1
+        AND a."userId" = u.id AND a."providerId" = 'credential'
+        AND a.password IS NOT NULL AND u.password_hash IS NULL`,
+    [userId],
+  );
+}
+
+/**
+ * Better Auth looks a user up by exact equality against the address it has
+ * lower-cased, and lower-cases every address it writes itself, so a stored
+ * spelling that is not already case-folded is invisible to it — and its holder
+ * would be told their password is wrong rather than that nothing can see them.
+ *
+ * trex's own identity has been lower(email) since V16 and V16's unique index
+ * admits at most one row per folded address, so folding the stored spelling
+ * here settles no question and can collide with nothing: it is the row catching
+ * up with the rule that already governed it. "updatedAt" is deliberately left
+ * alone for the same reason — nobody edited this account.
+ */
+async function canonicaliseLoginAddress(user: DbUser): Promise<string> {
+  const folded = (user.email || "").toLowerCase();
+  if (!user.email || user.email === folded) return folded;
+
+  await pool.query(`UPDATE trexdb."user" SET email = $1 WHERE id = $2`, [folded, user.id]);
+  console.log(`[auth] case-folded the login address of user ${user.id} so the engine can resolve it`);
+  user.email = folded;
+  return folded;
+}
+
+/**
+ * The one credential check in trex.
+ *
+ * Better Auth owns users, accounts and credential verification from here on;
+ * the callers keep their own response envelopes, because the engine issues no
+ * access token and has no refresh-token concept for this path. The session it
+ * creates is what the OAuth provider will authenticate against in phase 2,
+ * through Better Auth's own cookie and nothing else — which is why the cookie
+ * is forwarded to the caller and not only the row written.
+ *
+ * Returns null only for a failed credential. Anything the engine reports as its
+ * own failure is re-thrown, so a scrypt or database failure reaches the route's
+ * error handler as a 500 instead of being answered as a wrong password.
+ */
+async function authenticateUser(
+  user: DbUser,
+  password: string,
+  // deno-lint-ignore no-explicit-any
+  res?: any,
+): Promise<{ userId: string; sessionToken: string } | null> {
+  const email = await canonicaliseLoginAddress(user);
+  await adoptLegacyCredential(user);
+
+  // Imported here rather than at the top: better-auth.ts derives its secret
+  // from TREX_ROOT_KEY while it evaluates, and this module is pulled in by
+  // callers that arrange that variable only afterwards.
+  const { auth } = await import("./better-auth.ts");
+
+  let signedIn;
+  try {
+    signedIn = await auth.api.signInEmail({ body: { email, password }, returnHeaders: true });
+  } catch (err) {
+    if (err instanceof APIError && err.statusCode < 500) return null;
+    throw err;
+  }
+
+  if (res) {
+    for (const cookie of signedIn.headers.getSetCookie()) res.append("Set-Cookie", cookie);
+  }
+  await mirrorCredentialOntoUser(user.id);
+  return { userId: user.id, sessionToken: signedIn.response.token };
+}
+
+/**
+ * The credential path without the token envelope, for callers that want a
+ * signed-in session rather than a GoTrue response — the OAuth provider's own
+ * sign-in form. Passing `res` also hands them Better Auth's session cookie,
+ * which is the only thing /oauth2/authorize will look at.
+ *
+ * Deliberately one answer for every refusal: the caller cannot tell a banned
+ * user from an unknown one from a wrong password, and must not be able to.
+ */
+export async function signInWithPassword(
+  email: string,
+  password: string,
+  // deno-lint-ignore no-explicit-any
+  res?: any,
+): Promise<{ userId: string; sessionToken: string } | null> {
+  if (!nativePasswordLoginEnabled()) return null;
+  const user = await fetchUserByEmail(email);
+  if (!user || user.banned) return null;
+  return await authenticateUser(user, password, res);
 }
 
 // ── POST /signup ─────────────────────────────────────────────────────────────
@@ -251,16 +393,23 @@ router.post("/signup", authLimiter, async (req, res) => {
       console.log(`[auth] Assigned admin role to ${email} (${isFirstUser ? "first user" : "ADMIN_EMAIL match"})`);
     }
 
-    // Also create a Better Auth compatible account record for backward compat
-    await pool.query(
-      `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId", password)
-       VALUES ($1, $2, $2, 'credential', $3)
-       ON CONFLICT ("providerId", "accountId") DO NOTHING`,
-      [crypto.randomUUID(), userId, passwordHash],
-    );
+    await writeCredential(userId, passwordHash);
 
     const user = await fetchUserById(userId);
     if (!user) {
+      res.status(500).json({ error: "server_error", error_description: "Failed to create user" });
+      return;
+    }
+
+    // Sign the new account in through the engine rather than only minting trex's
+    // envelope for it. That is what gives the registration a Better Auth session
+    // and cookie for the OAuth provider to read, and it is also the only check
+    // that the credential just written is one the engine can actually verify. A
+    // refusal means the account is unusable, so it is removed rather than left
+    // holding an address nobody can sign in with or register again.
+    const engineSession = await authenticateUser(user, password, res);
+    if (!engineSession) {
+      await pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [userId]);
       res.status(500).json({ error: "server_error", error_description: "Failed to create user" });
       return;
     }
@@ -328,22 +477,12 @@ async function handlePasswordGrant(req: any, res: any) {
       return;
     }
 
-    const storedHash = await getPasswordHash(user.id, user.password_hash);
-    if (!storedHash) {
+    // Deliberately not distinguishing an account with no password from a wrong
+    // one, and deliberately not Better Auth's 401 INVALID_EMAIL_OR_PASSWORD:
+    // the wire contract here is GoTrue's 400 invalid_grant.
+    if (!await authenticateUser(user, password, res)) {
       res.status(400).json({ error: "invalid_grant", error_description: "Invalid login credentials" });
       return;
-    }
-
-    const valid = await verifyPassword(password, storedHash);
-    if (!valid) {
-      res.status(400).json({ error: "invalid_grant", error_description: "Invalid login credentials" });
-      return;
-    }
-
-    // Migrate password hash if needed
-    if (!user.password_hash && storedHash) {
-      const newHash = await hashPassword(password);
-      await migratePasswordHash(user.id, newHash);
     }
 
     // This session is a native one, so any federation block left by an earlier
@@ -458,6 +597,23 @@ router.post("/sync-cookie", apiLimiter, async (req, res) => {
 router.post("/logout", apiLimiter, async (req, res) => {
   res.clearCookie("sb-access-token", { path: "/" });
   try {
+    // The sign-in that issued this session also issued a Better Auth one, and
+    // from phase 2 on that is the session /oauth2/authorize reads. Ending only
+    // trex's half would leave someone who has logged out still signed in to the
+    // OAuth provider. The engine is handed the request's own cookies because it
+    // is the only thing that knows which of its sessions they name.
+    const { auth } = await import("./better-auth.ts");
+    const engineCookies = req.headers.cookie;
+    if (engineCookies) {
+      const signedOut = await auth.api.signOut({
+        headers: new Headers({ cookie: engineCookies }),
+        returnHeaders: true,
+      }).catch(() => null);
+      for (const cookie of signedOut?.headers.getSetCookie() ?? []) {
+        res.append("Set-Cookie", cookie);
+      }
+    }
+
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith("Bearer ")) {
       res.status(204).end();
@@ -571,12 +727,7 @@ router.put("/user", apiLimiter, async (req, res) => {
       updates.push(`password_hash = $${paramIdx++}`);
       values.push(newHash);
 
-      // Also update account table for backward compat
-      await pool.query(
-        `UPDATE trexdb.account SET password = $1, "updatedAt" = NOW()
-         WHERE "userId" = $2 AND "providerId" = 'credential'`,
-        [newHash, claims.sub],
-      );
+      await writeCredential(claims.sub, newHash);
 
       // Revoke all outstanding refresh tokens so a stolen token doesn't survive
       // a password change.
@@ -699,13 +850,7 @@ router.post("/change-password", apiLimiter, async (req, res) => {
       `UPDATE trexdb."user" SET password_hash = $1, "updatedAt" = NOW() WHERE id = $2`,
       [newHash, user.id],
     );
-
-    // Also update account table
-    await pool.query(
-      `UPDATE trexdb.account SET password = $1, "updatedAt" = NOW()
-       WHERE "userId" = $2 AND "providerId" = 'credential'`,
-      [newHash, user.id],
-    );
+    await writeCredential(user.id, newHash);
 
     // Revoke all outstanding refresh tokens so a stolen token doesn't survive
     // a password change.
@@ -922,13 +1067,7 @@ router.post(["/admin/create-user", "/admin/users"], apiLimiter, async (req, res)
       [userId, userName, email, userRole, passwordHash, JSON.stringify(data || {})],
     );
 
-    // Also create account record for backward compat
-    await pool.query(
-      `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId", password)
-       VALUES ($1, $2, $2, 'credential', $3)
-       ON CONFLICT ("providerId", "accountId") DO NOTHING`,
-      [crypto.randomUUID(), userId, passwordHash],
-    );
+    await writeCredential(userId, passwordHash);
 
     const user = await fetchUserById(userId);
     if (!user) {
@@ -1001,13 +1140,7 @@ router.put("/admin/users/:id", apiLimiter, async (req, res) => {
         `UPDATE trexdb."user" SET password_hash = $1, "updatedAt" = NOW() WHERE id = $2`,
         [newHash, user.id],
       );
-
-      // Also update account table
-      await pool.query(
-        `UPDATE trexdb.account SET password = $1, "updatedAt" = NOW()
-         WHERE "userId" = $2 AND "providerId" = 'credential'`,
-        [newHash, user.id],
-      );
+      await writeCredential(user.id, newHash);
     }
 
     if (banned !== undefined) {
