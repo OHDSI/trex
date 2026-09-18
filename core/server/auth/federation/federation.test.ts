@@ -1381,9 +1381,10 @@ const anonymous = (sub: string) => ({ sub, email: null, emailVerified: false });
 Deno.test("an identity asserting no address is provisioned with a flagged placeholder", async () => {
   const c = provisionClient();
   assertEquals(await provisionUser(c, anonymous("Alice.Example"), { id: "u-1" }), "u-1");
-  // Unverified and flagged: an address nobody asserted must never be able to
-  // claim an account through the verified-email rule, and every mail path has
-  // to be able to tell it from one the person gave.
+  // Unverified and flagged. The flag is what every mail path has to be able to
+  // tell a synthesised address by; `"emailVerified"` false is a true statement
+  // about a row nobody asserted, not a link-path protection — see provisionUser
+  // for what the link path actually reads.
   assertEquals(c.inserts, [[
     "u-1",
     "Alice.Example",
