@@ -504,11 +504,12 @@ Deno.test("verified email, no user, auto-provision on provisions", () => {
   );
 });
 
-// ── The fifth door: an upstream address the engine cannot serve ─────────────
+// ── An upstream address the engine cannot serve ─────────────────────────────
 //
 // applyClaimMap takes the `email` claim verbatim, so an IdP is free to assert
 // one V17 would have refused to migrate. auto_provision then writes it, after
-// V17 has run, with no administrator in the loop.
+// V17 has run, with no administrator in the loop — the only one of the six
+// address-writing routes (see isEngineAddressable) that needs none.
 
 const unusable = (over: Partial<UpstreamIdentity> = {}): UpstreamIdentity => ({
   sub: "s-1", email: "alice@localhost", emailVerified: true, ...over,
