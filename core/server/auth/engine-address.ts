@@ -19,13 +19,19 @@
  * address the engine cannot resolve, and /signup refuses to create one; a
  * PUT /user that accepted one would be a back door into the exact state both of
  * those exist to prevent, one request after the migration refused it, and the
- * account that walked through it could never sign in again. The federation
- * admin link at PUT /federation/links is the fourth such door, and the one a
- * migration drives at volume — see linkIdentity.
+ * account that walked through it could never sign in again.
+ *
+ * Five doors write an address onto trexdb."user" behind V17, and all five ask
+ * this: POST /signup, POST /admin/users, PUT /user, the federation admin link
+ * at PUT /federation/links (see linkIdentity — the one a migration drives at
+ * volume) and federated sign-in's auto-provision branch (see decideLink — the
+ * only one reached with no administrator in the loop, since the upstream
+ * asserts the address itself and trex stores that claim verbatim). A sixth
+ * means asking it there too.
  *
  * Its own module rather than the router's, because the rule now governs three
- * subsystems (the /auth/v1 routes, the federation admin API and V17) and the
- * federation admin path has no other reason to load a 60KB express router.
+ * subsystems (the /auth/v1 routes, federation, and V17's twin) and the
+ * federation paths have no other reason to load a 60KB express router.
  */
 const ENGINE_EMAIL =
   /^(?:[A-Za-z0-9_'+\-]+\.)*[A-Za-z0-9_'+\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$/;

@@ -504,6 +504,65 @@ Deno.test("verified email, no user, auto-provision on provisions", () => {
   );
 });
 
+// ── The fifth door: an upstream address the engine cannot serve ─────────────
+//
+// applyClaimMap takes the `email` claim verbatim, so an IdP is free to assert
+// one V17 would have refused to migrate. auto_provision then writes it, after
+// V17 has run, with no administrator in the loop.
+
+const unusable = (over: Partial<UpstreamIdentity> = {}): UpstreamIdentity => ({
+  sub: "s-1", email: "alice@localhost", emailVerified: true, ...over,
+});
+
+Deno.test("auto-provision refuses an upstream address the engine cannot serve", () => {
+  assertEquals(
+    decideLink(unusable(), provider({ autoProvision: true }), null),
+    { action: "refuse", reason: "upstream_email_unusable" },
+  );
+});
+
+// The refusal is about writing the address, not about reading it. A row that
+// already holds it was vetted by whichever door created it, and linking writes
+// no address at all — so this must not start refusing established users.
+Deno.test("an unservable upstream address still links to an existing user", () => {
+  assertEquals(
+    decideLink(unusable(), provider({ autoProvision: true }), ordinary()),
+    { action: "link", userId: "u-1" },
+  );
+});
+
+// Order matters: the cheaper, more specific refusals stay ahead of it, so an
+// operator reading the error code learns the first thing that was wrong.
+Deno.test("the earlier refusals still win over the addressability check", () => {
+  assertEquals(
+    decideLink(unusable({ emailVerified: false }), provider({ autoProvision: true }), null),
+    { action: "refuse", reason: "upstream_email_unverified" },
+  );
+  assertEquals(
+    decideLink(
+      unusable(),
+      provider({ autoProvision: true, emailDomainAllowlist: ["corp.test"] }),
+      null,
+    ),
+    { action: "refuse", reason: "email_domain_not_allowed" },
+  );
+  // auto_provision off is already a refusal, and stays the one reported.
+  assertEquals(
+    decideLink(unusable(), provider(), null),
+    { action: "refuse", reason: "no_account" },
+  );
+});
+
+// The address-less branch provisions too, and is deliberately NOT guarded: it
+// mints a placeholder rather than writing what the upstream said. This asserts
+// the exemption is safe rather than assumed.
+Deno.test("an identity with no address still provisions, since its placeholder is addressable", () => {
+  assertEquals(
+    decideLink({ sub: "s-1", email: null, emailVerified: false }, provider({ autoProvision: true }), null),
+    { action: "provision" },
+  );
+});
+
 // The guards are only as good as the configuration reaching them, and the
 // column→field mapping is the one part of that with no type to catch it.
 Deno.test("the link guards are loaded off sso_provider onto ProviderConfig", async () => {
