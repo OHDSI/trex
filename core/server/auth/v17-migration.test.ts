@@ -59,17 +59,23 @@ async function atV17(
   const { Client } = await import("npm:pg");
   const name = `trex_v17_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
 
-  const admin = new Client({ connectionString: maintenanceUrl() });
-  await admin.connect();
-  try {
-    await admin.query(`CREATE DATABASE ${name}`);
-  } finally {
-    await admin.end();
-  }
-
   const files = await schemaFiles();
   const db = new Client({ connectionString: scratchUrl(name) });
+
+  // CREATE DATABASE is INSIDE the try whose finally drops it. Outside, anything
+  // that threw between the create and the try — including the schema read, or
+  // simply connecting to the new database — left the database behind on the
+  // server with nothing to clean it up, and a test that leaks a database on
+  // failure leaks one every time it fails.
   try {
+    const admin = new Client({ connectionString: maintenanceUrl() });
+    await admin.connect();
+    try {
+      await admin.query(`CREATE DATABASE ${name}`);
+    } finally {
+      await admin.end();
+    }
+
     await db.connect();
     for (const f of files) {
       if (f.version >= 17) continue;

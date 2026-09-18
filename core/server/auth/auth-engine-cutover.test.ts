@@ -159,6 +159,11 @@ async function storedHash(pool: PgPool, userId: string): Promise<string | null> 
   return rows[0]?.password_hash ?? null;
 }
 
+/** Deno's resource sanitizer objects to a response body nobody read. */
+async function drainBody(res: Response) {
+  await res.body?.cancel();
+}
+
 async function sessionCount(pool: PgPool, userId: string): Promise<number> {
   const { rows } = await pool.query(
     `SELECT count(*)::int AS n FROM trexdb.session WHERE "userId" = $1`,
@@ -760,4 +765,89 @@ cutoverTest("PUT /user still clears the flag for a real address", async ({ url, 
   await res.body?.cancel();
 
   assertEquals((await marking(pool, email)).is_placeholder_email, false);
+});
+
+
+// ── The engine session, ended everywhere it is invalidated ──────────────────
+//
+// Engine sessions were created on every sign-in and destroyed only by /logout,
+// so an administrator banning an account left its Better Auth session live
+// until TTL — and phase 2's /oauth2/authorize authenticates against that row
+// and nothing else. A ban the OAuth provider does not honour is not a ban.
+//
+// Asserted rather than trusted: the gap existed for the whole of this branch
+// without a single test asking the question.
+
+cutoverTest("an admin ban ends the engine session, not only the refresh tokens", async ({ url, pool }) => {
+  const admin = await createLegacyUser(pool, { role: "admin" });
+  const target = await createLegacyUser(pool);
+
+  // A real sign-in, so the session row is the one the engine wrote.
+  const signIn = await grant(url, target.email, PASSWORD);
+  assertEquals(signIn.status, 200);
+  await drainBody(signIn);
+  assertEquals(await sessionCount(pool, target.id), 1);
+
+  const banned = await request("PUT", `${url}/admin/users/${target.id}`, { banned: true }, await bearer(admin));
+  assertEquals(banned.status, 200);
+  await drainBody(banned);
+
+  assertEquals(await sessionCount(pool, target.id), 0);
+});
+
+cutoverTest("an admin password reset ends the engine session too", async ({ url, pool }) => {
+  const admin = await createLegacyUser(pool, { role: "admin" });
+  const target = await createLegacyUser(pool);
+
+  const signIn = await grant(url, target.email, PASSWORD);
+  assertEquals(signIn.status, 200);
+  await drainBody(signIn);
+  assertEquals(await sessionCount(pool, target.id), 1);
+
+  const reset = await request(
+    "PUT",
+    `${url}/admin/users/${target.id}`,
+    { password: "an-administrator-set-password" },
+    await bearer(admin),
+  );
+  assertEquals(reset.status, 200);
+  await drainBody(reset);
+
+  assertEquals(await sessionCount(pool, target.id), 0);
+});
+
+cutoverTest("changing a password ends the engine session", async ({ url, pool }) => {
+  const user = await createLegacyUser(pool);
+
+  const signIn = await grant(url, user.email, PASSWORD);
+  assertEquals(signIn.status, 200);
+  await drainBody(signIn);
+  assertEquals(await sessionCount(pool, user.id), 1);
+
+  const changed = await post(
+    `${url}/change-password`,
+    { currentPassword: PASSWORD, newPassword: "a-brand-new-password" },
+    await bearer(user),
+  );
+  assertEquals(changed.status, 200);
+  await drainBody(changed);
+
+  assertEquals(await sessionCount(pool, user.id), 0);
+});
+
+// Narrowness: an unban is not an invalidation, so it must not sign anybody out.
+cutoverTest("an unban leaves the engine session alone", async ({ url, pool }) => {
+  const admin = await createLegacyUser(pool, { role: "admin" });
+  const target = await createLegacyUser(pool);
+
+  const signIn = await grant(url, target.email, PASSWORD);
+  assertEquals(signIn.status, 200);
+  await drainBody(signIn);
+  assertEquals(await sessionCount(pool, target.id), 1);
+
+  const unbanned = await request("PUT", `${url}/admin/users/${target.id}`, { banned: false }, await bearer(admin));
+  assertEquals(unbanned.status, 200);
+  await drainBody(unbanned);
+
+  assertEquals(await sessionCount(pool, target.id), 1);
 });
