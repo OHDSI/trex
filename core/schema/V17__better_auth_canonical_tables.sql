@@ -19,13 +19,28 @@ SELECT gen_random_uuid()::text, u.id, 'credential', u.id, u.password_hash, NOW()
       WHERE a."userId" = u.id AND a."providerId" = 'credential'
    );
 
+-- Reconciled, not merely filled. `AND a.password IS NULL` was here, on the
+-- assumption that an account row carrying a password already carried the right
+-- one. It does not always: develop's PUT /user (720b3c33, auth-router.ts:566)
+-- writes trexdb.account BEFORE the trexdb."user" UPDATE at :583, so a request
+-- that also changed the address and collided on the unique index answered 500
+-- with the credential already rotated and user.password_hash left behind.
+-- Those rows are in production databases now — this is not a rollout window —
+-- and the cutover is what makes them dangerous: afterwards account.password is
+-- what signs the account in, so the abandoned credential becomes the working
+-- password while the holder's real one is refused.
+--
+-- user.password_hash is authoritative here because this runs BEFORE the
+-- cutover, when it is the column every successful password change wrote last
+-- and nothing legitimate makes account.password newer: pre-V17 trex wrote the
+-- account row only as a mirror.
 UPDATE trexdb.account a
    SET password = u.password_hash, "updatedAt" = NOW()
   FROM trexdb."user" u
  WHERE a."userId" = u.id
    AND a."providerId" = 'credential'
-   AND a.password IS NULL
-   AND u.password_hash IS NOT NULL;
+   AND u.password_hash IS NOT NULL
+   AND a.password IS DISTINCT FROM u.password_hash;
 
 -- Better Auth's admin plugin writes session.impersonatedBy; V1 predates it.
 ALTER TABLE trexdb.session
@@ -189,8 +204,9 @@ $$;
 -- so a migration and its record are not atomic with each other: a crash between
 -- them re-runs the file. Everything here is written to survive that.
 --
--- TWIN OF isEngineAddressable IN core/server/auth/auth-router.ts, which is
--- itself a copy of zod's z.email(). All three must move together; a parity test
+-- TWIN OF isEngineAddressable IN core/server/auth/engine-address.ts, which is
+-- itself a copy of zod's z.email(). (auth-router.ts re-exports the name, so a
+-- search that lands there is one hop from the definition.) All three must move together; a parity test
 -- (auth/auth-engine-cutover.test.ts) asks this expression, that predicate and
 -- the live engine the same addresses and fails if any of them disagrees. The
 -- expression is restated here rather than shared because a migration is text
@@ -238,6 +254,38 @@ $$;
 -- spelling the account holder typed and is pinned to that by the wire contract.
 -- Removing either leaves a way for a row to be unreachable by the engine.
 UPDATE trexdb."user" SET email = lower(email) WHERE email <> lower(email);
+
+-- Every row on the placeholder domain is marked as one, not only the rows this
+-- migration synthesised.
+--
+-- The backfill above flags what it mints (WHERE u.email IS NULL). That covers
+-- an installation whose address-less users are still address-less when V17
+-- runs. It does NOT cover the one this migration will actually meet: an
+-- installation that has ALREADY run d2e's IdP migration, whose users therefore
+-- arrive here holding <username>@d2e.local as an ordinary address. Those rows
+-- pass through V17 untouched — placeholder false, verified true — and are then
+-- link candidates for any upstream that asserts one, which is the whole reason
+-- the flag exists.
+--
+-- Beside the addressability sweep below rather than inside the backfill,
+-- because it is the same kind of statement: a rule about the address, asked of
+-- the entire population, whoever wrote it. auth/engine-address.ts's
+-- isPlaceholderAddress is this expression's twin and the five routes that write
+-- an address all ask it; this is the seventh door, and the migration is the one
+-- place that can close it for rows that predate them all.
+--
+-- After the fold above on purpose, so `email` is already lower-cased; the
+-- lower() here is belt-and-braces and makes the statement true read on its own.
+-- The domain is taken after the LAST '@', matching emailDomain's rule, so a
+-- quoted local part cannot smuggle one in.
+UPDATE trexdb."user"
+   SET is_placeholder_email = true,
+       "emailVerified" = false,
+       email_confirmed_at = NULL
+ WHERE lower(substring(email from '[^@]*$')) = 'd2e.local'
+   AND (is_placeholder_email IS NOT TRUE
+        OR "emailVerified" IS TRUE
+        OR email_confirmed_at IS NOT NULL);
 
 -- Better Auth declares email, emailVerified, createdAt and updatedAt required.
 -- A nullable column with a default still lets an old row hold NULL, which the
