@@ -1,6 +1,7 @@
 import { assertEquals } from "jsr:@std/assert";
 import { type LinkRequest, parseLinkRequest, parseProviderUpsert } from "./admin-policy.ts";
 import { linkIdentity, setProviderEnabled, upsertProvider } from "./admin-store.ts";
+import { PLACEHOLDER_EMAIL_DOMAIN } from "./providers.ts";
 
 const validProvider = {
   displayName: "Logto", clientId: "cid", clientSecret: "sec",
@@ -596,4 +597,64 @@ dbTest("a pre-linked user with a 12-character id signs in end to end", async (db
 
   const { pool } = await runtimeImport("../../db.ts");
   await pool.end();
+});
+
+// ── Placeholder-domain addresses on the migration's own path ────────────────
+//
+// The rehearsal's finding: this route cannot reach provisionUser's synthesis
+// branch (parseLinkRequest requires an '@'), so a migration with no address to
+// give sends `<username>@<its configured domain>` — byte-identical to
+// PLACEHOLDER_EMAIL_DOMAIN at d2e's default. 66 of 69 users landed that way,
+// unflagged and "verified".
+
+dbTest("a link carrying a placeholder-domain address creates a flagged, unverified row", async (db, ctx) => {
+  const email = `${ctx.id(7)}@${PLACEHOLDER_EMAIL_DOMAIN}`;
+  const r = req(ctx, 7, { email });
+
+  assertEquals(await linkIdentity(db, r), { userId: ctx.id(7), outcome: "created" });
+  const { rows } = await db.query(
+    `SELECT "emailVerified", is_placeholder_email, email_confirmed_at
+       FROM trexdb."user" WHERE id = $1`,
+    [ctx.id(7)],
+  );
+  assertEquals(rows, [{
+    emailVerified: false,
+    is_placeholder_email: true,
+    email_confirmed_at: null,
+  }]);
+
+  // AND THE MIGRATION STILL WORKS. A re-run resolves by (providerId,
+  // accountId), which is consulted before any address lookup, so flagging the
+  // row it created cannot make its own second pass fail.
+  assertEquals(await linkIdentity(db, r), { userId: ctx.id(7), outcome: "already_linked" });
+});
+
+// The other half of "it must not break the migration": the address lookup.
+// findLinkCandidateByEmail (the SIGN-IN path) excludes flagged rows — that is
+// the protection this fix restores — but linkIdentity has its own unfiltered
+// lookup, so an administrator pre-linking an already-flagged row still matches.
+dbTest("the admin link path still matches a flagged placeholder row by address", async (db, ctx) => {
+  const email = `${ctx.id(8)}@${PLACEHOLDER_EMAIL_DOMAIN}`;
+  await db.query(
+    `INSERT INTO trexdb."user" (id, name, email, "emailVerified", is_placeholder_email)
+     VALUES ($1, $1, $2, false, true)`,
+    [ctx.id(8), email],
+  );
+
+  assertEquals(
+    await linkIdentity(db, req(ctx, 8, { email, userId: null })),
+    { userId: ctx.id(8), outcome: "linked" },
+  );
+});
+
+// Narrowness: an ordinary address is untouched. Without this the two above are
+// satisfied by flagging everything, which would mark every migrated user
+// unverified and unlinkable-by-address on the sign-in path.
+dbTest("an ordinary address still creates an unflagged, verified row", async (db, ctx) => {
+  assertEquals(await linkIdentity(db, req(ctx, 9)), { userId: ctx.id(9), outcome: "created" });
+  const { rows } = await db.query(
+    `SELECT "emailVerified", is_placeholder_email FROM trexdb."user" WHERE id = $1`,
+    [ctx.id(9)],
+  );
+  assertEquals(rows, [{ emailVerified: true, is_placeholder_email: false }]);
 });

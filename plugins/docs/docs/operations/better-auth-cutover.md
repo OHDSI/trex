@@ -134,6 +134,13 @@ federation link answers `unaddressable_email`.) Set it to a dotted domain
 (`d2e.local`, `example.com`, your real mail domain) and the same requests
 succeed.
 
+**`d2e.local` itself is a safe value, and you do not need to avoid it.** It is
+the placeholder domain, and any user row created with an address in it is
+flagged `is_placeholder_email` and left unverified — whoever supplied the
+address — so a migration that fills a missing address with
+`<username>@d2e.local` produces exactly the marked rows it should. Only the
+dotted-domain requirement is load-bearing here.
+
 ## The rolling-deploy constraint
 
 `/change-password` and sign-in trust different columns, and during a rolling

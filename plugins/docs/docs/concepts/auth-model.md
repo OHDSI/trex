@@ -192,10 +192,28 @@ asserted it and nothing resolves it. Two rules follow:
   `<someone else's subject>@d2e.local` as a verified address would otherwise be
   handed that person's account.
 
-Rows that existed before the cutover were backfilled by `V17`; rows that arrive
-afterwards are minted by the federation provisioning path, under the same
-domain and the same slug rule, so a row from either is indistinguishable from a
-row from the other. `PUT /user` clears the flag when a real address is set.
+**Two ways a row becomes a placeholder, and they must look identical.**
+
+1. **trex synthesised it**, because the identity asserted no address. `V17`
+   backfilled the rows that existed at the cutover; the federation provisioning
+   path mints the ones that arrive afterwards, under the same domain and the
+   same slug rule.
+2. **A caller supplied an address already in `d2e.local`.** A migration that has
+   no address to give for a user sends `<username>@<its configured domain>`
+   rather than nothing — the federation admin link requires an address — and at
+   the default domain that string is exactly a placeholder. Any row created on
+   that domain is therefore flagged the same way, keyed on the domain alone and
+   not on who asked or what the local part looks like.
+
+The second case is not hypothetical: it is how 66 of 69 users looked in a
+migration rehearsal, and before the domain rule they were written
+`is_placeholder_email = false`, `emailVerified = true`, with
+`email_confirmed_at` set — which is the flag telling a mail path the exact
+opposite of the truth, and, because federated sign-in excludes only *flagged*
+rows, leaving every one of them claimable by another upstream asserting its
+address.
+
+`PUT /user` clears the flag when a real address is set.
 
 ## API Keys for MCP & CLI
 
