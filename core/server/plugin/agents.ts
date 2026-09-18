@@ -51,6 +51,8 @@ export function normalizeAgentsValue(value: unknown): AgentEntry[] {
 const PASSTHROUGH_ENV = [
   "DATABASE_URL", "TREX_AGENTS_DEFAULT_MODEL",
   "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL",
+  "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_API_ENDPOINT",
+  "AZURE_OPENAI_API_INSTANCE_NAME", "AZURE_OPENAI_API_VERSION",
   "GOOGLE_GENERATIVE_AI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "AWS_REGION",
   // OAuth broker (task-7): the worker needs the root key to unwrap the DEK
   // (token encryption-at-rest) and derive the signed-state HMAC secret. Absent
@@ -217,11 +219,12 @@ export async function buildAgentWorkerConfig(
     "ai": "npm:ai@^6",
     // These MUST stay on the same @ai-sdk/provider major as ai@^6 (which pins
     // @ai-sdk/provider@3, model spec v2). @ai-sdk/openai@^4 / anthropic@^4 /
-    // google@^4 pull @ai-sdk/provider@4 (spec v4); streamText (ai@6) then
-    // rejects such a model with "Unsupported model version v4" and the turn
+    // azure@^4 / google@^4 pull @ai-sdk/provider@4 (spec v4); streamText
+    // (ai@6) then rejects such a model with "Unsupported model version v4" and the turn
     // dies silently. Keep them at ^3 to match core/server/deno.json. Bedrock's
     // ^4.0.115 line still targets @ai-sdk/provider@3, so it stays at ^4.
     "@ai-sdk/anthropic": "npm:@ai-sdk/anthropic@^3",
+    "@ai-sdk/azure": "npm:@ai-sdk/azure@^3",
     "@ai-sdk/openai": "npm:@ai-sdk/openai@^3",
     "@ai-sdk/google": "npm:@ai-sdk/google@^3",
     "@ai-sdk/amazon-bedrock": "npm:@ai-sdk/amazon-bedrock@^4.0.115",
