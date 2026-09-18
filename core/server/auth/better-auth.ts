@@ -4,9 +4,10 @@
 // of (see the spec's "The router is kept, not replaced").
 import { betterAuth } from "better-auth";
 import { APIError } from "better-auth/api";
-import { admin } from "better-auth/plugins";
+import { admin, jwt } from "better-auth/plugins";
 import { pool } from "../db.ts";
 import { BASE_PATH } from "../config.ts";
+import { issuerUrl } from "./oidc/config.ts";
 import { deriveSubkeyBase64, LABELS } from "./keys.ts";
 import { hashPassword, verifyPassword } from "./password.ts";
 import { nativePasswordLoginEnabled } from "./federation/config.ts";
@@ -47,6 +48,51 @@ const trustedOrigins = (Deno.env.get("BETTER_AUTH_TRUSTED_ORIGINS") || "")
 // Better Auth wants a string; the root key is 32 raw bytes and is never handed
 // to a third party directly.
 const secret = await deriveSubkeyBase64(LABELS.betterAuthEngine);
+
+/**
+ * The `iss` every token carries. The same expression d2e-compat/idp.ts:65 uses
+ * to tell relying parties where to look, so the two cannot drift.
+ */
+function oidcIssuer(): string {
+  const issuer = issuerUrl(Deno.env.get("TREX_OIDC_ISSUER"), `${BASE_PATH}/oidc`);
+  assertIssuerScheme(issuer);
+  return issuer;
+}
+
+/**
+ * The OAuth provider plugin does not refuse an `http:` issuer on a routable
+ * host: validateIssuerUrl rewrites the scheme to `https:` and strips query and
+ * hash (@better-auth/oauth-provider@1.7.5). Tokens would then be minted with an
+ * `iss` nobody configured, and the mismatch surfaces at the relying party as an
+ * invalid token rather than here as a misconfiguration. Fail boot instead.
+ *
+ * Deliberately no laxer than the plugin's own loopback test: anything this
+ * accepts, validateIssuerUrl leaves alone.
+ */
+function assertIssuerScheme(issuer: string): void {
+  let url: URL;
+  try {
+    url = new URL(issuer);
+  } catch {
+    throw new Error(`TREX_OIDC_ISSUER is not a URL: ${issuer}`);
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const loopback = host === "localhost" || host.endsWith(".localhost") ||
+    host === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+  if (url.protocol !== "https:" && !loopback) {
+    throw new Error(
+      `The OIDC issuer must be https: or a loopback host, not ${issuer}. ` +
+        "Better Auth silently rewrites the scheme to https:, so tokens would " +
+        "be issued with an `iss` no relying party expects.",
+    );
+  }
+  if (url.search || url.hash) {
+    throw new Error(
+      `The OIDC issuer must carry no query and no fragment, not ${issuer}. ` +
+        "Better Auth strips both, so the issued `iss` would not be this value.",
+    );
+  }
+}
 
 /**
  * A raw `Error` thrown out of either password hook is not caught by Better
@@ -122,7 +168,26 @@ export const auth = betterAuth({
       deletedAt: { type: "date", required: false, input: false },
     },
   },
-  plugins: [admin()],
+  plugins: [
+    admin(),
+    // RS256, not the plugin's EdDSA default: WebAPI is Spring Security and its
+    // default JWT decoder rejects anything else — the same failure already seen
+    // with Logto's ES384 tokens.
+    //
+    // jwksPath puts the key set exactly where trex serves it today, so
+    // d2e-compat/idp.ts and every cached discovery document keep resolving.
+    // disableSettingJwtHeader is what the jwt plugin's own types recommend when
+    // an OAuth provider plugin is installed: session payloads must not be
+    // signed into a response header.
+    jwt({
+      jwks: {
+        keyPairConfig: { alg: "RS256", modulusLength: 2048 },
+        jwksPath: "/.well-known/jwks.json",
+      },
+      jwt: { issuer: oidcIssuer() },
+      disableSettingJwtHeader: true,
+    }),
+  ],
 });
 
 // Better Auth resolves `hash` and `verify` independently — `options.password

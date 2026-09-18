@@ -28,7 +28,9 @@
     "better-auth": "npm:better-auth@1.7.5",
     "better-auth/api": "npm:better-auth@1.7.5/api",
     "better-auth/plugins": "npm:better-auth@1.7.5/plugins",
-    "better-auth/db/migration": "npm:better-auth@1.7.5/db/migration"
+    "better-auth/db/migration": "npm:better-auth@1.7.5/db/migration",
+    "better-auth/crypto": "npm:better-auth@1.7.5/crypto",
+    "@better-auth/oauth-provider": "npm:@better-auth/oauth-provider@1.7.5"
   },
   "tasks": {
     "test": "deno test --allow-all",
