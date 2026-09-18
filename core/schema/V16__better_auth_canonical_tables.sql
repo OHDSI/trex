@@ -46,9 +46,16 @@ DECLARE
   -- substitution would give every deployment a different checksum for V16, so
   -- the domain is fixed here rather than configured. It is never resolvable and
   -- never routed to; is_placeholder_email is what code must branch on.
+  --
+  -- This block backfills the users that existed when Better Auth took the
+  -- tables over; auth/federation/providers.ts mints the ones that arrive
+  -- afterwards, under the same domain and the same slug rule, so that a row
+  -- from either is indistinguishable from a row from the other. Changing
+  -- either side is changing both.
   placeholder_domain CONSTANT TEXT := 'd2e.local';
   candidate TEXT;
   local_part TEXT;
+  id_local_part TEXT;
   r RECORD;
 BEGIN
   FOR r IN
@@ -69,19 +76,30 @@ BEGIN
      WHERE u.email IS NULL
      ORDER BY u.id
   LOOP
+    -- The id is the only identifier guaranteed distinct, so it is the backbone
+    -- of the scheme rather than merely a fallback, and it is slugified like any
+    -- other: a user migrated off another identity provider deliberately keeps
+    -- its upstream subject as its id (auth/federation/providers.ts), so an id
+    -- outside [a-z0-9._-] is reachable and would otherwise yield a malformed
+    -- local part. Without a usable one there is nothing left to fall back to.
+    id_local_part := btrim(regexp_replace(lower(r.id), '[^a-z0-9._-]+', '-', 'g'), '-.');
+    IF id_local_part = '' THEN
+      RAISE EXCEPTION
+        'cannot synthesise a placeholder address for user %: its id yields no usable local part', r.id;
+    END IF;
+
     local_part := btrim(
       regexp_replace(lower(COALESCE(r.sign_in_id, r.id)), '[^a-z0-9._-]+', '-', 'g'),
       '-.'
     );
     IF local_part = '' THEN
-      local_part := lower(r.id);
+      local_part := id_local_part;
     END IF;
     candidate := local_part || '@' || placeholder_domain;
 
-    -- Two upstream subjects can slugify to the same local part. The user id is
-    -- the only identifier guaranteed distinct, so it is the fallback.
+    -- Two upstream subjects can slugify to the same local part.
     IF EXISTS (SELECT 1 FROM trexdb."user" WHERE lower(email) = candidate) THEN
-      candidate := lower(r.id) || '@' || placeholder_domain;
+      candidate := id_local_part || '@' || placeholder_domain;
     END IF;
 
     -- Reusing an address that is already taken would hand one person's row the
@@ -91,11 +109,16 @@ BEGIN
         'cannot synthesise a placeholder address for user %: % is already taken', r.id, candidate;
     END IF;
 
+    -- The cursor read this row as address-less, but the UPDATE takes a fresh
+    -- snapshot under READ COMMITTED: re-test the condition here so a concurrent
+    -- commit that gave the user a real address cannot be overwritten with a
+    -- synthetic one.
     UPDATE trexdb."user"
        SET email = candidate,
            is_placeholder_email = true,
            "emailVerified" = false
-     WHERE id = r.id;
+     WHERE id = r.id
+       AND email IS NULL;
   END LOOP;
 END
 $$;
