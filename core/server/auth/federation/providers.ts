@@ -319,10 +319,12 @@ async function synthesisePlaceholderEmail(
  * collide, it can be mailed, and an administrator cannot tell it from one the
  * person gave.
  *
- * All three are met. The address is minted from the upstream subject under a
- * domain that resolves nowhere, and a collision is refused instead of attaching
- * one person's identity to another's row; `is_placeholder_email` marks the row
- * so an administrator and every mail path can tell.
+ * All three are met, though not by the domain being unreachable — it is d2e's
+ * own internal service domain and it resolves (see engine-address.ts). The
+ * address is minted from the upstream subject, a collision is refused instead
+ * of attaching one person's identity to another's row, and
+ * `is_placeholder_email` marks the row so an administrator and every mail path
+ * can tell. That flag is the whole of the protection.
  *
  * The third — that a synthesised address can be *matched* where an absent one
  * could not — is met on the link path rather than on the row, because that is
