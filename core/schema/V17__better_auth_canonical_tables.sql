@@ -31,6 +31,26 @@ UPDATE trexdb.account a
 ALTER TABLE trexdb.session
   ADD COLUMN IF NOT EXISTS "impersonatedBy" TEXT;
 
+-- Addresses move to the engine's storage convention: Better Auth looks a user
+-- up with `email = <the address it was given, lower-cased>` and lower-cases
+-- every address it writes itself, so a row still holding the spelling somebody
+-- typed is invisible to it. Its holder is not told that nothing can see them —
+-- they are told their password is wrong.
+--
+-- THIS IS ONLY SAFE BECAUSE V16 PRECEDES IT. V16's user_email_lower_key already
+-- admits at most one row per folded address, so folding cannot collide with a
+-- case variant that would have to be resolved by hand, and the identity that
+-- index defines does not change. Reordering or renumbering these two turns this
+-- statement into one that can abort the migration on a duplicate key.
+--
+-- auth-router.ts folds the same way on the sign-in path, and both are needed.
+-- This one settles the population that exists at the deploy, so nobody has to
+-- sign in to become visible and nothing reading user.email sees a mixture.
+-- That one settles the rows written afterwards, because PUT /user stores the
+-- spelling the account holder typed and is pinned to that by the wire contract.
+-- Removing either leaves a way for a row to be unreachable by the engine.
+UPDATE trexdb."user" SET email = lower(email) WHERE email <> lower(email);
+
 -- Better Auth requires an address on every user, so the rows V14 allowed to be
 -- NULL get a synthesised one. The flag is what keeps them out of mail paths:
 -- an address invented here was never asserted by anybody and must never be
