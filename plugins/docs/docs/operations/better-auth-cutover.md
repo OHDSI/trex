@@ -154,11 +154,25 @@ address-writing routes, not all six:
 somebody is registering for themselves — including the bootstrap administrator
 — and writing that row `emailVerified = false` would be the wrong outcome: the
 first admin would land unverified on their own installation. It is also the one
-route where leaving the flag off costs nothing: `user_email_lower_key` means an
-attacker cannot register an address a row already holds, and
+route where leaving the flag off costs nothing: `user_email_lower_key` means a
+registration cannot take an address a row already holds, and
 `synthesisePlaceholderEmail` falls back to `<id>@d2e.local` when a slug is
-taken, so a hostile upstream asserting a self-registered `@d2e.local` address
-can only ever link onto the attacker's own row.
+taken, so a self-registered `@d2e.local` address cannot be used to reach
+anybody else's row.
+
+**That exception depends on both of those facts, and dies with either.** If a
+mail path is ever added that reads `is_placeholder_email`, or the unique index
+on `lower(email)` is relaxed, the reasoning above stops holding and `/signup`
+has to be brought in line with the other five.
+
+**It does not claim that squatting is harmless.** Registering an address before
+its owner arrives puts that person's federated identity inside the squatter's
+account, which is a real harm rather than the absence of one. But that is
+`decideLink`'s posture on *every* domain — an upstream asserting any verified
+address links to the row holding it, and the provider's
+`emailDomainAllowlist` is the intended control — so `d2e.local` is neither more
+nor less exposed than `example.com`. The flag is about what a row *means*; the
+squat is a separate question with a separate answer.
 
 **So: if you bootstrap with `IDP__INITIAL_USER__DOMAIN=d2e.local`, the initial
 administrator is created verified and unflagged.** That is intended. Everything

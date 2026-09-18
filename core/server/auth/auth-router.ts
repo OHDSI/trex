@@ -930,8 +930,22 @@ router.put("/user", apiLimiter, async (req, res) => {
       // unflagged, verified, and a link candidate again. Self-only, so it is
       // nobody else's account at risk — but the invariant has to hold on every
       // write, not only on creation, or the next reader cannot rely on it.
+      const synthetic = isPlaceholderAddress(email);
       updates.push(`is_placeholder_email = $${paramIdx++}`);
-      values.push(isPlaceholderAddress(email));
+      values.push(synthetic);
+      if (synthetic) {
+        // The whole triple, as the other four routes write it. The flag alone
+        // would leave the row saying two things: "this address is synthesised"
+        // and, in the two columns beside it, "and somebody confirmed it" — the
+        // exact shape isPlaceholderAddress calls the opposite of what the flag
+        // exists to tell a mail path.
+        //
+        // Only on this branch. An address that is NOT on the placeholder domain
+        // leaves both columns exactly as it found them, which is what this route
+        // has always done and what the wire contract pins.
+        updates.push(`"emailVerified" = false`);
+        updates.push(`email_confirmed_at = NULL`);
+      }
     }
 
     let newHash: string | null = null;

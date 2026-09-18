@@ -81,8 +81,8 @@ export function emailDomain(email: string): string | null {
  * Identical to the `placeholder_domain` constant in
  * core/schema/V17__better_auth_canonical_tables.sql, and it has to stay that
  * way: V17 backfilled the users that existed when Better Auth took the tables
- * over, this module mints the ones that arrive afterwards, and a row from
- * either must be indistinguishable from a row from the other. It cannot be
+ * over, federation's provisionUser mints the ones that arrive afterwards, and a
+ * row from either must be indistinguishable from a row from the other. It cannot be
  * read from configuration on this side because it cannot be on that one —
  * trex's migration runner substitutes nothing into a V-file and checksums the
  * text it executes (plugins/migration/src/lib.rs).
@@ -136,9 +136,20 @@ export const PLACEHOLDER_EMAIL_DOMAIN = "d2e.local";
  * one. It is also the one route where the flag buys nothing: user_email_lower_key
  * stops a registration taking an address a row already holds, and
  * synthesisePlaceholderEmail falls back to <id>@d2e.local when a slug is taken,
- * so a hostile upstream asserting a self-registered @d2e.local address can only
- * ever link onto the registrant's own row. Anything that makes either of those
- * two things untrue makes this exception untrue with it.
+ * so a self-registered @d2e.local address cannot be used to reach anybody
+ * else's row. Anything that makes either of those two things untrue makes this
+ * exception untrue with it — a mail path that reads the column, or a relaxed
+ * unique index, and the reasoning above stops holding.
+ *
+ * WHAT IT DOES NOT CLAIM is that squatting is harmless. Registering an address
+ * before its owner arrives puts their federated identity inside the squatter's
+ * account, and "onto the attacker's own row" is precisely that harm, not its
+ * absence. But that is decideLink's general posture on every domain, not
+ * something about this one: an upstream asserting any verified address links to
+ * the row holding it, and emailDomainAllowlist is the intended control (see
+ * link.ts). d2e.local is neither more nor less exposed than example.com here,
+ * which is the point — the flag is about what a row MEANS, and the squat is a
+ * separate question with its own separate answer.
  */
 export function isPlaceholderAddress(email: string | null): boolean {
   return email !== null && emailDomain(email) === PLACEHOLDER_EMAIL_DOMAIN;

@@ -730,6 +730,8 @@ cutoverTest("POST /admin/users leaves an ordinary address genuine", async ({ url
 // nobody else's account was at risk — but an invariant that holds only at
 // creation is one the next reader cannot rely on.
 cutoverTest("PUT /user flags a self-set address on the placeholder domain", async ({ url, pool }) => {
+  // createLegacyUser writes emailVerified true with email_confirmed_at set, so
+  // the fixture starts in the shape this has to undo.
   const user = await createLegacyUser(pool);
   const email = uniquePlaceholderEmail("put-user");
 
@@ -737,7 +739,9 @@ cutoverTest("PUT /user flags a self-set address on the placeholder domain", asyn
   assertEquals(res.status, 200);
   await res.body?.cancel();
 
-  assertEquals((await marking(pool, email)).is_placeholder_email, true);
+  // All three, not the flag alone: a flagged row still claiming a confirmed
+  // address is the row shape the flag exists to contradict.
+  assertEquals(await marking(pool, email), FLAGGED);
 });
 
 // And the case the unconditional clear was written for still works: a flagged
