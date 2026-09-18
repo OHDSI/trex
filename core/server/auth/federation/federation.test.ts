@@ -1499,6 +1499,49 @@ Deno.test("an identity that asserts an address is provisioned with it, verified 
   assertEquals(c.inserts, [["u-1", "jo@example.test", "jo@example.test", true, false]]);
 });
 
+// An address IN the placeholder domain, supplied rather than synthesised. The
+// federation admin link cannot reach the synthesis branch at all —
+// parseLinkRequest requires an '@' — so a migration with no address to give
+// sends `<username>@<its configured domain>`, which at d2e's default is this
+// exact string. 66 of 69 rehearsed users landed here, unflagged, verified and
+// confirmed: candidates for findLinkCandidateByEmail again, and a lie to any
+// mail path that reads the flag.
+Deno.test("an asserted address in the placeholder domain is flagged like a synthesised one", async () => {
+  const c = provisionClient();
+  await provisionUser(
+    c,
+    { sub: "s-1", email: `alice@${PLACEHOLDER_EMAIL_DOMAIN}`, emailVerified: true },
+    { id: "u-1" },
+  );
+  // emailVerified false and the flag true — identical to the synthesis branch,
+  // which is the point: a row from either must be indistinguishable. The name
+  // is the existing fallback chain (name ?? email ?? sub) and is deliberately
+  // not part of this change: it is what an administrator's list shows, and the
+  // address is the only identifier this caller supplied.
+  assertEquals(c.inserts, [[
+    "u-1",
+    `alice@${PLACEHOLDER_EMAIL_DOMAIN}`,
+    `alice@${PLACEHOLDER_EMAIL_DOMAIN}`,
+    false,
+    true,
+  ]]);
+});
+
+// Keyed on the domain, so case and subdomain are decided by emailDomain's rule
+// rather than by a substring test that `evil-d2e.local` would slip past.
+Deno.test("the placeholder domain is matched case-insensitively and exactly", async () => {
+  const upper = provisionClient();
+  await provisionUser(upper, { sub: "s-1", email: "alice@D2E.Local", emailVerified: true }, { id: "u-1" });
+  assertEquals(upper.inserts[0][4], true);
+
+  for (const notIt of ["alice@evil-d2e.local", "alice@d2e.local.evil.test", "alice@sub.d2e.local"]) {
+    const c = provisionClient();
+    await provisionUser(c, { sub: "s-1", email: notIt, emailVerified: true }, { id: "u-1" });
+    assertEquals(c.inserts[0][4], false, notIt);
+    assertEquals(c.inserts[0][3], true, notIt);
+  }
+});
+
 // Gated on DATABASE_URL like admin.test.ts's [db] block: the stubs above pin
 // which address is computed, but only a real database proves the row V17's
 // NOT NULL constraints will actually accept — which is the difference between
@@ -1548,6 +1591,11 @@ Deno.test({
     await db.connect();
     const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
     const placeholder = `sub-${run}@${PLACEHOLDER_EMAIL_DOMAIN}`;
+    // The shape the rehearsal found: an address in the placeholder domain that
+    // a caller SUPPLIED rather than one this module synthesised. 66 of 69
+    // migrated users look like this, and until provisionUser flagged them by
+    // domain they were candidates here — which is the takeover, end to end.
+    const supplied = `mig-${run}@${PLACEHOLDER_EMAIL_DOMAIN}`;
     const real = `jo-${run}@example.test`;
     try {
       await provisionUser(db, anonymous(`Sub ${run}`), { id: `p${run}a` });
@@ -1556,8 +1604,16 @@ Deno.test({
         { sub: `s-${run}`, email: real, emailVerified: true },
         { id: `p${run}b` },
       );
+      await provisionUser(
+        db,
+        { sub: `s2-${run}`, email: supplied, emailVerified: true },
+        { id: `p${run}c` },
+      );
 
       assertEquals(await findLinkCandidateByEmail(db, placeholder), null);
+      // Synthesised and supplied must be indistinguishable here, or the
+      // exclusion protects only the rows that never needed a migration.
+      assertEquals(await findLinkCandidateByEmail(db, supplied), null);
       // Case is no way around it either: the predicate is on the row, not on
       // the spelling of the address.
       assertEquals(await findLinkCandidateByEmail(db, placeholder.toUpperCase()), null);

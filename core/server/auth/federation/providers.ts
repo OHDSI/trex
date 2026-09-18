@@ -1,6 +1,6 @@
 // The only module in federation/ that talks to the database.
 import { decryptWithDek, encryptWithDek } from "../dek.ts";
-import { decideLink, type ExistingUser, type LinkDecision } from "./link.ts";
+import { decideLink, emailDomain, type ExistingUser, type LinkDecision } from "./link.ts";
 import type { ProviderConfig, UpstreamIdentity } from "./types.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -229,11 +229,44 @@ export async function resolveFederatedUser(
  * trex's migration runner substitutes nothing into a V-file and checksums the
  * text it executes (plugins/migration/src/lib.rs).
  *
- * Never resolvable and never routed to. `is_placeholder_email` is the flag
- * code should branch on — nothing does yet — and the domain is only what makes
- * the address inert if something tries anyway.
+ * Never resolvable and never routed to. `is_placeholder_email` is the flag code
+ * branches on — findLinkCandidateByEmail above already does, and any mail path
+ * added later must — and the domain is only what makes the address inert if
+ * something tries anyway. isPlaceholderAddress below is how a row supplied with
+ * an address in this domain gets the same flag as one synthesised into it.
  */
 export const PLACEHOLDER_EMAIL_DOMAIN = "d2e.local";
+
+/**
+ * Whether an address is synthetic BY CONSTRUCTION, whoever supplied it.
+ *
+ * The domain is trex's own and resolves nowhere, so nothing legitimately
+ * receives mail there and no upstream can speak for it. An address in it is
+ * therefore a placeholder regardless of which path produced it — which is the
+ * gap this closes. provisionUser used to flag only the addresses it synthesised
+ * itself, i.e. only the identities that asserted none; but the federation admin
+ * link cannot reach that branch at all, because parseLinkRequest requires an
+ * address containing '@'. A migration with no address to give sends
+ * `<username>@<its configured domain>`, and at d2e's default that string is
+ * byte-identical to this constant — so 66 of 69 migrated users landed on this
+ * domain with is_placeholder_email false, emailVerified true and
+ * email_confirmed_at set.
+ *
+ * That is not cosmetic. findLinkCandidateByEmail excludes flagged rows
+ * precisely so an upstream asserting `<somebody's subject>@d2e.local` cannot
+ * claim the row that holds it; unflagged, all 66 were candidates again, and a
+ * second enabled upstream asserting one of those addresses as verified linked
+ * straight onto the migrated account. Unconditionally — second upstream or not
+ * — those rows also claimed a confirmed, verified address nobody can receive
+ * mail at, which is the opposite of what the flag exists to tell a mail path.
+ *
+ * Keyed on the domain and nothing else: not on the caller, not on the shape of
+ * the local part. A rule about who is asking would have missed this caller, and
+ * the next one too.
+ */
+export function isPlaceholderAddress(email: string | null): boolean {
+  return email !== null && emailDomain(email) === PLACEHOLDER_EMAIL_DOMAIN;
+}
 
 /**
  * The local part of a placeholder address, from the identifier the user signs
@@ -360,6 +393,12 @@ async function synthesisePlaceholderEmail(
  * this function. Left that way on purpose: that caller is an authenticated
  * administrator asserting a link, not an upstream claiming one, and a migration
  * pre-linking the rows V17 backfilled is exactly what it is for.
+ *
+ * That separation is also what lets provisionUser flag a supplied placeholder
+ * address without breaking the migration that supplies it. linkIdentity
+ * resolves by (providerId, accountId) first and by its own unfiltered address
+ * lookup second, so a re-run finds the rows it created however they are
+ * flagged; only the sign-in path here excludes them, which is the whole point.
  */
 export async function provisionUser(
   client: PgClient,
@@ -372,6 +411,13 @@ export async function provisionUser(
   const placeholder = identity.email === null
     ? await synthesisePlaceholderEmail(client, identity.sub, id)
     : null;
+  const address = placeholder ?? identity.email;
+  // Two ways to be a placeholder, and the row must not be able to tell them
+  // apart: one this function synthesised because the identity asserted no
+  // address, and one the caller supplied that is in the placeholder domain
+  // anyway. The second is how a migration with nothing to give writes 66 rows
+  // (see isPlaceholderAddress), and before this it wrote them as genuine.
+  const synthetic = placeholder !== null || isPlaceholderAddress(address);
   await client.query(
     // A placeholder was asserted by nobody, so it is never confirmed. That is a
     // true statement about the row and not a protection: see the note above for
@@ -385,9 +431,9 @@ export async function provisionUser(
     [
       id,
       identity.name ?? identity.email ?? identity.sub,
-      placeholder ?? identity.email,
-      placeholder === null,
-      placeholder !== null,
+      address,
+      !synthetic,
+      synthetic,
     ],
   );
   return id;
