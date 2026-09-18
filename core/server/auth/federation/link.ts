@@ -19,7 +19,14 @@
 //   * `allowElevatedAutoLink` — even inside an allowed domain, silently handing
 //     a federated identity an existing *administrator's* account is a decision
 //     a deployment should make on purpose, not a default.
+//
+// And one guard that applies only to provisioning: the address has to be one
+// the authentication engine can serve. applyClaimMap takes the upstream `email`
+// claim verbatim — it has to, since it is an identifier and not trex's to
+// rewrite — so an IdP asserting `alice@localhost` with auto_provision on would
+// otherwise create exactly the row V17 refuses to migrate, after V17 has run.
 import type { ProviderConfig, UpstreamIdentity } from "./types.ts";
+import { isEngineAddressable } from "../engine-address.ts";
 
 /** The trex user an upstream address resolved to, as far as linking cares. */
 export interface ExistingUser {
@@ -32,9 +39,10 @@ export type LinkDecision =
   | { action: "link"; userId: string }
   | { action: "provision" }
   // Fixed codes, never upstream text: they are returned to a browser.
-  // "upstream_email_unverified" | "email_domain_not_allowed" |
-  // "elevated_account_link_refused" | "no_account" from here, and
-  // "account_disabled" from resolveFederatedUser's existing-link path.
+  // "upstream_email_unverified" | "upstream_email_unusable" |
+  // "email_domain_not_allowed" | "elevated_account_link_refused" |
+  // "no_account" from here, and "account_disabled" from
+  // resolveFederatedUser's existing-link path.
   | { action: "refuse"; reason: string };
 
 /**
@@ -124,6 +132,26 @@ export function decideLink(
     return { action: "link", userId: existing.id };
   }
   if (provider.autoProvision) {
+    // THE FIFTH DOOR ONTO trexdb."user", and the only one reached without an
+    // administrator: an upstream asserts the address and this branch writes it.
+    //
+    // Refused rather than repaired, for the reason V17 refuses rather than
+    // repairs: an address is an identity and trex cannot pick a different one.
+    // Refusing costs this person one sign-in and an error code an operator can
+    // act on; provisioning costs them an account that exists, looks migrated,
+    // and cannot authenticate — Better Auth validates the address before it
+    // looks anybody up, so they would be told only that their credentials are
+    // invalid.
+    //
+    // Only the provision branch asks it. An identity already linked never
+    // reaches this module at all, and the `existing` branch above writes no
+    // address — it matched one already stored, which every other door has
+    // already vetted. The address-less branch above is exempt for a different
+    // reason: it provisions a synthesised placeholder, and the slug rule is
+    // pinned addressable by placeholder-slug-parity.test.ts.
+    if (!isEngineAddressable(identity.email)) {
+      return { action: "refuse", reason: "upstream_email_unusable" };
+    }
     // Provisioning creates a role-'user' row (see provisionUser), so it cannot
     // produce an elevated account and needs no guard of its own.
     return { action: "provision" };

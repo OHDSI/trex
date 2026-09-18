@@ -59,14 +59,15 @@ export type LinkResult =
  *
  * The address the caller supplies is checked against isEngineAddressable
  * wherever it would be resolved or written, and nowhere else. This is the
- * fourth door onto trexdb."user" and the last one that was still open: V17
- * refuses to migrate an installation the engine cannot serve, /signup and
- * /admin/create-user refuse to create such a user and PUT /user refuses to set
- * one — but a migration drives this route, in bulk, AFTER V17 has run, so an
- * address the engine cannot resolve would walk straight past all three and
- * create an account nobody can ever sign in to. A refusal per identity is what
- * a migration wants: it records the skip with a reason and keeps going, which
- * is strictly better than a user row that looks migrated and is not.
+ * fourth of the five doors onto trexdb."user": V17 refuses to migrate an
+ * installation the engine cannot serve, /signup and /admin/create-user refuse
+ * to create such a user, PUT /user refuses to set one, and decideLink refuses
+ * to auto-provision one from an upstream claim — but a migration drives THIS
+ * route, in bulk, AFTER V17 has run, so an address the engine cannot resolve
+ * would walk straight past the first three and create an account nobody can
+ * ever sign in to. A refusal per identity is what a migration wants: it records
+ * the skip with a reason and keeps going, which is strictly better than a user
+ * row that looks migrated and is not.
  *
  * Deliberately not checked for an identity that is already linked, nor for one
  * bound by `r.userId` to a user that exists: neither reads the address at all,
