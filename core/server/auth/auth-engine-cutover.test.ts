@@ -344,6 +344,94 @@ cutoverTest("a PUT /user that fails leaves the old password working", async ({ u
   assertEquals(await credential(pool, user.id), await storedHash(pool, user.id));
 });
 
+// ── The pooled connection a password write borrows ──────────────────────────
+
+/**
+ * Clients borrowed from the pool and not yet given back — pg exposes the two
+ * counters this is the difference of.
+ */
+function borrowed(pool: PgPool): number {
+  return pool.totalCount - pool.idleCount;
+}
+
+/** Settles within a second, or says what it saw. A leaked client never does. */
+async function assertPoolSettles(pool: PgPool, label: string) {
+  for (let i = 0; i < 50 && borrowed(pool) > 0; i++) {
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assertEquals(
+    borrowed(pool),
+    0,
+    `${label}: ${borrowed(pool)} pooled client(s) never came back ` +
+      `(total=${pool.totalCount} idle=${pool.idleCount} waiting=${pool.waitingCount})`,
+  );
+}
+
+cutoverTest("a password write gives its pooled connection back", async ({ url, pool }) => {
+  const user = await createLegacyUser(pool);
+  await assertPoolSettles(pool, "before the write");
+
+  // A password write is the one thing in this router that borrows a client
+  // instead of going through pool.query, because it needs a transaction. A
+  // borrow that is never returned is invisible to any single test — ../db.ts
+  // takes pg's default of ten clients and nothing else here comes close — and
+  // then the eleventh password change blocks forever, with
+  // connectionTimeoutMillis at its default of 0 meaning every later query in
+  // the process waits behind it. Counted rather than provoked: a suite that
+  // hangs tells CI far less than one that fails.
+  const first = await request(
+    "PUT",
+    `${url}/user`,
+    { password: "a-brand-new-password" },
+    await bearer(user),
+  );
+  assertEquals(first.status, 200);
+  await first.text();
+  await assertPoolSettles(pool, "after one successful write");
+
+  // More successful writes than the pool holds. With the connection returned
+  // this is unremarkable; without it the assertion above has already failed, so
+  // this can never be the thing that hangs. It is here because "released on
+  // some paths" is a real shape of this bug that one write would not see.
+  const writes = 12;
+  for (let i = 0; i < writes; i++) {
+    const res = await request(
+      "PUT",
+      `${url}/user`,
+      { password: `rotation-number-${i}-is-long-enough` },
+      await bearer(user),
+    );
+    assertEquals(res.status, 200, `write ${i}`);
+    await res.text();
+  }
+  await assertPoolSettles(pool, `after ${writes} successful writes`);
+
+  // And the account still works, so the connections came back after the
+  // transaction committed rather than instead of it.
+  const signedIn = await grant(url, user.email, `rotation-number-${writes - 1}-is-long-enough`);
+  assertEquals(signedIn.status, 200);
+  await signedIn.text();
+});
+
+cutoverTest("a rolled-back password write gives its connection back too", async ({ url, pool }) => {
+  const taken = await createLegacyUser(pool);
+  const user = await createLegacyUser(pool);
+  await assertPoolSettles(pool, "before the write");
+
+  // The failure path borrows the same client. Driven through the
+  // contract-pinned duplicate-address 500, which is the failure this
+  // transaction exists to survive.
+  const res = await request(
+    "PUT",
+    `${url}/user`,
+    { email: taken.email, password: "a-brand-new-password" },
+    await bearer(user),
+  );
+  assertEquals(res.status, 500);
+  await res.text();
+  await assertPoolSettles(pool, "after a rolled-back write");
+});
+
 // ── Verification failures are the caller's, or nobody's ─────────────────────
 
 cutoverTest("a password that is not a string is invalid_grant, not a 500", async ({ url, pool }) => {
