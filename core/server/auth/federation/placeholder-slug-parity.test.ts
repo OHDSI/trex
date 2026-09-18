@@ -21,7 +21,7 @@
 // code point, and documented on placeholderLocalPart() — asserting it would
 // pin a behaviour neither side intends.
 import { assert, assertEquals, assertMatch } from "jsr:@std/assert";
-import { placeholderLocalPart } from "./providers.ts";
+import { PLACEHOLDER_EMAIL_DOMAIN, placeholderLocalPart } from "./providers.ts";
 
 const V17_PATH = new URL(
   "../../../schema/V17__better_auth_canonical_tables.sql",
@@ -67,7 +67,14 @@ Deno.test("V17 slugifies the sign-in id and the user id by one rule", () => {
   // difference in the rule itself. Compared with the layout taken out: the two
   // assignments are formatted differently in the file and always were.
   assertEquals(signInSlug.replace(/\s/g, ""), idSlug.replace(/\s/g, ""));
-  assertMatch(idSlug, /^btrim\(regexp_replace\(lower\(\$1::text\)/);
+  // The inner substitution is the one that maps the disallowed characters; the
+  // outer one collapses the runs of `.` that the inner one leaves behind.
+  // Pinned as a shape so an edit that drops either pass is visible here even
+  // before the table below disagrees.
+  assertMatch(
+    idSlug.replace(/\s/g, ""),
+    /^btrim\(regexp_replace\(regexp_replace\(lower\(\$1::text\),'\[\^a-z0-9\._-\]\+','-','g'\),'\\\.\{2,\}','\.','g'\),'-\.'\)$/,
+  );
 });
 
 /**
@@ -91,6 +98,18 @@ const INPUTS = [
   "--dashed--",
   "-.mixed.-",
   "a...b",
+  // Dot runs, which are the shapes that used to mint an address with an empty
+  // atom — one the engine rejects and V17 then refuses to migrate past, over a
+  // row V17 itself had just written. Interior, adjacent to a dash, doubled up,
+  // and alone.
+  "foo..bar",
+  "a..b..c",
+  "..",
+  "...",
+  "a.-.b",
+  ".-.",
+  "x..",
+  "..x",
   // A run of allowed characters that a narrower character class would collapse
   // to one: the difference between keeping `-` in the class and dropping it is
   // invisible on every other input here.
@@ -117,16 +136,33 @@ Deno.test({
   ignore: !Deno.env.get("DATABASE_URL"),
   fn: async () => {
     const { Client } = await import("npm:pg");
+    // The predicate V17's own refusal uses, so the two claims below are about
+    // one rule: that the addresses this mints are addresses the engine accepts,
+    // and therefore that the migration can never abort over a row it wrote.
+    const { isEngineAddressable } = await import("../auth-router.ts");
     const db = new Client({ connectionString: Deno.env.get("DATABASE_URL") });
     await db.connect();
     try {
       for (const input of INPUTS) {
         const { rows } = await db.query(`SELECT ${idSlug} AS slug`, [input]);
+        const slug = rows[0].slug;
         assertEquals(
-          rows[0].slug,
+          slug,
           placeholderLocalPart(input),
           `V17 and placeholderLocalPart disagree on ${JSON.stringify(input)}`,
         );
+
+        // An empty slug is the caller's problem and both sides refuse it out
+        // loud. Anything else becomes an address, and an address the engine
+        // will not accept is one V17 refuses to migrate past — over a row V17
+        // itself wrote one statement earlier.
+        if (slug !== "") {
+          assert(
+            isEngineAddressable(`${slug}@${PLACEHOLDER_EMAIL_DOMAIN}`),
+            `${JSON.stringify(input)} mints ${slug}@${PLACEHOLDER_EMAIL_DOMAIN}, ` +
+              `which the engine rejects and V17 would refuse to migrate`,
+          );
+        }
       }
     } finally {
       await db.end();

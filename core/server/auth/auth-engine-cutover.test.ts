@@ -368,10 +368,16 @@ cutoverTest("an engine failure is a 500, not a wrong password", async ({ url, po
   // scrypt or a connection failure — must not come back as invalid_grant. That
   // was the old swallow: a broken installation told every user their password
   // was wrong, and the logs said the same.
+  //
+  // OR REPLACE and IF EXISTS because a run killed between here and the drops
+  // below would otherwise leave the function behind, and every later run would
+  // fail on this CREATE rather than on the thing under test — a failure that
+  // looks like a flake and is not one.
   await pool.query(
-    `CREATE FUNCTION trexdb.cutover_break_session() RETURNS trigger LANGUAGE plpgsql AS
+    `CREATE OR REPLACE FUNCTION trexdb.cutover_break_session() RETURNS trigger LANGUAGE plpgsql AS
        $fn$ BEGIN RAISE EXCEPTION 'cutover: session store unavailable'; END $fn$`,
   );
+  await pool.query(`DROP TRIGGER IF EXISTS cutover_break_session ON trexdb.session`);
   await pool.query(
     `CREATE TRIGGER cutover_break_session BEFORE INSERT ON trexdb.session
        FOR EACH ROW EXECUTE FUNCTION trexdb.cutover_break_session()`,

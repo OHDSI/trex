@@ -239,7 +239,7 @@ export const PLACEHOLDER_EMAIL_DOMAIN = "d2e.local";
  * The local part of a placeholder address, from the identifier the user signs
  * in with.
  *
- * Mirrors the `regexp_replace`/`btrim` pair in V17's DO block, and is verified
+ * Mirrors the `regexp_replace`/`btrim` chain in V17's DO block, and is verified
  * identical to it for every ASCII shape. Not for every input: JS
  * `toLowerCase()` expands U+0130 (İ) to `i` + U+0307, so `İstanbul` slugifies
  * to `i-stanbul` here and to `istanbul` in Postgres, whose `lower()` is
@@ -254,11 +254,25 @@ export const PLACEHOLDER_EMAIL_DOMAIN = "d2e.local";
  *
  * Returns "" when nothing usable survives, which the caller must handle — an
  * empty local part would produce the address `@d2e.local`.
+ *
+ * Every non-empty result is an address the authentication engine will accept,
+ * and the three steps are what make that true rather than a coincidence: the
+ * surviving alphabet is `[a-z0-9._-]`, which the engine allows; runs of `.`
+ * collapse, so no atom is empty; and the trim takes `.` and `-` off both ends,
+ * so the local part neither begins nor ends with a separator. V17 refuses to
+ * migrate an installation holding an address the engine would reject, and the
+ * addresses this mints must never be among them —
+ * placeholder-slug-parity.test.ts asserts exactly that, for every input in its
+ * table, against the same predicate the migration uses.
  */
 export function placeholderLocalPart(signInId: string): string {
   return signInId
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, "-")
+    // `.` is inside the allowed set, so a run of them survives the line above:
+    // `foo..bar` would mint an address with an empty atom, which the engine
+    // rejects and V17 refuses to migrate past.
+    .replace(/\.{2,}/g, ".")
     .replace(/^[-.]+|[-.]+$/g, "");
 }
 

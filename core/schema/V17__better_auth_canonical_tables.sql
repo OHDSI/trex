@@ -82,14 +82,34 @@ BEGIN
     -- its upstream subject as its id (auth/federation/providers.ts), so an id
     -- outside [a-z0-9._-] is reachable and would otherwise yield a malformed
     -- local part. Without a usable one there is nothing left to fall back to.
-    id_local_part := btrim(regexp_replace(lower(r.id), '[^a-z0-9._-]+', '-', 'g'), '-.');
+    --
+    -- Three passes, and the middle one is why: `.` is inside the allowed set, so
+    -- a run of them survives the first pass, and `foo..bar` would mint
+    -- foo..bar@d2e.local — an address with an empty atom, which the check below
+    -- refuses. A migration that aborts on a row the statement above it created
+    -- is a trap, not a warning, and the operator's only remedy would be to
+    -- change a primary key. Runs of `.` collapse the way runs of everything
+    -- else already do; btrim then takes the ends, so what survives is a local
+    -- part of [a-z0-9._-] with no leading, trailing or empty atom — which is
+    -- exactly what makes it addressable. The refusal below is unchanged: what
+    -- changed is that this stopped producing input that trips it.
+    id_local_part := btrim(
+      regexp_replace(
+        regexp_replace(lower(r.id), '[^a-z0-9._-]+', '-', 'g'),
+        '\.{2,}', '.', 'g'
+      ),
+      '-.'
+    );
     IF id_local_part = '' THEN
       RAISE EXCEPTION
         'cannot synthesise a placeholder address for user %: its id yields no usable local part', r.id;
     END IF;
 
     local_part := btrim(
-      regexp_replace(lower(COALESCE(r.sign_in_id, r.id)), '[^a-z0-9._-]+', '-', 'g'),
+      regexp_replace(
+        regexp_replace(lower(COALESCE(r.sign_in_id, r.id)), '[^a-z0-9._-]+', '-', 'g'),
+        '\.{2,}', '.', 'g'
+      ),
       '-.'
     );
     IF local_part = '' THEN
