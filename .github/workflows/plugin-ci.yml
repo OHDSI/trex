@@ -318,6 +318,114 @@ jobs:
       - name: devx plugin tests
         run: deno test --no-check --allow-all --import-map plugins/devx/agent/local-test-import-map.json --node-modules-dir=auto plugins/devx/agent/ plugins/devx/functions/
 
+  # The /trex/auth/v1 wire contract, the Better Auth engine underneath it, the
+  # Better Auth schema-drift check and the federation link rules. Its own job
+  # rather than another suite on core-server-tests above, because the two want
+  # incompatible databases: this one needs the WHOLE control plane (core/schema
+  # V1..V16 — the trexdb tables, four cluster roles, the RLS policies, and the
+  # auth/storage compatibility schemas), while core-server-tests deliberately
+  # applies a fragment (a hand-made trexdb schema, a hand-made `authenticated`
+  # role, V6 and the agents migrations) into a pgvector image the gbrain suite
+  # pins to pg16. Pouring V1..V16 into that database would change the
+  # environment the memory and agents suites are asserted against for a reason
+  # that has nothing to do with them. The price is a second checkout and
+  # `npm ci`; the jobs then run in parallel and a red X names which suite broke.
+  core-server-auth-tests:
+    if: |
+      (github.ref_name == 'develop' || github.ref_name == 'main' || contains('release', github.ref_name) || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'pull_request' && !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        # Postgres 17, the version the auth suite is developed against.
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: trex_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d trex_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Connecting as `postgres` is load-bearing, not incidental: it owns every
+      # table the schema creates, and an owner is exempt from RLS unless the
+      # table FORCEs it. The suite writes trexdb.setting, "user", account,
+      # session and refresh_token directly, and V1 puts policies on the last
+      # four keyed on app.user_id / app.user_role, which no test sets — under
+      # any other role the fixtures would silently not be there.
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/trex_ci
+    steps:
+      - uses: actions/checkout@v4
+        id: checkout_auth_tests
+        continue-on-error: true
+        with:
+          ref: ${{ env.GIT_BRANCH_NAME }}
+          repository: ${{ env.GIT_REPO_FULL_NAME }}
+          submodules: false
+      - if: steps.checkout_auth_tests.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.GIT_BRANCH_NAME }}
+          repository: ${{ env.GIT_REPO_FULL_NAME }}
+          submodules: false
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - name: Install core/server node deps
+        # nodeModulesDir is "manual" (byonm), so npm:better-auth and npm:pg
+        # resolve out of core/server/node_modules. Same reasoning as the
+        # core-server-tests job above, including why this is not `deno install`.
+        run: cd core/server && npm ci
+      - name: Apply core/schema
+        # The whole schema, in version order via sort -V so V11 does not sort
+        # before V2. V10 is absent by design — the file was deleted and its
+        # number burnt, so the glob is the source of truth rather than a range.
+        run: |
+          for f in $(ls core/schema/V*.sql | sort -V); do
+            echo "--- $f"
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+      # --no-check for the reason documented on the core-server-tests legs: the
+      # deno workspace root is core/, and /// <reference types="..."> directives
+      # from npm packages resolve against core/node_modules, which `npm ci` in
+      # core/server cannot create.
+      - name: core/server auth tests (wire contract, Better Auth engine, federation)
+        env:
+          # deno colourises its summary line even when stdout is a pipe, and the
+          # escape codes land in front of the `ok |` the guard below anchors on.
+          NO_COLOR: "1"
+        run: |
+          set -o pipefail
+          cd core/server
+          log="${RUNNER_TEMP:-/tmp}/auth-test.log"
+          deno test --no-check --allow-all auth/ 2>&1 | tee "$log"
+          # Every database-backed suite here gates on DATABASE_URL and SKIPS
+          # without one, so a service that fails to come up, a schema step that
+          # half-applies or a renamed variable would turn this leg green while
+          # testing none of the contract it exists to protect. An ignored test
+          # is therefore a failure in this job, not a neutral outcome.
+          summary=$(grep -E '^(ok|FAILED) \| [0-9]+ passed' "$log" | tail -1)
+          if [ -z "$summary" ]; then
+            echo "::error::could not read a deno test summary line — the suite did not run to completion"
+            exit 1
+          fi
+          echo "summary: $summary"
+          case "$summary" in
+            *ignored*)
+              echo "::error::the auth suite skipped tests ($summary); DATABASE_URL is not reaching a usable database"
+              exit 1
+              ;;
+          esac
+
   build:
     needs: [pick_runner]
     # PR builds run only for same-repo PRs. Fork PRs are excluded — they'd otherwise check out
