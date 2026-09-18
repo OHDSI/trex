@@ -43,7 +43,7 @@ DECLARE
   -- trex's migration plugin (plugins/migration/src/lib.rs) hands each file's
   -- text to the session verbatim and checksums that same text into
   -- refinery_schema_history. It substitutes nothing, and a per-deployment
-  -- substitution would give every deployment a different checksum for V16, so
+  -- substitution would give every deployment a different checksum for V17, so
   -- the domain is fixed here rather than configured. It is never resolvable and
   -- never routed to; is_placeholder_email is what code must branch on.
   --
