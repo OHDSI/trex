@@ -380,9 +380,15 @@ async function authenticateUser(
  * A twin of zod's `z.email()` — the check Better Auth runs first on every
  * credential endpoint — copied from zod v4's regexes.ts rather than invented,
  * because an address trex accepts and the engine does not is a registration
- * that gets as far as writing rows and then fails. Kept honest by a parity test
- * that drives the real engine over the same table of addresses; if a zod
- * upgrade moves the rule, that test fails rather than this drifting quietly.
+ * that gets as far as writing rows and then fails.
+ *
+ * TWIN OF THE EXPRESSION IN core/schema/V17, which refuses to migrate an
+ * installation still holding an address the engine would reject — that refusal
+ * and this predicate have to be the same rule, or the migration passes an
+ * installation whose users then cannot sign in. All three (this, V17's, zod's)
+ * move together, and the parity test in auth-engine-cutover.test.ts asks all
+ * three the same addresses, so a zod upgrade that moves the rule fails a test
+ * rather than drifting quietly.
  *
  * The routes that need it are the ones that hand an address to the engine.
  * PUT /user does not: it is pinned by the wire contract, an address it writes

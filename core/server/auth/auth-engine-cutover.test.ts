@@ -399,13 +399,25 @@ const ADDRESSES: Array<[string, boolean]> = [
   ["plain@example.test", true],
   ["dotted.local.part@sub.example.test", true],
   ["plus+tag@example.test", true],
+  ["o'brien@example.test", true],
+  ["_under@example.test", true],
   ["synthesised-placeholder@d2e.local", true],
+  // V2 seeds this one. If a stock installation could not migrate, V17's refusal
+  // would be a trap rather than a warning.
+  ["admin@trex.local", true],
   ["not-an-address", false],
   ["no-domain@", false],
   ["@no-local.test", false],
   ["spaces in@example.test", false],
   ["trailing.dot.@example.test", false],
+  // What locked a real account out: V1 imposed no format, and the engine wants
+  // a dotted domain.
   ["no.tld@localhost", false],
+  // The one shape V17's own placeholder backfill can still mint: `.` survives
+  // slugification, so an upstream subject containing `..` yields a local part
+  // with an empty atom, which zod rejects. V17's check runs after the backfill
+  // precisely so it sees this.
+  ["foo..bar@d2e.local", false],
 ];
 
 cutoverTest("signup refuses an address the engine could never resolve", async ({ url, pool }) => {
@@ -442,30 +454,53 @@ cutoverTest("signup refuses an address the engine could never resolve", async ({
   }
 });
 
-cutoverTest("trex's address rule is the engine's, over the same table", async ({ pool }) => {
+/**
+ * V17's refusal, lifted out of the migration text so the parity test can ask it
+ * the same questions the router and the engine are asked. Read from the file
+ * rather than restated here, because a third hand-written copy would be a third
+ * thing to drift.
+ */
+async function v17AddressExpression(): Promise<string> {
+  const sql = await Deno.readTextFile(
+    new URL("../../schema/V17__better_auth_canonical_tables.sql", import.meta.url),
+  );
+  const match = sql.match(/AND email !~ '(.+)';/);
+  if (!match) throw new Error("V17 no longer carries an `AND email !~ '…';` line");
+  return match[1];
+}
+
+cutoverTest("trex's address rule is the engine's and V17's, over one table", async ({ pool }) => {
   // isEngineAddressable is a copy of zod's z.email(), which is what Better Auth
-  // checks first on every credential endpoint. A copy can drift with a zod
-  // upgrade, and the way it would drift is silent: an address trex accepts and
-  // the engine does not is a registration that writes rows and then fails. So
-  // the copy is asked the question and the engine is asked the same question,
-  // and they have to agree.
+  // checks first on every credential endpoint, and V17 restates it again in SQL
+  // to refuse an installation the engine could not serve. Three copies of one
+  // rule, each of which would drift silently: a router that accepts what the
+  // engine rejects writes rows and then fails, and a migration that accepts
+  // what the engine rejects waves through the lockout it exists to prevent. So
+  // all three are asked the same addresses and have to agree on every one.
   const { isEngineAddressable } = await import("./auth-router.ts");
   const { auth } = await import("./better-auth.ts");
+  const expression = await v17AddressExpression();
 
   for (const [address, valid] of ADDRESSES) {
-    assertEquals(isEngineAddressable(address), valid, `trex: ${address}`);
+    assertEquals(isEngineAddressable(address), valid, `router: ${address}`);
 
     // Nobody holds any of these, so a well-formed one reaches the engine's
-    // "no such user" and a malformed one is refused before that. Either way
-    // it throws, and the code says which question it answered.
+    // "no such user" and a malformed one is refused before that. Either way it
+    // throws, and the code says which question it answered.
     const refusal = await auth.api.signInEmail({
       body: { email: address, password: "long-enough-password" },
     }).then(() => null, (err: { body?: { code?: string } }) => err.body?.code);
     assertEquals(refusal !== "INVALID_EMAIL", valid, `engine: ${address}`);
+
+    // `!~` is what V17 writes, so a true here means "V17 would name this row".
+    const { rows } = await pool.query(`SELECT ($1::text !~ $2::text) AS refused`, [
+      address,
+      expression,
+    ]);
+    assertEquals(rows[0].refused, !valid, `V17: ${address}`);
   }
   // Guard against the loop silently doing nothing.
-  assertEquals(ADDRESSES.length, 10);
-  void pool;
+  assertEquals(ADDRESSES.length, 14);
 });
 
 Deno.test("a password that is not a string is a credential failure, not a throw", async () => {

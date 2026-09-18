@@ -31,26 +31,6 @@ UPDATE trexdb.account a
 ALTER TABLE trexdb.session
   ADD COLUMN IF NOT EXISTS "impersonatedBy" TEXT;
 
--- Addresses move to the engine's storage convention: Better Auth looks a user
--- up with `email = <the address it was given, lower-cased>` and lower-cases
--- every address it writes itself, so a row still holding the spelling somebody
--- typed is invisible to it. Its holder is not told that nothing can see them —
--- they are told their password is wrong.
---
--- THIS IS ONLY SAFE BECAUSE V16 PRECEDES IT. V16's user_email_lower_key already
--- admits at most one row per folded address, so folding cannot collide with a
--- case variant that would have to be resolved by hand, and the identity that
--- index defines does not change. Reordering or renumbering these two turns this
--- statement into one that can abort the migration on a duplicate key.
---
--- auth-router.ts folds the same way on the sign-in path, and both are needed.
--- This one settles the population that exists at the deploy, so nobody has to
--- sign in to become visible and nothing reading user.email sees a mixture.
--- That one settles the rows written afterwards, because PUT /user stores the
--- spelling the account holder typed and is pinned to that by the wire contract.
--- Removing either leaves a way for a row to be unreachable by the engine.
-UPDATE trexdb."user" SET email = lower(email) WHERE email <> lower(email);
-
 -- Better Auth requires an address on every user, so the rows V14 allowed to be
 -- NULL get a synthesised one. The flag is what keeps them out of mail paths:
 -- an address invented here was never asserted by anybody and must never be
@@ -142,6 +122,82 @@ BEGIN
   END LOOP;
 END
 $$;
+
+-- Every address the engine will be handed has to be one it will accept.
+--
+-- Better Auth runs zod's z.email() on the address before it looks anybody up,
+-- on every credential endpoint, and that rule requires a dotted domain. A row
+-- holding `ops@localhost` — which V1 allowed, having imposed no format at all —
+-- therefore stops being able to sign in the moment the engine owns
+-- verification, with a correct password and a correct credential row, and is
+-- told only that its credentials are invalid. That is a silent, permanent
+-- lockout, and the person who finds it is the user rather than the operator.
+--
+-- Refused, not repaired. An address is an identity: there is no safe automatic
+-- choice of a new one, for the same reason V16 refuses to pick a winner between
+-- two rows sharing a mailbox. Relaxing what the engine validates would mean
+-- forking its route or keeping a second credential path alive, and removing the
+-- second path is what this plan is for. Told before the deploy, an operator
+-- resolves this in minutes; told after, they hear it from a locked-out user.
+--
+-- Placed after the placeholder backfill on purpose, so it sees the addresses
+-- this migration itself mints and not only the ones it inherited. The fold
+-- below moved with it: the backfill compares candidates with lower(email) on
+-- both sides and mints lower-case local parts, so folding before or after it is
+-- the same thing, and one check over the final population is worth more than
+-- two over halves of it. Whole-file safety comes from the migration plugin,
+-- which wraps each file in BEGIN/COMMIT and rolls back on error
+-- (plugins/migration/src/lib.rs), so refusing here leaves nothing behind.
+--
+-- TWIN OF isEngineAddressable IN core/server/auth/auth-router.ts, which is
+-- itself a copy of zod's z.email(). All three must move together; a parity test
+-- (auth/auth-engine-cutover.test.ts) asks this expression, that predicate and
+-- the live engine the same addresses and fails if any of them disagrees. The
+-- expression is restated here rather than shared because a migration is text
+-- handed to the session verbatim and checksummed, and can call nothing.
+DO $$
+DECLARE
+  unusable text;
+BEGIN
+  SELECT string_agg(email, ', ' ORDER BY email) INTO unusable
+    FROM trexdb."user"
+   WHERE email IS NOT NULL
+     AND email !~ '^(?:[A-Za-z0-9_''+-]+\.)*[A-Za-z0-9_''+-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9-]*\.)+[A-Za-z]{2,}$';
+
+  IF unusable IS NOT NULL THEN
+    RAISE EXCEPTION
+      'trexdb."user" holds addresses the authentication engine will not accept: %',
+      unusable
+      USING HINT =
+        'Better Auth validates the address before it looks a user up, so each '
+        'account above would be unable to sign in after this migration, with no '
+        'error but "invalid credentials". Give each one an address with a dotted '
+        'domain (someone@example.com, not someone@localhost), or delete the '
+        'account if it is defunct — soft-deleting is not enough, a deleted row '
+        'still holds the address. Re-run the migration after.';
+  END IF;
+END
+$$;
+
+-- Addresses move to the engine's storage convention: Better Auth looks a user
+-- up with `email = <the address it was given, lower-cased>` and lower-cases
+-- every address it writes itself, so a row still holding the spelling somebody
+-- typed is invisible to it. Its holder is not told that nothing can see them —
+-- they are told their password is wrong.
+--
+-- THIS IS ONLY SAFE BECAUSE V16 PRECEDES IT. V16's user_email_lower_key already
+-- admits at most one row per folded address, so folding cannot collide with a
+-- case variant that would have to be resolved by hand, and the identity that
+-- index defines does not change. Reordering or renumbering these two turns this
+-- statement into one that can abort the migration on a duplicate key.
+--
+-- auth-router.ts folds the same way on the sign-in path, and both are needed.
+-- This one settles the population that exists at the deploy, so nobody has to
+-- sign in to become visible and nothing reading user.email sees a mixture.
+-- That one settles the rows written afterwards, because PUT /user stores the
+-- spelling the account holder typed and is pinned to that by the wire contract.
+-- Removing either leaves a way for a row to be unreachable by the engine.
+UPDATE trexdb."user" SET email = lower(email) WHERE email <> lower(email);
 
 -- Better Auth declares email, emailVerified, createdAt and updatedAt required.
 -- A nullable column with a default still lets an old row hold NULL, which the
