@@ -255,7 +255,14 @@ dbTest("signup refuses a case variant, while sign-in and an address change accep
 
   const app = express();
   app.use(authRouter);
-  const server = app.listen(0);
+  // Bound to the loopback rather than the wildcard: the ephemeral range
+  // contains the port Postgres listens on, and a wildcard bind on it makes
+  // every later connection to 127.0.0.1:<that port> reach this server instead.
+  // Awaited, because binding to a host resolves the address first and so is not
+  // synchronous the way the wildcard bind was — server.address() is still null
+  // when listen() returns.
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise<void>((r) => server.once("listening", () => r()));
   const port = (server.address() as { port: number }).port;
   const post = (path: string, body: unknown, token?: string) =>
     fetch(`http://127.0.0.1:${port}${path}`, {

@@ -165,9 +165,29 @@ $$;
 -- below moved with it: the backfill compares candidates with lower(email) on
 -- both sides and mints lower-case local parts, so folding before or after it is
 -- the same thing, and one check over the final population is worth more than
--- two over halves of it. Whole-file safety comes from the migration plugin,
--- which wraps each file in BEGIN/COMMIT and rolls back on error
--- (plugins/migration/src/lib.rs), so refusing here leaves nothing behind.
+-- two over halves of it.
+--
+-- Refusing this late leaves nothing behind, but NOT by the mechanism the
+-- migration plugin's own comment suggests. A Postgres migration takes the
+-- `is_postgres` branch of execute_migrations_in_schema
+-- (plugins/migration/src/lib.rs), which issues no BEGIN and no COMMIT — the
+-- explicit wrapper is on the other branch, the one this file never takes. What
+-- discards the statements above is Postgres itself: a simple query carrying
+-- several statements runs in one implicit transaction, and an error in any of
+-- them throws all of it away.
+--
+-- That guarantee is therefore contingent on postgres_execute receiving this
+-- file as ONE simple query, which is what postgres_execute_sql does today
+-- (lib.rs:646 passes the whole text as a single argument). If it ever split the
+-- file into statements, or moved to the extended protocol, each statement would
+-- commit on its own: this check would still refuse, but the fold and the
+-- backfill above it would already have landed, and this comment would be the
+-- only thing still claiming otherwise. Changing how migrations are submitted
+-- means coming back here.
+--
+-- The history row is written by a separate call (insert_migration_record_in),
+-- so a migration and its record are not atomic with each other: a crash between
+-- them re-runs the file. Everything here is written to survive that.
 --
 -- TWIN OF isEngineAddressable IN core/server/auth/auth-router.ts, which is
 -- itself a copy of zod's z.email(). All three must move together; a parity test
