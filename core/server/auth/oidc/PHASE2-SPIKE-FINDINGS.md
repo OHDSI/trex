@@ -103,3 +103,55 @@ token 401s on an audience mismatch. `D2E_IDP_AUDIENCES` must carry the **resourc
 
 Still open: the access token carries no `roles` and no `trex_role`, so the portal's `tokenMissingRoles`
 re-login branch keeps tripping until `customAccessTokenClaims` is wired.
+
+## Spike 2 — the login and consent contract
+
+Same instance and same seeded client; only `oauthClient.skipConsent` was toggled between measurements.
+
+### The login redirect
+
+No session on `GET /oauth2/authorize` → 302, `Location` is `opts.loginPage` **verbatim** with a signed query
+appended. In serialization order:
+
+```
+response_type, redirect_uri, scope, state, client_id, code_challenge, code_challenge_method,
+exp, ba_iat, ba_param (×10), sig
+```
+
+- Only what was *sent* appears — no `nonce` and no `prompt` on this request meant neither showed up. The
+  sign-in page must treat the query as opaque rather than expecting a fixed list.
+- `exp` is unix **seconds** (`now + codeExpiresIn`); `ba_iat` is **milliseconds**. Different units, same query.
+- `ba_param` repeats once per signed parameter name and includes `ba_iat` and `ba_param` itself; `sig` is the
+  only parameter not covered.
+- `sig` is **standard** base64, not base64url — `+`, `/`, `=`, percent-encoded. Do not "fix" that.
+
+### The bounce-back
+
+The whole query handed straight back to `GET /oauth2/authorize` with only a session cookie added → **302 to
+the client's `redirect_uri` carrying `code`, `state` and `iss`**. So the page's job really is "bounce what you
+were handed", and the unverified `sig` rides along as an inert extra parameter. (`iss` on the callback is new
+relative to trex today, which sends only `code` and `state`.)
+
+### Consent
+
+| `oauthClient.skipConsent` | `GET /oauth2/authorize` with a live session |
+|---|---|
+| `true`  | 302 straight to the redirect URI with a `code` |
+| `false` | 302 to the configured `consentPage`, with the same signed-query shape as the login redirect |
+
+So `consentPage` decides only *where* consent goes; the column decides *whether*. The seeder must write
+`skipConsent: true`; `consentPage` still has to be given some string because the option is required.
+
+### `prompt=login` loops
+
+With a live session and `prompt=login`: the first pass redirects to the login page anyway; `prompt=login` is
+carried into the signed query (and into `ba_param`); bouncing that query back verbatim with the same live
+session redirects to the login page **again**, indefinitely, with nothing to distinguish it from the first
+pass. Deleting `prompt` before bouncing yields the code.
+
+The sign-in page therefore needs to **strip `prompt` before bouncing**. Stripping it invalidates `sig`, since
+`prompt` is a signed parameter — harmless on `/oauth2/authorize`, which never verifies `sig`, and confirmed by
+measurement, but it means such a page can only ever bounce to `/oauth2/authorize`. `skipConsent: true` is what
+makes that acceptable, so the two facts are load-bearing together.
+
+Neither WebAPI nor the portal sends `prompt` today; this is a guard against a future relying party.
