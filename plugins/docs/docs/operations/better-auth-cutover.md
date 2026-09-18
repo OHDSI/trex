@@ -134,12 +134,36 @@ federation link answers `unaddressable_email`.) Set it to a dotted domain
 (`d2e.local`, `example.com`, your real mail domain) and the same requests
 succeed.
 
-**`d2e.local` itself is a safe value, and you do not need to avoid it.** It is
-the placeholder domain, and any user row created with an address in it is
-flagged `is_placeholder_email` and left unverified — whoever supplied the
-address — so a migration that fills a missing address with
-`<username>@d2e.local` produces exactly the marked rows it should. Only the
-dotted-domain requirement is load-bearing here.
+**`d2e.local` is usable, with one exception you need to know about.** It is the
+placeholder domain, and a row created on it is normally flagged
+`is_placeholder_email`, left `emailVerified = false` and given no
+`email_confirmed_at` — which is what a migration filling a missing address with
+`<username>@d2e.local` should produce. But that is true of five of the six
+address-writing routes, not all six:
+
+| Route | A `@d2e.local` address is… |
+|-------|-----------------------------|
+| `PUT /federation/links` (admin pre-link) | flagged |
+| Federated sign-in / auto-provision | flagged |
+| `POST /admin/users` | flagged |
+| MCP `user-create` | flagged |
+| `PUT /user` | flagged (derived from the new address, on every update) |
+| **`POST /signup`** | **not flagged** — see below |
+
+`/signup` is the deliberate exception. The account being created there is one
+somebody is registering for themselves — including the bootstrap administrator
+— and writing that row `emailVerified = false` would be the wrong outcome: the
+first admin would land unverified on their own installation. It is also the one
+route where leaving the flag off costs nothing: `user_email_lower_key` means an
+attacker cannot register an address a row already holds, and
+`synthesisePlaceholderEmail` falls back to `<id>@d2e.local` when a slug is
+taken, so a hostile upstream asserting a self-registered `@d2e.local` address
+can only ever link onto the attacker's own row.
+
+**So: if you bootstrap with `IDP__INITIAL_USER__DOMAIN=d2e.local`, the initial
+administrator is created verified and unflagged.** That is intended. Everything
+migrated afterwards, through any of the other five routes, is flagged. Only the
+dotted-domain requirement is load-bearing for the 422.
 
 ## The rolling-deploy constraint
 

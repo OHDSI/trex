@@ -25,6 +25,14 @@ const VALID_ROOT = btoa(String.fromCharCode(...new Uint8Array(32).map((_, i) => 
 /** Every fixture user carries this domain, and only this file purges it. */
 const TEST_DOMAIN = "@cutover.test";
 
+/**
+ * Deliberately the literal rather than the import: these tests exist to catch a
+ * route writing an unflagged row on the placeholder domain, and reading the
+ * domain from the same constant the route reads would make a test that passes
+ * if somebody changed the constant and forgot a route.
+ */
+const PLACEHOLDER_DOMAIN = "d2e.local";
+
 const PASSWORD = "correct-horse-battery";
 
 interface Ctx {
@@ -65,7 +73,13 @@ function cutoverTest(name: string, fn: (c: Ctx) => Promise<void>) {
 }
 
 async function purge(pool: PgPool) {
-  await pool.query(`DELETE FROM trexdb."user" WHERE email LIKE $1`, [`%${TEST_DOMAIN}`]);
+  // The placeholder-domain fixtures below cannot carry TEST_DOMAIN — the domain
+  // IS the thing under test — so they are purged by their local-part prefix,
+  // which every address this file mints shares.
+  await pool.query(
+    `DELETE FROM trexdb."user" WHERE email LIKE $1 OR email LIKE $2`,
+    [`%${TEST_DOMAIN}`, `cutover-%@${PLACEHOLDER_DOMAIN}`],
+  );
 }
 
 let seq = 0;
@@ -73,6 +87,23 @@ function uniqueEmail(label: string): string {
   seq += 1;
   return `cutover-${label}-${seq}-${crypto.randomUUID().slice(0, 8)}${TEST_DOMAIN}`;
 }
+
+function uniquePlaceholderEmail(label: string): string {
+  seq += 1;
+  return `cutover-${label}-${seq}-${crypto.randomUUID().slice(0, 8)}@${PLACEHOLDER_DOMAIN}`;
+}
+
+async function marking(pool: PgPool, email: string) {
+  const { rows } = await pool.query(
+    `SELECT "emailVerified", is_placeholder_email, email_confirmed_at IS NULL AS unconfirmed
+       FROM trexdb."user" WHERE email = $1`,
+    [email],
+  );
+  return rows[0];
+}
+
+const FLAGGED = { emailVerified: false, is_placeholder_email: true, unconfirmed: true };
+const GENUINE = { emailVerified: true, is_placeholder_email: false, unconfirmed: false };
 
 /**
  * A user whose password lives only on user.password_hash and who has no account
@@ -658,4 +689,71 @@ Deno.test("a password that is not a string is a credential failure, not a throw"
   assertEquals(await verifyPassword(PASSWORD, 12345 as unknown as string), false);
   assertEquals(await verifyPassword(PASSWORD, "no-colon-here"), false);
   assertEquals(await verifyPassword(PASSWORD, stored), true);
+});
+
+
+// ── The placeholder domain is a property of the address, on every route ─────
+//
+// provisionUser flags it, and the federation admin link goes through
+// provisionUser — but an operator migrating a directory through the ADMIN
+// route instead creates the same population with none of the marking, and
+// decideLink needs no auto_provision to link onto it: an enabled provider, an
+// upstream-asserted emailVerified, the default unset allowlist and a
+// non-elevated target is the whole gate. Guessable `<username>@d2e.local`
+// local parts, claimable by any upstream that asserts one.
+
+cutoverTest("POST /admin/users flags an address on the placeholder domain", async ({ url, pool }) => {
+  const admin = await createLegacyUser(pool, { role: "admin" });
+  const email = uniquePlaceholderEmail("admin-create");
+
+  const res = await post(`${url}/admin/users`, { email, password: PASSWORD }, await bearer(admin));
+  assertEquals(res.status, 200);
+  await res.body?.cancel();
+
+  assertEquals(await marking(pool, email), FLAGGED);
+});
+
+cutoverTest("POST /admin/users leaves an ordinary address genuine", async ({ url, pool }) => {
+  const admin = await createLegacyUser(pool, { role: "admin" });
+  const email = uniqueEmail("admin-create-ok");
+
+  const res = await post(`${url}/admin/users`, { email, password: PASSWORD }, await bearer(admin));
+  assertEquals(res.status, 200);
+  await res.body?.cancel();
+
+  assertEquals(await marking(pool, email), GENUINE);
+});
+
+// The invariant has to hold on UPDATE too. PUT /user used to clear the flag
+// unconditionally, so a user could move their own row onto the placeholder
+// domain and leave it unflagged, verified and a link candidate. Self-only, so
+// nobody else's account was at risk — but an invariant that holds only at
+// creation is one the next reader cannot rely on.
+cutoverTest("PUT /user flags a self-set address on the placeholder domain", async ({ url, pool }) => {
+  const user = await createLegacyUser(pool);
+  const email = uniquePlaceholderEmail("put-user");
+
+  const res = await request("PUT", `${url}/user`, { email }, await bearer(user));
+  assertEquals(res.status, 200);
+  await res.body?.cancel();
+
+  assertEquals((await marking(pool, email)).is_placeholder_email, true);
+});
+
+// And the case the unconditional clear was written for still works: a flagged
+// user who sets a real address comes off the flag, or no provider asserting
+// that address could ever link to them.
+cutoverTest("PUT /user still clears the flag for a real address", async ({ url, pool }) => {
+  const user = await createLegacyUser(pool);
+  await pool.query(
+    `UPDATE trexdb."user" SET is_placeholder_email = true WHERE id = $1`,
+    [user.id],
+  );
+  const email = uniqueEmail("put-user-real");
+
+  const res = await request("PUT", `${url}/user`, { email }, await bearer(user));
+  assertEquals(res.status, 200);
+  await res.body?.cancel();
+
+  assertEquals((await marking(pool, email)).is_placeholder_email, false);
 });

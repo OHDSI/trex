@@ -201,9 +201,20 @@ asserted it and nothing resolves it. Two rules follow:
 2. **A caller supplied an address already in `d2e.local`.** A migration that has
    no address to give for a user sends `<username>@<its configured domain>`
    rather than nothing — the federation admin link requires an address — and at
-   the default domain that string is exactly a placeholder. Any row created on
-   that domain is therefore flagged the same way, keyed on the domain alone and
-   not on who asked or what the local part looks like.
+   the default domain that string is exactly a placeholder. Such a row is
+   flagged the same way, keyed on the domain alone and not on who asked or what
+   the local part looks like.
+
+   This holds for five of the six routes that write a login address: the
+   federation admin link, federated auto-provision, `POST /admin/users`, MCP
+   `user-create` and `PUT /user` (which derives the flag from the new address on
+   every update rather than clearing it). **`POST /signup` is the exception, on
+   purpose:** an account somebody registers for themselves — the bootstrap
+   administrator among them — should not be written `emailVerified = false`, and
+   it is the one route where the flag costs nothing anyway, because
+   `user_email_lower_key` stops an attacker registering an address a row already
+   holds and the placeholder slug falls back to `<id>@d2e.local` when one is
+   taken. A hostile upstream can only ever link onto the attacker's own row.
 
 The second case is not hypothetical: it is how 66 of 69 users looked in a
 migration rehearsal, and before the domain rule they were written

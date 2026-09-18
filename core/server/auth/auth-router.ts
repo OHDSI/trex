@@ -21,7 +21,7 @@ import { loadExternalProviders } from "./settings-providers.ts";
 import { nativePasswordLoginEnabled } from "./federation/config.ts";
 import { requireAdmin } from "./require-admin.ts";
 import { IDP_METADATA_KEY } from "./oidc/claims.ts";
-import { isEngineAddressable } from "./engine-address.ts";
+import { isEngineAddressable, isPlaceholderAddress } from "./engine-address.ts";
 // Re-exported, not merely imported. V17's twin-of comment and the parity tests
 // both name this module as where the predicate lives, and the federation admin
 // API needs the same rule without loading this router — so the definition moved
@@ -918,13 +918,20 @@ router.put("/user", apiLimiter, async (req, res) => {
       updates.push(`email = $${paramIdx++}`);
       values.push(email);
       // The flag means "this address is synthesised, not one anybody gave"
-      // (V17's column comment), and this is the one route that writes an
-      // address the account holder chose. It has to come off with the old
-      // value: findLinkCandidateByEmail excludes flagged rows, so a federated
-      // user who sets a real address here and stayed flagged could never be
-      // linked by a provider asserting it — refused as no_account, or, under
-      // auto-provision, a UNIQUE violation on user_email_key.
-      updates.push(`is_placeholder_email = false`);
+      // (V17's column comment), so it is derived from the new address rather
+      // than cleared. Normally that means clearing it, which is the case this
+      // was written for: findLinkCandidateByEmail excludes flagged rows, so a
+      // federated user who sets a real address here and stayed flagged could
+      // never be linked by a provider asserting it — refused as no_account, or,
+      // under auto-provision, a UNIQUE violation on user_email_key.
+      //
+      // But an unconditional `= false` breaks the invariant on update: set the
+      // address to something on the placeholder domain and the row sits there
+      // unflagged, verified, and a link candidate again. Self-only, so it is
+      // nobody else's account at risk — but the invariant has to hold on every
+      // write, not only on creation, or the next reader cannot rely on it.
+      updates.push(`is_placeholder_email = $${paramIdx++}`);
+      values.push(isPlaceholderAddress(email));
     }
 
     let newHash: string | null = null;
@@ -1303,6 +1310,16 @@ router.post(["/admin/create-user", "/admin/users"], apiLimiter, async (req, res)
     // the whole `data` object is kept as user_metadata, which is what the wire
     // contract returns. app_metadata is left to V1's column default so the
     // provider keys stay what every other row has.
+    // An address on the placeholder domain is synthetic whoever supplied it,
+    // and an administrator migrating a directory through this route rather than
+    // through PUT /federation/links creates exactly the population that made
+    // the flag matter — guessable `<username>@d2e.local` local parts, claimable
+    // by any enabled upstream that asserts one as verified. decideLink needs no
+    // auto_provision to reach {action: "link"}: an enabled provider, an
+    // upstream-asserted emailVerified, the default unset allowlist and a
+    // non-elevated target is the whole gate. So the row is marked here exactly
+    // as provisionUser marks it — flagged, unverified, unconfirmed.
+    const synthetic = isPlaceholderAddress(email);
     const created = await (await engine()).api.createUser({
       body: {
         email,
@@ -1310,8 +1327,12 @@ router.post(["/admin/create-user", "/admin/users"], apiLimiter, async (req, res)
         name: data?.name || email.split("@")[0],
         role: data?.role || "user",
         data: {
-          emailVerified: true,
-          email_confirmed_at: new Date(),
+          emailVerified: !synthetic,
+          // Omitted rather than nulled when synthetic: the column's default is
+          // NULL, and "confirmed at <timestamp>" on an address nobody asserted
+          // is the claim the flag exists to contradict.
+          ...(synthetic ? {} : { email_confirmed_at: new Date() }),
+          is_placeholder_email: synthetic,
           user_metadata: data || {},
         },
       },

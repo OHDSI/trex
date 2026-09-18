@@ -1,6 +1,11 @@
 // The only module in federation/ that talks to the database.
 import { decryptWithDek, encryptWithDek } from "../dek.ts";
-import { decideLink, emailDomain, type ExistingUser, type LinkDecision } from "./link.ts";
+import { decideLink, type ExistingUser, type LinkDecision } from "./link.ts";
+import { isPlaceholderAddress, PLACEHOLDER_EMAIL_DOMAIN } from "../engine-address.ts";
+// Re-exported: the domain and the predicate moved beside the engine-address
+// rule they belong to, but V17's twin comment, the slug parity test and the
+// federation tests all name this module as where they live.
+export { isPlaceholderAddress, PLACEHOLDER_EMAIL_DOMAIN };
 import type { ProviderConfig, UpstreamIdentity } from "./types.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -215,57 +220,6 @@ export async function resolveFederatedUser(
     ? null
     : await findLinkCandidateByEmail(client, identity.email);
   return decideLink(identity, provider, candidate);
-}
-
-/**
- * The domain every synthesised address sits under.
- *
- * Identical to the `placeholder_domain` constant in
- * core/schema/V17__better_auth_canonical_tables.sql, and it has to stay that
- * way: V17 backfilled the users that existed when Better Auth took the tables
- * over, this module mints the ones that arrive afterwards, and a row from
- * either must be indistinguishable from a row from the other. It cannot be
- * read from configuration on this side because it cannot be on that one —
- * trex's migration runner substitutes nothing into a V-file and checksums the
- * text it executes (plugins/migration/src/lib.rs).
- *
- * Never resolvable and never routed to. `is_placeholder_email` is the flag code
- * branches on — findLinkCandidateByEmail above already does, and any mail path
- * added later must — and the domain is only what makes the address inert if
- * something tries anyway. isPlaceholderAddress below is how a row supplied with
- * an address in this domain gets the same flag as one synthesised into it.
- */
-export const PLACEHOLDER_EMAIL_DOMAIN = "d2e.local";
-
-/**
- * Whether an address is synthetic BY CONSTRUCTION, whoever supplied it.
- *
- * The domain is trex's own and resolves nowhere, so nothing legitimately
- * receives mail there and no upstream can speak for it. An address in it is
- * therefore a placeholder regardless of which path produced it — which is the
- * gap this closes. provisionUser used to flag only the addresses it synthesised
- * itself, i.e. only the identities that asserted none; but the federation admin
- * link cannot reach that branch at all, because parseLinkRequest requires an
- * address containing '@'. A migration with no address to give sends
- * `<username>@<its configured domain>`, and at d2e's default that string is
- * byte-identical to this constant — so 66 of 69 migrated users landed on this
- * domain with is_placeholder_email false, emailVerified true and
- * email_confirmed_at set.
- *
- * That is not cosmetic. findLinkCandidateByEmail excludes flagged rows
- * precisely so an upstream asserting `<somebody's subject>@d2e.local` cannot
- * claim the row that holds it; unflagged, all 66 were candidates again, and a
- * second enabled upstream asserting one of those addresses as verified linked
- * straight onto the migrated account. Unconditionally — second upstream or not
- * — those rows also claimed a confirmed, verified address nobody can receive
- * mail at, which is the opposite of what the flag exists to tell a mail path.
- *
- * Keyed on the domain and nothing else: not on the caller, not on the shape of
- * the local part. A rule about who is asking would have missed this caller, and
- * the next one too.
- */
-export function isPlaceholderAddress(email: string | null): boolean {
-  return email !== null && emailDomain(email) === PLACEHOLDER_EMAIL_DOMAIN;
 }
 
 /**
