@@ -17,6 +17,9 @@ import {
   findLinkCandidateByEmail,
   findLinkedUser,
   loadProviders,
+  PLACEHOLDER_EMAIL_DOMAIN,
+  placeholderLocalPart,
+  provisionUser,
   readAccountTokens,
   resolveFederatedUser,
   upsertAccount,
@@ -1334,4 +1337,137 @@ Deno.test("refusalRedirect never forwards an off-site return path", () => {
 
 Deno.test("refusalRedirect is null without a login URL, so callers keep the JSON response", () => {
   assertEquals(refusalRedirect(null, "no_account", "/"), null);
+});
+
+// ── Placeholder addresses (providers.ts) ─────────────────────────────────────
+//
+// V16 restored user.email NOT NULL, so the branch decideLink routes an
+// address-less identity down — {action:"provision"} under autoProvision —
+// cannot write a NULL any more. These pin the rule that replaced it, which is
+// shared by hand with V16's DO block.
+
+Deno.test("the placeholder local part is the slug V16 computes", () => {
+  assertEquals(placeholderLocalPart("Alice.Example"), "alice.example");
+  assertEquals(placeholderLocalPart("alice example"), "alice-example");
+  assertEquals(placeholderLocalPart("carol@corp.example"), "carol-corp.example");
+  // btrim(…, '-.') at both ends: a local part may neither start nor end with a
+  // dot, and a run of rejected characters must not leave a trailing dash.
+  assertEquals(placeholderLocalPart(".weird!"), "weird");
+  // Nothing usable survives. The caller has to notice rather than mint the
+  // address `@d2e.local`.
+  assertEquals(placeholderLocalPart("###"), "");
+});
+
+/** Answers provisionUser's collision probe and records what it would insert. */
+function provisionClient(taken: string[] = []) {
+  const inserts: unknown[][] = [];
+  return {
+    inserts,
+    query(sql: string, params: unknown[]): Promise<{ rows: unknown[] }> {
+      if (sql.includes('INSERT INTO trexdb."user"')) {
+        inserts.push(params);
+        return Promise.resolve({ rows: [] });
+      }
+      if (sql.includes("lower(email) = $1")) {
+        return Promise.resolve({ rows: taken.includes(params[0] as string) ? [{ one: 1 }] : [] });
+      }
+      throw new Error(`unexpected query: ${sql}`);
+    },
+  };
+}
+
+const anonymous = (sub: string) => ({ sub, email: null, emailVerified: false });
+
+Deno.test("an identity asserting no address is provisioned with a flagged placeholder", async () => {
+  const c = provisionClient();
+  assertEquals(await provisionUser(c, anonymous("Alice.Example"), { id: "u-1" }), "u-1");
+  // Unverified and flagged: an address nobody asserted must never be able to
+  // claim an account through the verified-email rule, and every mail path has
+  // to be able to tell it from one the person gave.
+  assertEquals(c.inserts, [[
+    "u-1",
+    "Alice.Example",
+    `alice.example@${PLACEHOLDER_EMAIL_DOMAIN}`,
+    false,
+    true,
+  ]]);
+});
+
+Deno.test("a subject that slugifies to nothing falls back to the user id", async () => {
+  const c = provisionClient();
+  await provisionUser(c, anonymous("###"), { id: "u-1" });
+  assertEquals(c.inserts[0][2], `u-1@${PLACEHOLDER_EMAIL_DOMAIN}`);
+});
+
+Deno.test("a placeholder whose slug is taken falls back to the user id", async () => {
+  const c = provisionClient([`alice.example@${PLACEHOLDER_EMAIL_DOMAIN}`]);
+  await provisionUser(c, anonymous("Alice.Example"), { id: "u-2" });
+  assertEquals(c.inserts[0][2], `u-2@${PLACEHOLDER_EMAIL_DOMAIN}`);
+});
+
+Deno.test("a placeholder with no address left is refused, never attached to one", async () => {
+  const c = provisionClient([
+    `alice.example@${PLACEHOLDER_EMAIL_DOMAIN}`,
+    `u-2@${PLACEHOLDER_EMAIL_DOMAIN}`,
+  ]);
+  await assertRejects(
+    () => provisionUser(c, anonymous("Alice.Example"), { id: "u-2" }),
+    Error,
+    "already taken",
+  );
+  assertEquals(c.inserts, []);
+});
+
+Deno.test("a user id that slugifies to nothing is refused rather than given `@domain`", async () => {
+  const c = provisionClient();
+  await assertRejects(
+    () => provisionUser(c, anonymous("###"), { id: "!!!" }),
+    Error,
+    "no usable local part",
+  );
+  assertEquals(c.inserts, []);
+});
+
+Deno.test("an identity that asserts an address is provisioned with it, verified and unflagged", async () => {
+  const c = provisionClient();
+  await provisionUser(
+    c,
+    { sub: "s-1", email: "jo@example.test", emailVerified: true },
+    { id: "u-1" },
+  );
+  assertEquals(c.inserts, [["u-1", "jo@example.test", "jo@example.test", true, false]]);
+});
+
+// Gated on DATABASE_URL like admin.test.ts's [db] block: the stubs above pin
+// which address is computed, but only a real database proves the row V16's
+// NOT NULL constraints will actually accept — which is the difference between
+// a placeholder and a 500 on the first sign-in of a username-only user.
+const provisionDbUrl = Deno.env.get("DATABASE_URL");
+
+Deno.test({
+  name: "[db] provisioning an address-less identity writes a row V16 accepts",
+  ignore: !provisionDbUrl,
+  fn: async () => {
+    const { Client } = await import("npm:pg");
+    const db = new Client({ connectionString: provisionDbUrl });
+    await db.connect();
+    const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+    try {
+      const id = await provisionUser(db, anonymous(`Sub ${run}`), { id: `p${run}` });
+      const { rows } = await db.query(
+        `SELECT email, "emailVerified", is_placeholder_email, email_confirmed_at
+           FROM trexdb."user" WHERE id = $1`,
+        [id],
+      );
+      assertEquals(rows, [{
+        email: `sub-${run}@${PLACEHOLDER_EMAIL_DOMAIN}`,
+        emailVerified: false,
+        is_placeholder_email: true,
+        email_confirmed_at: null,
+      }]);
+    } finally {
+      await db.query(`DELETE FROM trexdb."user" WHERE id LIKE $1`, [`p${run}%`]);
+      await db.end();
+    }
+  },
 });
