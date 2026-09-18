@@ -412,7 +412,7 @@ jobs:
       # deno workspace root is core/, and /// <reference types="..."> directives
       # from npm packages resolve against core/node_modules, which `npm ci` in
       # core/server cannot create.
-      - name: core/server auth tests (wire contract, Better Auth engine, federation)
+      - name: core/server auth tests (wire contract, Better Auth engine, federation, MCP user tools)
         env:
           # deno colourises its summary line even when stdout is a pipe, and the
           # escape codes land in front of the `ok |` the guard below anchors on.
@@ -421,13 +421,16 @@ jobs:
           set -o pipefail
           cd core/server
           log="${RUNNER_TEMP:-/tmp}/auth-test.log"
-          deno test --no-check --allow-all auth/ 2>&1 | tee "$log"
+          # mcp/tools/ alongside auth/: user-create is the sixth door onto
+          # trexdb."user" and asks the same engine-address rule, so its test
+          # belongs to this job even though it lives outside auth/.
+          deno test --no-check --allow-all auth/ mcp/tools/ 2>&1 | tee "$log"
 
           # The files below carry the wire contract, the Better Auth engine
           # construction, the schema-drift guard, the federation link rules (in
           # federation.test.ts for sign-in, admin.test.ts for the pre-link the
-          # migration drives), the V17 slug parity and the email-case account
-          # takeover. All of them
+          # migration drives), the V17 slug parity, the email-case account
+          # takeover and the MCP user-create door. All of them
           # gate on DATABASE_URL and SKIP without one, so a service that never
           # came up, a half-applied schema or a renamed variable would report
           # green while testing none of it.
@@ -445,7 +448,8 @@ jobs:
                    auth/federation/federation.test.ts \
                    auth/federation/admin.test.ts \
                    auth/federation/placeholder-slug-parity.test.ts \
-                   auth/email-case.test.ts; do
+                   auth/email-case.test.ts \
+                   mcp/tools/users.test.ts; do
             # `|| true` so a no-match grep does not kill the script under
             # `bash -e {0}` before the diagnosis below can be printed. A run
             # that FAILED prints no `ok |` line either, so it lands on the same

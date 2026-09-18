@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { pool } from "../../db.ts";
 import { hashPassword } from "../../auth/password.ts";
+import { isEngineAddressable } from "../../auth/engine-address.ts";
 
 export function registerUserTools(server: McpServer) {
   server.tool(
@@ -77,6 +78,29 @@ export function registerUserTools(server: McpServer) {
     },
     async ({ name, email, password, role }) => {
       try {
+        // One of the six routes that write a login address (all enumerated on
+        // isEngineAddressable), at the same privilege tier as POST /admin/users:
+        // an admin API key reaches this tool, and the schema above is a bare
+        // z.string(), so nothing between the caller and the INSERT has ever
+        // looked at the address. After V17 that writes exactly
+        // the row V17 refuses to migrate — Better Auth validates the address
+        // before it looks anybody up, so the account would exist, look created,
+        // and only ever be told its credentials are invalid.
+        //
+        // Refused before either INSERT, so a rejected call writes nothing at
+        // all, not even the credential-less half.
+        if (!isEngineAddressable(email)) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: `Error: '${email}' is not an address the authentication engine can serve. ` +
+                `It needs a dotted domain (someone@example.com, not someone@localhost); ` +
+                `an account created with this address could never sign in.`,
+            }],
+            isError: true,
+          };
+        }
+
         const id = crypto.randomUUID();
         const userRole = role || "user";
 
