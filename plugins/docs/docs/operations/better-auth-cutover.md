@@ -1,0 +1,134 @@
+---
+sidebar_position: 2
+---
+
+# Upgrading to the Better Auth Engine
+
+`V17__better_auth_canonical_tables.sql` hands `trexdb.user`, `session`,
+`account` and `verification` to Better Auth, and the `/trex/auth/v1` router
+stops verifying passwords itself. See
+[Concepts → Auth & Authorization](../concepts/auth-model) for what the engine
+owns and why the GoTrue-shaped router still exists in front of it.
+
+This page is the operator's half: the three things that can go wrong on the way
+through, and what to do about each.
+
+## V17 can refuse to apply
+
+The engine validates an address *before* it looks a user up, on every
+credential endpoint, and its rule requires a dotted domain. `V1` imposed no
+format at all, so an installation can be holding `ops@localhost` or
+`admin@internal` quite legitimately. After the cutover those accounts cannot
+sign in — with the right password, the right credential row, and no error but
+`invalid credentials`.
+
+So V17 refuses rather than creating that state:
+
+```
+ERROR:  trexdb."user" holds addresses the authentication engine will not accept:
+        admin@internal, ops@localhost
+HINT:   Better Auth validates the address before it looks a user up, so each
+        account above would be unable to sign in after this migration, with no
+        error but "invalid credentials". Give each one an address with a dotted
+        domain (someone@example.com, not someone@localhost), or delete the
+        account if it is defunct — soft-deleting is not enough, a deleted row
+        still holds the address. Re-run the migration after.
+```
+
+**The refusal leaves nothing behind.** Every statement in the file runs in one
+implicit transaction, so a V17 that aborts has applied none of itself and no
+history row is written. Fix the addresses and re-run.
+
+**The remedy, per address named:**
+
+- Give the account a real address with a dotted domain. This is the right answer
+  whenever somebody still uses it; an address is an identity, so there is no
+  safe automatic choice and V17 deliberately makes none.
+- Or delete the account, if it is defunct.
+
+**Soft-deleting does not free the address.** `trexdb.user` is unique on
+`lower(email)` across deleted rows too, so setting `"deletedAt"` leaves the row
+holding the address: V17 still names it, and a new account cannot take it. To
+free it, either `DELETE` the row or rewrite its `email` to something the engine
+accepts (`ops+retired-2026@example.com` keeps the row auditable and frees
+nothing anybody wants).
+
+The same rule is asked on every other door onto the table, so an installation
+cannot walk back into the state V17 refused: `/signup`, `POST /admin/users`,
+`PUT /user` and the federation admin link at `PUT /federation/links` all answer
+`422` for an address the engine cannot serve. The federation one matters most
+during a migration — it is the route a bulk import drives, and it runs *after*
+V17 — so it refuses per identity, naming the address, and the import records the
+skip and keeps going.
+
+## The configuration trap: a single-label domain
+
+The rule above is exactly `zod`'s `z.email()`, which **requires a dot in the
+domain**. `alice@localhost` is not a valid address to the engine;
+`alice@localhost.local` is.
+
+This bites at bootstrap, where the initial user's address is assembled from
+configuration rather than typed. In d2e that is `IDP__INITIAL_USER__DOMAIN`:
+set it to `localhost` and *every* user creation answers
+
+```json
+{ "error": "validation_failed", "error_description": "Email must be a valid address" }
+```
+
+with a 422 — not just the first one, and with nothing in the logs that points at
+the variable. (`/signup` answers the same 422 under `signup_invalid`; the
+federation link answers `unaddressable_email`.) Set it to a dotted domain
+(`d2e.local`, `example.com`, your real mail domain) and the same requests
+succeed.
+
+## The rolling-deploy constraint
+
+`/change-password` and sign-in trust different columns, and during a rolling
+deploy they can briefly disagree.
+
+- **Sign-in** (`POST /token`, password grant) reads `trexdb.account.password`
+  and nothing else. That is the engine's column.
+- **`/change-password`** resolves `trexdb.user.password_hash` first and only
+  falls back to `account.password`. That is the pre-V17 column, and the wire
+  contract pins it, because it is the column a node that has not yet restarted
+  still writes.
+
+They disagree in **one direction only**: `account.password` current,
+`user.password_hash` stale. Exactly one thing produces it — a node still running
+code from before `5a48ab98` serving a `PUT /user` that carried both a password
+and an address that collided. That code wrote the credential first and the user
+row second, so the row update failed and the new password landed on
+`account.password` alone.
+
+**The consequence is not a lockout, it is the opposite.** The superseded
+password goes on authorizing a password change while the working one is refused
+there. A password the account holder believes they replaced can still be
+presented to `/change-password`.
+
+**It heals on the next successful password change or admin reset** — both write
+the two columns in one transaction — and the window needs a pre-`5a48ab98` node
+still serving traffic. So:
+
+- Do not run a pre-`5a48ab98` node alongside a post-V17 one for longer than the
+  deploy takes. A blue/green or a rolling restart that completes is fine; a
+  half-finished rollout left in place overnight is not.
+- If one was left running, this closes the window for the whole population:
+
+  ```sql
+  UPDATE trexdb."user" u
+     SET password_hash = a.password, "updatedAt" = NOW()
+    FROM trexdb.account a
+   WHERE a."userId" = u.id
+     AND a."providerId" = 'credential'
+     -- NOT NULL is load-bearing: an account row with no credential yet is a
+     -- user whose password still lives only on user.password_hash, and
+     -- copying NULL over it would delete their password.
+     AND a.password IS NOT NULL
+     AND a.password IS DISTINCT FROM u.password_hash;
+  ```
+
+Phase 2 must revisit this if Better Auth's own change-password or reset
+endpoints are ever mounted: those write `account.password` alone, at which point
+the split stops being a transitional artefact of this rollout and becomes
+permanent. The reasoning lives on `storedPasswordHash` in
+`core/server/auth/auth-router.ts`.
