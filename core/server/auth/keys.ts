@@ -1,7 +1,6 @@
 const encoder = new TextEncoder();
 
 export const LABELS = {
-  betterAuthSession: "trex.better-auth.session.v1",
   jwtHs256: "trex.jwt.hs256.v1",
   pgmetaAes: "trex.pgmeta.aes.v1",
   dekWrap: "trex.dek.wrap.v1",
@@ -28,8 +27,11 @@ export const LABELS = {
   // internal token hashing). A third-party library gets a labelled subkey like
   // everything else rather than the root key itself, so a weakness in its key
   // handling cannot reach the material the DEK wrapping and the JWT signing
-  // keys are derived from. Distinct from betterAuthSession above, which is now
-  // unused: it belonged to the pre-fork instance that core/server/auth.ts held.
+  // keys are derived from. It replaces trex.better-auth.session.v1, which was
+  // removed with the pre-fork instance core/server/auth.ts held: that label had
+  // no reader left, and a subkey nothing derives is a name waiting to be reused
+  // for the wrong purpose. Sessions this engine signs are new sessions — there
+  // is nothing signed under the old label for anything to verify.
   betterAuthEngine: "trex.better-auth.engine.v1",
 } as const;
 
