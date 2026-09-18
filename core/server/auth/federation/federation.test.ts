@@ -1381,10 +1381,10 @@ const anonymous = (sub: string) => ({ sub, email: null, emailVerified: false });
 Deno.test("an identity asserting no address is provisioned with a flagged placeholder", async () => {
   const c = provisionClient();
   assertEquals(await provisionUser(c, anonymous("Alice.Example"), { id: "u-1" }), "u-1");
-  // Unverified and flagged. The flag is what every mail path has to be able to
-  // tell a synthesised address by; `"emailVerified"` false is a true statement
-  // about a row nobody asserted, not a link-path protection — see provisionUser
-  // for what the link path actually reads.
+  // Unverified and flagged. The flag is what every mail path tells a
+  // synthesised address by, and what findLinkCandidateByEmail excludes on;
+  // `"emailVerified"` false is a true statement about a row nobody asserted and
+  // protects nothing on its own, since decideLink reads the incoming identity.
   assertEquals(c.inserts, [[
     "u-1",
     "Alice.Example",
@@ -1469,6 +1469,77 @@ Deno.test({
     } finally {
       await db.query(`DELETE FROM trexdb."user" WHERE id LIKE $1`, [`p${run}%`]);
       await db.end();
+    }
+  },
+});
+
+// A synthesised address is an internal identifier, not a claim to an identity.
+// Before this, an upstream asserting `<another user's subject>@d2e.local` as
+// verified would link onto that user's account, because the candidate query
+// never distinguished a placeholder from an address its owner proved. Against
+// a real database rather than a stub: the exclusion is a SQL predicate, so a
+// stub that answers by matching substrings could not tell it from its absence.
+Deno.test({
+  name: "[db] an upstream cannot claim an account through its placeholder address",
+  ignore: !provisionDbUrl,
+  fn: async () => {
+    const { Client } = await import("npm:pg");
+    const db = new Client({ connectionString: provisionDbUrl });
+    await db.connect();
+    const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+    const placeholder = `sub-${run}@${PLACEHOLDER_EMAIL_DOMAIN}`;
+    const real = `jo-${run}@example.test`;
+    try {
+      await provisionUser(db, anonymous(`Sub ${run}`), { id: `p${run}a` });
+      await provisionUser(
+        db,
+        { sub: `s-${run}`, email: real, emailVerified: true },
+        { id: `p${run}b` },
+      );
+
+      assertEquals(await findLinkCandidateByEmail(db, placeholder), null);
+      // Case is no way around it either: the predicate is on the row, not on
+      // the spelling of the address.
+      assertEquals(await findLinkCandidateByEmail(db, placeholder.toUpperCase()), null);
+      // An address its owner actually proved still resolves exactly as before,
+      // so this narrows the placeholder path and nothing else.
+      assertEquals(await findLinkCandidateByEmail(db, real), { id: `p${run}b`, role: "user" });
+    } finally {
+      await db.query(`DELETE FROM trexdb."user" WHERE id LIKE $1`, [`p${run}%`]);
+      await db.end();
+    }
+  },
+});
+
+// The migrated users V16 backfilled are the population this exclusion could
+// plausibly break, so prove the ordering that spares them rather than assert
+// it: resolveFederatedUser answers from the (providerId, accountId) account
+// row and never reaches the email query.
+Deno.test({
+  name: "[db] a migrated user with a placeholder address still signs in through its link",
+  ignore: !provisionDbUrl,
+  fn: async () => {
+    const { Client } = await import("npm:pg");
+    const db = new Client({ connectionString: provisionDbUrl });
+    await db.connect();
+    const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+    _setDekForTests(new Uint8Array(32));
+    try {
+      const id = await provisionUser(db, anonymous(`Sub ${run}`), { id: `p${run}` });
+      await upsertAccount(db, { userId: id, providerId: "logto", accountId: `Sub ${run}` });
+
+      assertEquals(
+        await resolveFederatedUser(db, provider(), {
+          sub: `Sub ${run}`,
+          email: null,
+          emailVerified: false,
+        }),
+        { action: "link", userId: id },
+      );
+    } finally {
+      await db.query(`DELETE FROM trexdb."user" WHERE id LIKE $1`, [`p${run}%`]);
+      await db.end();
+      _resetDekCache();
     }
   },
 });
