@@ -87,22 +87,37 @@ export function emailDomain(email: string): string | null {
  * trex's migration runner substitutes nothing into a V-file and checksums the
  * text it executes (plugins/migration/src/lib.rs).
  *
- * Never resolvable and never routed to. `is_placeholder_email` is the flag code
- * branches on — federation's findLinkCandidateByEmail already does, and any
- * mail path added later must — and the domain is only what makes the address
- * inert if something tries anyway. isPlaceholderAddress below is how a row
- * supplied with an address in this domain gets the same flag as one
- * synthesised into it.
+ * NOT A RESERVED SENTINEL, and an earlier version of this comment claiming it
+ * was unroutable was simply wrong. d2e sets TLS__INTERNAL__DOMAIN="d2e.local"
+ * and gives every service a resolvable hostname under it with internal TLS, so
+ * in the deployment this constant is named after the domain resolves. It is
+ * chosen for one reason only: it is what d2e's migration actually mints,
+ * `<username>@<IDP__INITIAL_USER__DOMAIN>` with that default. A sentinel trex
+ * picked for itself — placeholder.invalid, say — would be unroutable and
+ * useless, because the addresses arriving would not be in it and every
+ * migrated user would land unflagged again.
+ *
+ * So the safety is not in the domain. It is in `is_placeholder_email`, which
+ * federation's findLinkCandidateByEmail already branches on and any mail path
+ * added later must, and in the provider's emailDomainAllowlist, which is what
+ * decides whether an upstream may speak for a domain at all.
+ * isPlaceholderAddress below is how a row supplied with an address in this
+ * domain gets the same flag as one synthesised into it.
+ *
+ * PHASE 3, and it cannot be done here alone: moving to a genuinely reserved
+ * domain means changing what d2e mints and what trex recognises in one step,
+ * across two repositories. Changing either side by itself reintroduces exactly
+ * the finding this flag exists to answer.
  */
 export const PLACEHOLDER_EMAIL_DOMAIN = "d2e.local";
 
 /**
  * Whether an address is synthetic BY CONSTRUCTION, whoever supplied it.
  *
- * The domain is trex's own and resolves nowhere, so nothing legitimately
- * receives mail there and no upstream can speak for it. An address in it is
- * therefore a placeholder regardless of which path produced it — which is the
- * gap this closes. provisionUser used to flag only the addresses it synthesised
+ * The domain is the one d2e's migration mints into (see above — it resolves,
+ * and that is fine), so an address in it was assembled to stand in for a
+ * missing one rather than asserted by anybody. It is therefore a placeholder
+ * regardless of which path produced it — which is the gap this closes. provisionUser used to flag only the addresses it synthesised
  * itself, i.e. only the identities that asserted none; but the federation admin
  * link cannot reach that branch at all, because parseLinkRequest requires an
  * address containing '@'. A migration with no address to give sends
@@ -141,7 +156,17 @@ export const PLACEHOLDER_EMAIL_DOMAIN = "d2e.local";
  * exception untrue with it — a mail path that reads the column, or a relaxed
  * unique index, and the reasoning above stops holding.
  *
- * WHAT IT DOES NOT CLAIM is that squatting is harmless. Registering an address
+ * WHAT PROTECTS THE ADMIN-LINK PATH is a different mechanism, worth naming
+ * because the two are easy to conflate: resolveRequestedUser (admin-store.ts)
+ * answers 409 when a user already holds the address under a different id, so a
+ * migration pre-linking `<username>@d2e.local` cannot be pointed at a row a
+ * self-registration squatted. That argument is specific to a link request
+ * carrying a `userId`. A PUT with `userId: null` goes through
+ * resolveUserByEmail instead, which links to whichever row holds the address —
+ * so it would attach the migrated identity to the squatter's account, and the
+ * reasoning here would not cover it.
+ *
+ * WHAT NONE OF THIS CLAIMS is that squatting is harmless. Registering an address
  * before its owner arrives puts their federated identity inside the squatter's
  * account, and "onto the attacker's own row" is precisely that harm, not its
  * absence. But that is decideLink's general posture on every domain, not

@@ -166,7 +166,7 @@ with `user.password_hash` in every row.
 | upstream account rows with no user row | 0 |
 | user rows created by a refused call | 0 |
 
-## 3. FINDING — synthesised addresses arrive unflagged
+## 3. FINDING — synthesised addresses arrive unflagged (FIXED — see §3.1)
 
 ```
   rows on the placeholder domain @d2e.local: 66
@@ -204,18 +204,75 @@ it. Nothing here is a defect in V17 or in the link route — both did exactly wh
 they say. It is a consequence of a caller synthesising addresses under trex's
 placeholder domain without saying they are synthetic.
 
-Two mitigations, either of which closes it, and they are not exclusive:
+Everything above is the rehearsal as it ran, and the counts and transcripts are
+left exactly as recorded. What follows is what changed in answer to it.
 
-* set the migration's user-address domain to something **other** than
-  `d2e.local` — a domain the installation owns, or any dotted domain that is not
-  the placeholder one. Costs nothing and removes the collision entirely.
-* have the caller mark synthesised addresses as such, or give the link API a way
-  to say so, so `is_placeholder_email` means what the rest of the code assumes.
+## 3.1 What was done about it
 
-Until one of them is done, an operator should also read "66 of our users have a
-confirmed address" as false: those addresses are synthetic, unreachable, and
-anything that mails users or shows an address in an admin list will treat them
-as real.
+**trex now flags by domain, so neither mitigation is needed and neither was
+taken.** The rehearsal proposed moving the migration's address domain off
+`d2e.local`, or teaching the link API to mark an address synthetic. Both were
+rejected in favour of the rule that does not depend on the caller: an address
+whose domain is `PLACEHOLDER_EMAIL_DOMAIN` is synthetic by construction,
+whoever supplied it, because that domain is what a migration with no address to
+give mints into.
+
+`isEngineAddressable`'s neighbour `isPlaceholderAddress`
+(`auth/engine-address.ts`) is that rule, and every route that writes a login
+address asks it. A row created on the domain gets `is_placeholder_email = true`,
+`emailVerified = false` and a NULL `email_confirmed_at` — identical to one trex
+synthesised itself, which is the property that matters:
+
+| writer | a `@d2e.local` address is… |
+|---|---|
+| `PUT /federation/links` (this rehearsal's route) | flagged |
+| federated sign-in, auto-provision | flagged |
+| `POST /auth/v1/admin/users` | flagged |
+| MCP `user-create` | flagged |
+| `PUT /auth/v1/user` | flagged, derived on every update rather than cleared |
+| **V17 itself** | flagged — it now sweeps the whole population, not only the rows it mints |
+| `POST /auth/v1/signup` | **not** flagged, deliberately |
+
+`/signup` is excluded on purpose: it creates an account somebody registers for
+themselves, the bootstrap administrator included, and `emailVerified = false`
+would be the wrong outcome there. It is also the one route where the flag buys
+nothing, because `user_email_lower_key` stops a registration taking an address a
+row already holds.
+
+V17's sweep is the one that matters for **this** installation, and it was added
+after this rehearsal because this rehearsal could not have found it: the
+rehearsal ran V17 first against a `trexdb` holding one user, then drove the link
+API. An installation that has already run d2e's IdP migration meets V17 in the
+opposite order, with its users already holding `<username>@d2e.local` as
+ordinary addresses — and the backfill, which only flags what it mints
+(`WHERE u.email IS NULL`), passes straight over them. The sweep beside V17's
+addressability check closes that.
+
+Re-running this rehearsal's driver shape against the fixed code, at the same
+proportions, on both Postgres 15.19 and 17.10:
+
+```
+pass 1: created=69 already_linked=0 other=0
+pass 2 cumulative: created=69 already_linked=69 other=0
+rows: {"total":69,"flagged":66,"verified":3,"misflagged":0,"unflagged_placeholder":0}
+account links: 69
+```
+
+66 flagged where 0 were before, 3 genuine addresses untouched, and the 69/69
+link behaviour — including idempotence on the second pass — unchanged. Flagging
+cannot break the migration because `linkIdentity` resolves by
+`(providerId, accountId)` first and by its own unfiltered address lookup second;
+only the *sign-in* path excludes flagged rows, which is the protection being
+restored.
+
+**One thing the domain rule does not do**, recorded because §5 used to imply
+otherwise: it does not make the addresses real. "66 of our users have a
+confirmed address" is still false — they now say so, which is the whole point,
+and anything that mails users or lists addresses must branch on
+`is_placeholder_email`. Note also that `d2e.local` is **not** an unroutable
+reserved domain: it is d2e's own `TLS__INTERNAL__DOMAIN`, and its services
+resolve under it. The safety is the flag and the provider domain allowlist, not
+unreachability.
 
 ## 4. The two refusals, on real data
 
@@ -267,8 +324,9 @@ characters on one line in a boot log.
 1. **Take the snapshot.** There is no fallback engine; recovery is a restore
    plus the previous image.
 2. **Check the IdP migration's user-address domain.** It must be dotted, or V17
-   refuses the whole upgrade and names every affected account. It should also
-   not be `d2e.local`, for the reason in §3.
+   refuses the whole upgrade and names every affected account. `d2e.local` is
+   fine and needs no avoiding — §3.1 — since every route and V17 itself now flag
+   an address on it. Only the dotted requirement is load-bearing.
 3. **Look for directory entries whose username is not usable in an address** — a
    space, an accent, any non-ASCII character, a leading, trailing or doubled dot.
    Each one is a 422 from the link API and a user who is not migrated. Better to
@@ -276,9 +334,10 @@ characters on one line in a boot log.
 4. **Look for two accounts whose addresses differ only by case.** V16 refuses
    the upgrade and will not choose a survivor.
 5. **Expect most users to carry a synthesised address.** On the installation
-   rehearsed here, 66 of 69 do. Anything that mails a user or shows an address
-   needs to know that, and `is_placeholder_email` will not tell it while the
-   migration writes those addresses unflagged.
+   rehearsed here, 66 of 69 do. `is_placeholder_email` now tells you which —
+   after V17, for rows that predate it, and at creation for everything after —
+   so anything that mails a user or shows an address should branch on that
+   column rather than on the domain.
 
 ### What they would see if they did not
 
@@ -292,3 +351,13 @@ characters on one line in a boot log.
   row is correct, and who is told only that their credentials are invalid. That
   is the outcome every guard above exists to prevent, and none of them can
   prevent it once the row is written.
+
+One further thing V17 now repairs, found after this rehearsal and not visible in
+it: a row whose `trexdb.account` credential disagrees with `user.password_hash`.
+develop's `PUT /user` writes the account row before the user row, so a request
+that changed both password and address and collided on the unique index left the
+credential rotated by a request that answered 500. The invariant table in §2
+reads 0 for this because the rehearsed installation never hit that path — but
+the rows exist in installations that have. V17's account backfill no longer
+skips a non-NULL credential, so it sets them back to `user.password_hash`, which
+is authoritative before the cutover.

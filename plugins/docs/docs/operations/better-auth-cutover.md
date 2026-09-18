@@ -10,8 +10,8 @@ stops verifying passwords itself. See
 [Concepts → Auth & Authorization](../concepts/auth-model) for what the engine
 owns and why the GoTrue-shaped router still exists in front of it.
 
-This page is the operator's half: the three things that can go wrong on the way
-through, and what to do about each.
+This page is the operator's half: what can go wrong on the way through, and
+what to do about each.
 
 ## V17 can refuse to apply
 
@@ -135,7 +135,11 @@ federation link answers `unaddressable_email`.) Set it to a dotted domain
 succeed.
 
 **`d2e.local` is usable, with one exception you need to know about.** It is the
-placeholder domain, and a row created on it is normally flagged
+placeholder domain — chosen because it is what d2e's migration mints, not
+because it is reserved or unroutable. d2e's own `TLS__INTERNAL__DOMAIN` is the
+same string and its services resolve under it, so the safety comes from the flag
+and from the provider's domain allowlist, never from the domain being
+unreachable. A row created on it is normally flagged
 `is_placeholder_email`, left `emailVerified = false` and given no
 `email_confirmed_at` — which is what a migration filling a missing address with
 `<username>@d2e.local` should produce. But that is true of five of the six
@@ -165,6 +169,17 @@ mail path is ever added that reads `is_placeholder_email`, or the unique index
 on `lower(email)` is relaxed, the reasoning above stops holding and `/signup`
 has to be brought in line with the other five.
 
+**What protects the migration path is a different mechanism**, worth naming
+because the two are easy to conflate: an admin link request carrying a `userId`
+is answered `409` when another row already holds the address
+(`resolveRequestedUser`), so a pre-link of `<username>@d2e.local` cannot be
+pointed at a row a self-registration squatted. That argument is specific to a
+request with a `userId`. A `PUT /federation/links` with `userId: null` resolves
+by address instead and links to whichever row holds it — so it would attach the
+migrated identity to the squatter's account, and this reasoning would not cover
+it. Migrations that pin the upstream id, which is what d2e's does, are the case
+the 409 protects.
+
 **It does not claim that squatting is harmless.** Registering an address before
 its owner arrives puts that person's federated identity inside the squatter's
 account, which is a real harm rather than the absence of one. But that is
@@ -179,10 +194,10 @@ administrator is created verified and unflagged.** That is intended. Everything
 migrated afterwards, through any of the other five routes, is flagged. Only the
 dotted-domain requirement is load-bearing for the 422.
 
-## The rolling-deploy constraint
+## The two password columns, and the rows that already disagree
 
-`/change-password` and sign-in trust different columns, and during a rolling
-deploy they can briefly disagree.
+`/change-password` and sign-in trust different columns, and on some rows they
+already disagree — in databases running today, not only during a deploy.
 
 - **Sign-in** (`POST /token`, password grant) *verifies* against
   `trexdb.account.password` and nothing else. That is the engine's column. It
@@ -196,41 +211,62 @@ deploy they can briefly disagree.
   still writes.
 
 They disagree in **one direction only**: `account.password` current,
-`user.password_hash` stale. Exactly one thing produces it — a node still running
-code from before `5a48ab98` serving a `PUT /user` that carried both a password
-and an address that collided. That code wrote the credential first and the user
-row second, so the row update failed and the new password landed on
-`account.password` alone.
+`user.password_hash` stale. What produces it is **the code you are running
+today**, not a deploy window. develop's `PUT /user` (`720b3c33`,
+`auth-router.ts:566`) writes `trexdb.account` *before* the `trexdb."user"`
+UPDATE at `:583`, so a request that changed both the password and the address,
+and collided on the unique index, answered 500 with the credential already
+rotated and the user column left behind.
 
-**The consequence is not a lockout, it is the opposite.** The superseded
-password goes on authorizing a password change while the working one is refused
-there. A password the account holder believes they replaced can still be
-presented to `/change-password`.
+**So these rows are already in your database.** This is not something a rolling
+deploy creates; it is something the cutover makes dangerous. Before the cutover
+`user.password_hash` is what signs the account in, so the abandoned credential
+sits there inert. Afterwards `account.password` is what signs it in — and the
+row that was abandoned by a failed request becomes the working password, while
+the password the account holder actually set is refused.
 
-**It heals on the next successful password change or admin reset** — both write
-the two columns in one transaction — and the window needs a pre-`5a48ab98` node
-still serving traffic. So:
+**V17 reconciles them, and you do not have to do anything.** Its account
+backfill sets every diverged credential back to `user.password_hash`, which is
+authoritative because the migration runs before the cutover, when that column
+is the one every successful change wrote last. The statement carries no
+`AND a.password IS NULL` guard precisely so that it repairs rather than skips.
 
-- Do not run a pre-`5a48ab98` node alongside a post-V17 one for longer than the
-  deploy takes. A blue/green or a rolling restart that completes is fine; a
-  half-finished rollout left in place overnight is not.
-- If one was left running, this closes the window for the whole population:
+**What remains, for a database that has not run V17 yet**, is not a lockout but
+its opposite: the superseded password goes on authorizing a password change
+while the working one is refused there, so a password the account holder
+believes they replaced can still be presented to `/change-password`. It also
+heals on the next successful password change or admin reset, both of which
+write the two columns in one transaction.
 
-  ```sql
-  UPDATE trexdb."user" u
-     SET password_hash = a.password, "updatedAt" = NOW()
-    FROM trexdb.account a
-   WHERE a."userId" = u.id
-     AND a."providerId" = 'credential'
-     -- NOT NULL is load-bearing: an account row with no credential yet is a
-     -- user whose password still lives only on user.password_hash, and
-     -- copying NULL over it would delete their password.
-     AND a.password IS NOT NULL
-     AND a.password IS DISTINCT FROM u.password_hash;
-  ```
+To see how many rows are affected before you migrate:
 
-Phase 2 must revisit this if Better Auth's own change-password or reset
-endpoints are ever mounted: those write `account.password` alone, at which point
+```sql
+SELECT count(*)
+  FROM trexdb.account a
+  JOIN trexdb."user" u ON u.id = a."userId"
+ WHERE a."providerId" = 'credential'
+   AND u.password_hash IS NOT NULL
+   AND a.password IS DISTINCT FROM u.password_hash;
+```
+
+Those are the rows V17 repairs, with this — the direction matters, and it is
+`user` → `account`, because pre-cutover `user.password_hash` is the column every
+successful password change wrote last:
+
+```sql
+UPDATE trexdb.account a
+   SET password = u.password_hash, "updatedAt" = NOW()
+  FROM trexdb."user" u
+ WHERE a."userId" = u.id
+   AND a."providerId" = 'credential'
+   -- IS NOT NULL is load-bearing: a user row with no password is a federated
+   -- account, and copying NULL over its credential would remove one it has.
+   AND u.password_hash IS NOT NULL
+   AND a.password IS DISTINCT FROM u.password_hash;
+```
+
+Phase 2 must revisit the split itself if Better Auth's own change-password or
+reset endpoints are ever mounted: those write `account.password` alone, at which point
 the split stops being a transitional artefact of this rollout and becomes
 permanent. The reasoning lives on `storedPasswordHash` in
 `core/server/auth/auth-router.ts`.

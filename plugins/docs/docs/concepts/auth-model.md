@@ -185,8 +185,10 @@ asserted it and nothing resolves it. Two rules follow:
 - **Nothing may mail it.** trex sends no mail today, so this is a constraint on
   whatever is added next — a password-reset mail, a notification plugin, an
   export that feeds a mailing list. Branch on `is_placeholder_email`, not on the
-  domain, and skip the row. `d2e.local` does not resolve, so the best outcome is
-  a bounce; the worst is mis-delivery if the domain is ever registered.
+  domain, and skip the row. And branch on it rather than assuming the domain is
+  unreachable: `d2e.local` is d2e's own internal service domain
+  (`TLS__INTERNAL__DOMAIN`), chosen here because it is what d2e's migration
+  mints, not because it is reserved. Mail sent there goes somewhere.
 - **Federated sign-in never matches a candidate user on one.** Enforced in
   `core/server/auth/federation/providers.ts`: an upstream asserting
   `<someone else's subject>@d2e.local` as a verified address would otherwise be

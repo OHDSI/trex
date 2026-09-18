@@ -430,7 +430,13 @@ jobs:
           # construction, the schema-drift guard, the federation link rules (in
           # federation.test.ts for sign-in, admin.test.ts for the pre-link the
           # migration drives), the V17 slug parity, the email-case account
-          # takeover and the MCP user-create door. All of them
+          # takeover, the MCP user-create door, and the three-way parity between
+          # this predicate, V17's expression and the live engine
+          # (auth-engine-cutover.test.ts, the one DATABASE_URL-gated auth file
+          # that was missing from this list), and V17's behaviour over a
+          # population that predates it (v17-migration.test.ts, which builds its
+          # own database at V16 because every other file here runs against one
+          # where V17 has already been applied). All of them
           # gate on DATABASE_URL and SKIP without one, so a service that never
           # came up, a half-applied schema or a renamed variable would report
           # green while testing none of it.
@@ -443,12 +449,14 @@ jobs:
           # ignored test somebody adds elsewhere under auth/ for its own good
           # reasons.
           for f in auth/auth-router.contract.test.ts \
+                   auth/auth-engine-cutover.test.ts \
                    auth/better-auth.test.ts \
                    auth/schema-validate.test.ts \
                    auth/federation/federation.test.ts \
                    auth/federation/admin.test.ts \
                    auth/federation/placeholder-slug-parity.test.ts \
                    auth/email-case.test.ts \
+                   auth/v17-migration.test.ts \
                    mcp/tools/users.test.ts; do
             # `|| true` so a no-match grep does not kill the script under
             # `bash -e {0}` before the diagnosis below can be printed. A run
