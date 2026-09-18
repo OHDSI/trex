@@ -130,14 +130,28 @@ export async function findLinkedUser(
  * table, against the same predicate the migration uses.
  */
 export function placeholderLocalPart(signInId: string): string {
-  return signInId
+  const collapsed = signInId
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, "-")
     // `.` is inside the allowed set, so a run of them survives the line above:
     // `foo..bar` would mint an address with an empty atom, which the engine
     // rejects and V17 refuses to migrate past.
-    .replace(/\.{2,}/g, ".")
-    .replace(/^[-.]+|[-.]+$/g, "");
+    .replace(/\.{2,}/g, ".");
+  // Scanned from the ends rather than trimmed with `/^[-.]+|[-.]+$/`, which is
+  // quadratic on the shapes an upstream subject is free to take: `[-.]+$` runs
+  // its greedy match again from every position inside an interior run of
+  // separators, and a few thousand of them cost seconds. The trim only ever
+  // needed the two ends, so it only looks at them.
+  let start = 0;
+  let end = collapsed.length;
+  while (start < end && isSeparator(collapsed[start])) start += 1;
+  while (end > start && isSeparator(collapsed[end - 1])) end -= 1;
+  return collapsed.slice(start, end);
+}
+
+/** The characters V17's `btrim(..., '-.')` takes off either end. */
+function isSeparator(character: string): boolean {
+  return character === "-" || character === ".";
 }
 
 /**
