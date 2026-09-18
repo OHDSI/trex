@@ -155,3 +155,24 @@ measurement, but it means such a page can only ever bounce to `/oauth2/authorize
 makes that acceptable, so the two facts are load-bearing together.
 
 Neither WebAPI nor the portal sends `prompt` today; this is a guard against a future relying party.
+
+## The schema this phase owes
+
+Established while standing the spikes up. `getMigrations(auth.options)` from `better-auth/db/migration`,
+run with the options block above against a database at `core/schema/V1..V17`, reported:
+
+- **tables to create:** `oauthClient`, `oauthResource`, `oauthClientResource`, `oauthRefreshToken`,
+  `oauthAccessToken`, `oauthConsent`, `oauthClientAssertion`;
+- **columns to add to the existing `jwks` table:** `expiresAt`, `alg`, `crv`;
+- plus `Column "createdAt" on table "jwks" stays nullable while the schema declares the field required`.
+
+So `V1..V17`'s `jwks` table is not the shape better-auth 1.7.5's jwt plugin declares. Since 1.7 a schema
+mismatch is a `SchemaMismatchError` at boot and on every request that awaits validation, not a startup
+warning — which is what `auth/schema-validate.test.ts` exists to catch — so a migration adding those three
+columns, and backfilling and NOT NULL-ing `createdAt`, is a prerequisite for turning the jwt plugin on,
+alongside the seven `oauth*` tables. The spikes created them with `runMigrations()` in a scratch database,
+which is not how trex migrates.
+
+Foreign keys observed on the created tables, for whoever writes that migration by hand:
+`oauthClientResource."clientId" → oauthClient."clientId" ON DELETE CASCADE` and
+`oauthClientResource."resourceId" → oauthResource.identifier ON DELETE CASCADE`.
