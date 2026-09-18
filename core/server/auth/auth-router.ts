@@ -267,6 +267,19 @@ async function writePassword(
   alsoInTransaction: (db: any) => Promise<void>,
 ) {
   const client = await pool.connect();
+
+  // Exactly one release, in the finally, so no path can leak the connection and
+  // no path can release it twice. ../db.ts builds the pool with pg's defaults —
+  // ten clients, and callers wait forever for the eleventh — so a borrow that
+  // returns nothing is not a slow leak: ten successful password changes and
+  // every query in this router blocks indefinitely.
+  //
+  // The argument is what distinguishes the two ways of giving a client back. A
+  // ROLLBACK that fails for anything but a dead socket leaves the session inside
+  // an aborted transaction, and returning it clean hands the next borrower a
+  // connection that answers everything with "current transaction is aborted".
+  // Released with the error, pg destroys it instead.
+  let destroyWith: Error | undefined;
   try {
     await client.query("BEGIN");
     await alsoInTransaction(client);
@@ -275,15 +288,12 @@ async function writePassword(
   } catch (err) {
     try {
       await client.query("ROLLBACK");
-      client.release();
     } catch (rollbackFailure) {
-      // A ROLLBACK that fails for anything but a dead socket leaves the session
-      // inside an aborted transaction, and releasing it clean hands the next
-      // borrower a connection that answers everything with "current transaction
-      // is aborted". Released with the error, pg destroys it instead.
-      client.release(rollbackFailure as Error);
+      destroyWith = rollbackFailure as Error;
     }
     throw err;
+  } finally {
+    client.release(destroyWith);
   }
 }
 

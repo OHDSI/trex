@@ -490,9 +490,15 @@ dbTest("a pre-linked user with a 12-character id signs in end to end", async (db
   // GoTrue-compatible GET /user with that token.
   const app = express();
   app.use(authRouter);
-  // Bound to the loopback rather than the wildcard: the ephemeral range
-  // contains the port Postgres listens on, and a wildcard bind on it makes
-  // every later connection to 127.0.0.1:<that port> reach this server instead.
+  // Bound to the loopback rather than the wildcard. The ephemeral range contains
+  // the port Postgres listens on, and a wildcard bind is allowed to take it
+  // while Postgres holds 127.0.0.1 specifically — but that binding does not win
+  // the traffic: BSD routes a connection to the most specific match, so
+  // 127.0.0.1:<that port> still reaches Postgres. What breaks is this test's own
+  // fetch, answered by Postgres, which makes nothing of an HTTP request and
+  // closes the socket — "connection closed before message completed". Binding
+  // the loopback turns the same collision into an EADDRINUSE nobody can miss.
+  //
   // Awaited, because binding to a host resolves the address first and so is not
   // synchronous the way the wildcard bind was — server.address() is still null
   // when listen() returns.
