@@ -533,6 +533,14 @@ router.put("/user", apiLimiter, async (req, res) => {
     if (email) {
       updates.push(`email = $${paramIdx++}`);
       values.push(email);
+      // The flag means "this address is synthesised, not one anybody gave"
+      // (V16's column comment), and this is the one route that writes an
+      // address the account holder chose. It has to come off with the old
+      // value: findLinkCandidateByEmail excludes flagged rows, so a federated
+      // user who sets a real address here and stayed flagged could never be
+      // linked by a provider asserting it — refused as no_account, or, under
+      // auto-provision, a UNIQUE violation on user_email_key.
+      updates.push(`is_placeholder_email = false`);
     }
 
     if (password) {

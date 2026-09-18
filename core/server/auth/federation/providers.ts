@@ -302,9 +302,14 @@ async function synthesisePlaceholderEmail(
  * depth behind it rather than the control (emailDomainAllowed permits
  * everything when the list is unset, which is the default).
  *
- * The exclusion costs a migrated user nothing: resolveFederatedUser answers
- * from the (providerId, accountId) account row first and only asks about email
- * for an upstream identity it has never seen.
+ * The exclusion costs a migrated user nothing while their address is still
+ * synthesised: resolveFederatedUser answers from the (providerId, accountId)
+ * account row first and only asks about email for an upstream identity it has
+ * never seen. It would cost them everything once they replace it, so the flag
+ * is cleared wherever a caller-supplied address is written — PUT /user
+ * (auth-router.ts), the only such route. A flag that is never cleared turns
+ * "unclaimable" into "unlinkable for good", which is why the two belong in one
+ * change and not in two.
  *
  * The federation *admin* API's linkIdentity (admin-store.ts) still matches a
  * placeholder by address, through email lookups of its own that never reach
