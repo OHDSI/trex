@@ -50,7 +50,9 @@ export async function importOidcSigningKey(): Promise<{ kid: string; imported: b
   // with `symmetricDecrypt({ data: JSON.parse(key.privateKey) })`
   // (better-auth@1.7.5 plugins/jwt/utils.ts, plugins/jwt/sign.ts). The
   // ciphertext is bare hex, which JSON.parse rejects, so a row holding it
-  // surfaces as "Failed to decrypt private key" on the first token signed.
+  // throws a raw SyntaxError on the first token signed: sign.ts attaches its
+  // "Failed to decrypt private key" catch to symmetricDecrypt, and JSON.parse
+  // runs first, outside it.
   await pool.query(
     `INSERT INTO trexdb.jwks (id, "publicKey", "privateKey", alg, "createdAt")
      VALUES ($1, $2, $3, 'RS256', NOW())
