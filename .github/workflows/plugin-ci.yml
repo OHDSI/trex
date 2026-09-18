@@ -336,10 +336,24 @@ jobs:
       || (github.event_name == 'pull_request' && !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      # Both legs run to completion. A failure on one major version is a
+      # different diagnosis from a failure on both, and cancelling the survivor
+      # would throw that away.
+      fail-fast: false
+      matrix:
+        # 17 is what the auth suite is developed against; 15 is what production
+        # runs (develop.d2e.sg, postgres:15-alpine). The V13..V17 migrations and
+        # the engine cutover were rehearsed on both and behaved identically, so
+        # this leg is regression protection for what lands next rather than a
+        # suspected difference — the one thing that would make it expensive is
+        # a schema change that quietly needs a 16+ feature, which is exactly
+        # what it is here to catch.
+        postgres: ["15-alpine", "17-alpine"]
+    name: core-server-auth-tests (postgres ${{ matrix.postgres }})
     services:
       postgres:
-        # Postgres 17, the version the auth suite is developed against.
-        image: postgres:17-alpine
+        image: postgres:${{ matrix.postgres }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -410,8 +424,10 @@ jobs:
           deno test --no-check --allow-all auth/ 2>&1 | tee "$log"
 
           # The files below carry the wire contract, the Better Auth engine
-          # construction, the schema-drift guard, the federation link rules, the
-          # V17 slug parity and the email-case account takeover. All of them
+          # construction, the schema-drift guard, the federation link rules (in
+          # federation.test.ts for sign-in, admin.test.ts for the pre-link the
+          # migration drives), the V17 slug parity and the email-case account
+          # takeover. All of them
           # gate on DATABASE_URL and SKIP without one, so a service that never
           # came up, a half-applied schema or a renamed variable would report
           # green while testing none of it.
@@ -427,6 +443,7 @@ jobs:
                    auth/better-auth.test.ts \
                    auth/schema-validate.test.ts \
                    auth/federation/federation.test.ts \
+                   auth/federation/admin.test.ts \
                    auth/federation/placeholder-slug-parity.test.ts \
                    auth/email-case.test.ts; do
             # `|| true` so a no-match grep does not kill the script under
