@@ -243,21 +243,20 @@ async function adoptLegacyCredential(user: DbUser) {
 }
 
 /**
- * The reverse mirror: user.password_hash is the pre-V17 home of the credential
- * and is still what getPasswordHash prefers, so a user whose password lives
- * only in account.password gets it copied back on their way through. Both
- * columns therefore hold the same value on every row this router has seen, and
- * the mirror can be dropped with the column rather than before it.
- */
-/**
- * Both halves of a password change, or neither.
+ * The two columns a password lives in, written together or not at all.
  *
  * account.password is what sign-in reads and user.password_hash is its mirror,
  * so a request that writes one and then fails does not leave a stale copy — it
- * leaves the account holding a password nobody was told about. `PUT /user` can
- * fail after the credential is written (a duplicate address violates
- * user_email_lower_key and the route answers 500), and the mirror's IS NULL
- * guard cannot repair a column that is merely out of date.
+ * leaves the account holding a password nobody was told about. `PUT /user` used
+ * to do exactly that: it wrote the credential first, and a duplicate address
+ * then violated user_email_lower_key and the route answered 500 with the
+ * password already rotated. The mirror's IS NULL guard cannot repair a column
+ * that is merely out of date.
+ *
+ * The scope is the two writes and nothing more. A route can still fail *after*
+ * this returns — `PUT /user` re-reads the row afterwards and can answer 404 —
+ * so what is guaranteed is that the two columns never disagree, not that a
+ * request answering an error changed nothing at all.
  */
 async function writePassword(
   userId: string,
@@ -274,13 +273,27 @@ async function writePassword(
     await writeCredential(userId, hash, client);
     await client.query("COMMIT");
   } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
+    try {
+      await client.query("ROLLBACK");
+      client.release();
+    } catch (rollbackFailure) {
+      // A ROLLBACK that fails for anything but a dead socket leaves the session
+      // inside an aborted transaction, and releasing it clean hands the next
+      // borrower a connection that answers everything with "current transaction
+      // is aborted". Released with the error, pg destroys it instead.
+      client.release(rollbackFailure as Error);
+    }
     throw err;
-  } finally {
-    client.release();
   }
 }
 
+/**
+ * The reverse mirror: user.password_hash is the pre-V17 home of the credential
+ * and is still what getPasswordHash prefers, so a user whose password lives
+ * only in account.password gets it copied back on their way through. Both
+ * columns therefore hold the same value on every row this router has seen, and
+ * the mirror can be dropped with the column rather than before it.
+ */
 async function mirrorCredentialOntoUser(userId: string) {
   await pool.query(
     `UPDATE trexdb."user" u
@@ -390,10 +403,12 @@ async function authenticateUser(
  * three the same addresses, so a zod upgrade that moves the rule fails a test
  * rather than drifting quietly.
  *
- * The routes that need it are the ones that hand an address to the engine.
- * PUT /user does not: it is pinned by the wire contract, an address it writes
- * is not verified anywhere today, and rejecting one here would be a separate
- * decision about existing accounts rather than about new ones.
+ * Every route that writes an address has to ask it, not only the ones that hand
+ * one to the engine directly. V17 refuses to migrate an installation holding an
+ * address the engine cannot resolve, and /signup refuses to create one; a
+ * PUT /user that accepted one would be a back door into the exact state both of
+ * those exist to prevent, one request after the migration refused it, and the
+ * account that walked through it could never sign in again.
  */
 const ENGINE_EMAIL =
   /^(?:[A-Za-z0-9_'+\-]+\.)*[A-Za-z0-9_'+\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$/;
@@ -820,6 +835,19 @@ router.put("/user", apiLimiter, async (req, res) => {
     }
 
     if (email) {
+      // Refused for the same reason /signup refuses it and V17 refuses to
+      // migrate one: the engine validates the address before it looks anybody
+      // up, so an account that took this one would be locked out of its own
+      // sign-in permanently, with nothing back but "invalid credentials". The
+      // route's own vocabulary for a body it will not take is validation_failed,
+      // which is what it already answers for a password that is too short.
+      if (!isEngineAddressable(email)) {
+        res.status(422).json({
+          error: "validation_failed",
+          error_description: "Email must be a valid address",
+        });
+        return;
+      }
       updates.push(`email = $${paramIdx++}`);
       values.push(email);
       // The flag means "this address is synthesised, not one anybody gave"

@@ -51,7 +51,7 @@ function cutoverTest(name: string, fn: (c: Ctx) => Promise<void>) {
 
       const app = express();
       app.use("/trex/auth/v1", authRouter);
-      const server = app.listen(0);
+      const server = app.listen(0, "127.0.0.1");
       await new Promise<void>((r) => server.once("listening", () => r()));
       const { port } = server.address() as { port: number };
       try {
@@ -408,9 +408,12 @@ const ADDRESSES: Array<[string, boolean]> = [
   ["o'brien@example.test", true],
   ["_under@example.test", true],
   ["synthesised-placeholder@d2e.local", true],
-  // V2 seeds this one. If a stock installation could not migrate, V17's refusal
-  // would be a trap rather than a warning.
-  ["admin@trex.local", true],
+  // The shape V2's seeded admin has — a dotted, non-public TLD. Spelled so that
+  // nothing can hold it, because the engine is asked these addresses for real
+  // and a table entry somebody owns turns the probe into a password attempt
+  // against their account. The seeded address itself is asserted below, where
+  // no engine call is involved.
+  ["not-the-seed@trex.local", true],
   ["not-an-address", false],
   ["no-domain@", false],
   ["@no-local.test", false],
@@ -490,9 +493,13 @@ cutoverTest("trex's address rule is the engine's and V17's, over one table", asy
   for (const [address, valid] of ADDRESSES) {
     assertEquals(isEngineAddressable(address), valid, `router: ${address}`);
 
-    // Nobody holds any of these, so a well-formed one reaches the engine's
-    // "no such user" and a malformed one is refused before that. Either way it
-    // throws, and the code says which question it answered.
+    // This is a real sign-in attempt, which is the point — the engine's actual
+    // answer, not a re-reading of its source. Every address above is therefore
+    // chosen so that no installation can hold it: against a developer's own
+    // DATABASE_URL an address somebody owns would make this a password attempt
+    // on their account, logged by the engine as one. A well-formed address
+    // reaches "no such user" and a malformed one is refused before the lookup;
+    // either way it throws, and the code says which question it answered.
     const refusal = await auth.api.signInEmail({
       body: { email: address, password: "long-enough-password" },
     }).then(() => null, (err: { body?: { code?: string } }) => err.body?.code);
@@ -505,8 +512,52 @@ cutoverTest("trex's address rule is the engine's and V17's, over one table", asy
     ]);
     assertEquals(rows[0].refused, !valid, `V17: ${address}`);
   }
+  // The address V2 seeds into every installation, asserted against the predicate
+  // alone: if a stock install could not migrate, V17's refusal would be a trap
+  // rather than a warning. Not put through the loop above, because that loop
+  // signs in for real and this is an address somebody actually holds.
+  assertEquals(isEngineAddressable("admin@trex.local"), true);
+
   // Guard against the loop silently doing nothing.
   assertEquals(ADDRESSES.length, 14);
+});
+
+cutoverTest("PUT /user refuses an address that would lock the account out", async ({ url, pool }) => {
+  const user = await createLegacyUser(pool);
+  const before = await pool.query(`SELECT email FROM trexdb."user" WHERE id = $1`, [user.id]);
+
+  // The back door V17 and /signup both close: an authenticated user could set
+  // an address the engine cannot resolve and never sign in again, one request
+  // after the migration refused to allow that state to exist.
+  const refused = await request(
+    "PUT",
+    `${url}/user`,
+    { email: "ops@localhost" },
+    await bearer(user),
+  );
+  assertEquals(refused.status, 422);
+  assertEquals(await refused.json(), {
+    error: "validation_failed",
+    error_description: "Email must be a valid address",
+  });
+  assertEquals(
+    (await pool.query(`SELECT email FROM trexdb."user" WHERE id = $1`, [user.id])).rows[0].email,
+    before.rows[0].email,
+  );
+
+  // A well-formed address still behaves exactly as it did: 200, the row written
+  // with the spelling that was sent, and the account still able to sign in.
+  const moved = uniqueEmail("Moved");
+  const accepted = await request("PUT", `${url}/user`, { email: moved }, await bearer(user));
+  assertEquals(accepted.status, 200);
+  assertEquals((await accepted.json()).email, moved);
+  assertEquals(
+    (await pool.query(`SELECT email FROM trexdb."user" WHERE id = $1`, [user.id])).rows[0].email,
+    moved,
+  );
+  const signedIn = await grant(url, moved, PASSWORD);
+  assertEquals(signedIn.status, 200);
+  await signedIn.text();
 });
 
 Deno.test("a password that is not a string is a credential failure, not a throw", async () => {

@@ -63,7 +63,7 @@ export async function startContractServer(): Promise<
   const { authRouter } = await import("./auth-router.ts");
   const app = express();
   app.use("/trex/auth/v1", authRouter);
-  const server = app.listen(0);
+  const server = app.listen(0, "127.0.0.1");
   await new Promise<void>((r) => server.once("listening", () => r()));
   const { port } = server.address() as { port: number };
   return {
@@ -93,7 +93,7 @@ export async function startMountedContractServer(): Promise<
       });
     });
   }
-  const server = app.listen(0);
+  const server = app.listen(0, "127.0.0.1");
   await new Promise<void>((r) => server.once("listening", () => r()));
   const { port } = server.address() as { port: number };
   return {
