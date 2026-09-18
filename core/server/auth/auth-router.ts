@@ -208,6 +208,35 @@ async function fetchUserById(id: string): Promise<DbUser | null> {
  * engine keeps it. Returning null is what distinguishes an account with no
  * credential from a wrong password, which /change-password is pinned to report
  * as two different sentences — the engine reports both the same way.
+ *
+ * THE TWO SIDES TRUST DIFFERENT COLUMNS, AND THAT IS DELIBERATE.
+ * This resolves user.password_hash first and falls back to account.password.
+ * authenticateUser signs in, and a sign-in reads account.password and nothing
+ * else. So /change-password judges the current password by the user column
+ * while /token judges it by the account column.
+ *
+ * They can disagree in one direction only: account current, user stale. What
+ * produces it is a node that has not restarted into 5a48ab98 serving PUT /user
+ * with both a password and an address that collides — that code wrote the
+ * credential first and the user row after, so the row update failed and left
+ * the new password on account.password alone. Nothing produces the reverse:
+ * adoptLegacyCredential fills account.password only while it IS NULL, and every
+ * path here writes both columns together.
+ *
+ * The consequence is not a lockout, it is the opposite, and that is why it is
+ * written down: the superseded password goes on authorizing a password change
+ * while the working one is refused. A password the account holder believes they
+ * replaced can still be presented to /change-password. It heals on the next
+ * successful change or admin reset — both go through writePassword, which sets
+ * the two columns in one transaction — and the window needs a pre-5a48ab98 node
+ * still serving traffic.
+ *
+ * Preferring account.password here is not the fix: the wire contract pins the
+ * user column working beside a stale credential, because that is the state a
+ * node not yet restarted into V17 still writes. PHASE 2 MUST REVISIT THIS if
+ * Better Auth's own change-password or reset endpoints are ever mounted. Those
+ * write account.password alone, so the split stops being a transitional
+ * artefact of the rollout and becomes permanent.
  */
 async function storedPasswordHash(
   userId: string,
@@ -410,6 +439,10 @@ async function canonicaliseLoginAddress(user: DbUser): Promise<string> {
  * Returns null only for a failed credential. Anything the engine reports as its
  * own failure is re-thrown, so a scrypt or database failure reaches the route's
  * error handler as a 500 instead of being answered as a wrong password.
+ *
+ * This is the account.password side of the split documented on
+ * storedPasswordHash: a sign-in reads that column and no other, which is why
+ * /change-password does not go through here.
  */
 async function authenticateUser(
   user: DbUser,
