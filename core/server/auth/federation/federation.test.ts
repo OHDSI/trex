@@ -1524,15 +1524,25 @@ Deno.test({
     await db.connect();
     const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
     _setDekForTests(new Uint8Array(32));
+    const decoyEmail = `decoy-${run}@example.test`;
     try {
-      const id = await provisionUser(db, anonymous(`Sub ${run}`), { id: `p${run}` });
+      const id = await provisionUser(db, anonymous(`Sub ${run}`), { id: `p${run}a` });
       await upsertAccount(db, { userId: id, providerId: "logto", accountId: `Sub ${run}` });
+      // The address the email path would resolve to, held by somebody else. An
+      // identity asserting no address at all would take decideLink's no-address
+      // branch and never reach the email query, so it could not tell "consulted
+      // first" from "consulted at all"; this can.
+      await provisionUser(
+        db,
+        { sub: `decoy-${run}`, email: decoyEmail, emailVerified: true },
+        { id: `p${run}b` },
+      );
 
       assertEquals(
         await resolveFederatedUser(db, provider(), {
           sub: `Sub ${run}`,
-          email: null,
-          emailVerified: false,
+          email: decoyEmail,
+          emailVerified: true,
         }),
         { action: "link", userId: id },
       );
@@ -1540,6 +1550,82 @@ Deno.test({
       await db.query(`DELETE FROM trexdb."user" WHERE id LIKE $1`, [`p${run}%`]);
       await db.end();
       _resetDekCache();
+    }
+  },
+});
+
+// The exclusion is only correct while the address is still synthesised. V16's
+// column comment defines the flag as "the address is synthesised, not a contact
+// address", so an address the account holder supplied has to clear it — and
+// PUT /user is the one route that writes a caller-supplied address. Without the
+// clear, closing the takeover path would have made every placeholder user
+// permanently unlinkable: a provider asserting the address they had just set
+// would get `no_account`, or, under auto-provision, a UNIQUE violation on
+// user_email_key surfacing as a 500 out of /callback.
+//
+// Driven through the real route rather than an UPDATE of its own: what is being
+// pinned is that the handler clears the flag, which a hand-written statement
+// would assert about itself.
+Deno.test({
+  name: "[db] a placeholder user who sets a real address becomes linkable again",
+  ignore: !provisionDbUrl,
+  // ../db.ts owns a pool that deliberately outlives the test, as in
+  // auth-router.contract.test.ts.
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const { Client } = await import("npm:pg");
+    const express = (await import("express")).default;
+    const { authRouter } = await import("../auth-router.ts");
+    const { _resetJwtSecretCache, signAccessToken } = await import("../jwt.ts");
+    const { _resetRootKeyCache } = await import("../keys.ts");
+
+    _resetRootKeyCache();
+    _resetJwtSecretCache();
+    Deno.env.set("TREX_ROOT_KEY", btoa(String.fromCharCode(...new Uint8Array(32).map((_, i) => i))));
+
+    const db = new Client({ connectionString: provisionDbUrl });
+    await db.connect();
+    const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+    const chosen = `chosen-${run}@example.test`;
+    const app = express();
+    app.use("/trex/auth/v1", authRouter);
+    const server = app.listen(0);
+    await new Promise<void>((r) => server.once("listening", () => r()));
+    const { port } = server.address() as { port: number };
+    try {
+      const id = await provisionUser(db, anonymous(`Sub ${run}`), { id: `p${run}` });
+      const token = await signAccessToken({ id, email: null, role: "user" }, crypto.randomUUID());
+
+      const res = await fetch(`http://127.0.0.1:${port}/trex/auth/v1/user`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ email: chosen }),
+      });
+      assertEquals(res.status, 200);
+      await res.body?.cancel();
+
+      const { rows } = await db.query(
+        `SELECT email, is_placeholder_email FROM trexdb."user" WHERE id = $1`,
+        [id],
+      );
+      assertEquals(rows, [{ email: chosen, is_placeholder_email: false }]);
+
+      // The point of the clear: the candidate query finds them again, and a
+      // provider asserting the address they chose links rather than refusing.
+      assertEquals(await findLinkCandidateByEmail(db, chosen), { id, role: "user" });
+      assertEquals(
+        await resolveFederatedUser(db, provider(), {
+          sub: `other-${run}`,
+          email: chosen,
+          emailVerified: true,
+        }),
+        { action: "link", userId: id },
+      );
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+      await db.query(`DELETE FROM trexdb."user" WHERE id LIKE $1`, [`p${run}%`]);
+      await db.end();
     }
   },
 });

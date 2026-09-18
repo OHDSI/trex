@@ -105,6 +105,13 @@ export const auth = betterAuth({
       user_metadata: { type: "json", required: false, input: false },
       app_metadata: { type: "json", required: false, input: false },
       mustChangePassword: { type: "boolean", required: false, input: false },
+      // What keeps a synthesised <subject>@d2e.local from being claimed is a
+      // predicate in trex's own SQL (findLinkCandidateByEmail), not anything
+      // Better Auth knows. `plugins` below holds no social or OIDC provider
+      // today; adding one would bring Better Auth's own account linking, which
+      // matches by email inside the adapter and never calls that function — so
+      // it would reopen the takeover on exactly these rows. Any such provider
+      // has to arrive with its own placeholder rule.
       is_placeholder_email: { type: "boolean", required: false, input: false },
     },
   },

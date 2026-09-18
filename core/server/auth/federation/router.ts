@@ -241,8 +241,11 @@ export function registerFederationRoutes(
       // One transaction for the whole write sequence: provisioning a user and
       // then failing to write its account row would leave a user who exists,
       // owns no credential and no upstream link, and cannot sign in by any
-      // route — and whose email would be found by the next flow's
-      // findLinkCandidateByEmail and linked to.
+      // route — and whose email, if the upstream asserted one, would be found
+      // by the next flow's findLinkCandidateByEmail and linked to. A
+      // synthesised address would not be: that query excludes placeholders. So
+      // the transaction is what keeps this out of reach for the address-less
+      // case too, rather than only tidying it.
       let sessionUser;
       await client.query("BEGIN");
       try {
