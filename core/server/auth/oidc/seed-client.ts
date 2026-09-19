@@ -67,6 +67,12 @@ async function registerClient(
   confidential: boolean,
 ): Promise<void> {
   await db.query(
+    // offline_access is in the first-insert default because the plugin issues a
+    // refresh token only when the granted scopes include it
+    // (dist/introspect-njKASm3q.mjs:1799), where trex issued one
+    // unconditionally. A deployment that leaves TREX_OIDC_CLIENT_SCOPES unset
+    // would otherwise lose silent renewal entirely.
+    //
     // `scopes` is the one field only written when configured: COALESCE leaves
     // an unset TREX_OIDC_CLIENT_SCOPES meaning "whatever the row already has",
     // so a deployment that granted a scope by hand does not lose it on the next
@@ -85,7 +91,7 @@ async function registerClient(
      VALUES (
        gen_random_uuid()::text, $1, $2, $3,
        $4::jsonb, $5::jsonb,
-       COALESCE($6::jsonb, '["openid","profile","email"]'::jsonb), $7::jsonb,
+       COALESCE($6::jsonb, '["openid","profile","email","offline_access"]'::jsonb), $7::jsonb,
        $8, $9,
        $10::jsonb, $11::jsonb,
        TRUE, TRUE,
