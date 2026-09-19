@@ -1,5 +1,10 @@
 import { assertEquals, assertThrows } from "jsr:@std/assert";
-import { d2eIdp, isSystemAdminClaims, resolveIdpConfig } from "./idp.ts";
+import {
+  d2eIdp,
+  isSystemAdminClaims,
+  resolveIdpConfig,
+  warnOnUnmatchableAudience,
+} from "./idp.ts";
 
 const LOGTO_ENV = {
   LOGTO__ISSUER: "https://logto.example/oidc",
@@ -177,6 +182,14 @@ Deno.test("trex: D2E_IDP_RESOURCE still overrides the issuer default", () => {
     D2E_IDP_RESOURCE: "https://api.example",
   }, "/trex");
   assertEquals(c.resource, "https://api.example");
+  // The same invariant the default case pins, and the case where it can
+  // actually break: the resource is what the token request names and therefore
+  // what lands in `aud`, so an audience list still derived from the ISSUER
+  // would reject every access token the override just configured. The plugin
+  // does not prefix-match (dist/introspect-njKASm3q.mjs:519 builds `aud` from
+  // the identifiers verbatim), so "close enough" is not a thing here.
+  assertEquals(c.audiences.includes(c.resource), true);
+  assertEquals(c.audiences.includes(c.issuer), false);
 });
 
 Deno.test("trex: the requested scope asks for offline_access", () => {
@@ -293,4 +306,80 @@ Deno.test("trex: without an internal base everything stays on the issuer", () =>
   }, "/trex");
   assertEquals(c.tokenUrl, `${c.issuer}/oauth2/token`);
   assertEquals(c.jwksUri, `${c.issuer}/.well-known/jwks.json`);
+});
+
+// ── The boot-time audit ─────────────────────────────────────────────────────
+Deno.test("an audience list that cannot match an access token is warned about", () => {
+  // D2E_IDP_AUDIENCES REPLACES the default pair, and the value that was right
+  // before the provider moved -- the bare client id -- is now the one that
+  // rejects every access token. Nothing else connects that setting to the 401.
+  const logged: string[] = [];
+  const warned = warnOnUnmatchableAudience({
+    D2E_IDP: "trex",
+    TREX_OIDC_ISSUER: "https://d2e.example:41100",
+    TREX_OIDC_CLIENT_ID: "d2e-portal",
+    D2E_IDP_AUDIENCES: "d2e-portal",
+  }, (m) => logged.push(m));
+  assertEquals(warned, true);
+  assertEquals(logged.length, 1);
+  // The symptom, named, so the operator can search for what they are seeing.
+  assertEquals(logged[0].includes("401"), true);
+  assertEquals(logged[0].includes("https://d2e.example:41100/trex/oidc"), true);
+});
+
+Deno.test("the default audience list is not warned about", () => {
+  const logged: string[] = [];
+  const warned = warnOnUnmatchableAudience({
+    D2E_IDP: "trex",
+    TREX_OIDC_ISSUER: "https://d2e.example:41100",
+    TREX_OIDC_CLIENT_ID: "d2e-portal",
+  }, (m) => logged.push(m));
+  assertEquals(warned, false);
+  assertEquals(logged, []);
+});
+
+Deno.test("a list matching an overridden resource is not warned about", () => {
+  // The legitimate configuration in which the ISSUER is absent on purpose: a
+  // deployment that registered a resource of its own. Checking the issuer
+  // rather than the resource would cry wolf at exactly this deployment, and a
+  // warning an operator learns to ignore is worse than none.
+  const logged: string[] = [];
+  const warned = warnOnUnmatchableAudience({
+    D2E_IDP: "trex",
+    TREX_OIDC_ISSUER: "https://d2e.example:41100",
+    TREX_OIDC_CLIENT_ID: "d2e-portal",
+    D2E_IDP_RESOURCE: "https://api.example",
+    D2E_IDP_AUDIENCES: "https://api.example,d2e-portal",
+  }, (m) => logged.push(m));
+  assertEquals(warned, false);
+  assertEquals(logged, []);
+});
+
+Deno.test("an empty audience list is left alone, and logto is not audited", () => {
+  // Empty is the documented "do not check the audience at all"; boot is not the
+  // place to overrule it. Logto's `aud` is its own resource API and owes this
+  // provider nothing.
+  const logged: string[] = [];
+  assertEquals(
+    warnOnUnmatchableAudience({
+      D2E_IDP: "trex",
+      TREX_OIDC_ISSUER: "https://d2e.example:41100",
+      D2E_IDP_AUDIENCES: "",
+    }, (m) => logged.push(m)),
+    false,
+  );
+  // Deliberately the shape that WOULD warn under trex: a resource the audience
+  // list does not name. Logto's audiences and its resource API are unrelated
+  // settings and a mismatch between them is not this provider's business, so
+  // the IdP guard has to be what stops it -- not the incidental fact that most
+  // Logto deployments leave LOGTO__RESOURCE_API unset.
+  assertEquals(
+    warnOnUnmatchableAudience({
+      LOGTO__ISSUER: "https://logto.example/oidc",
+      LOGTO__AUDIENCES: "https://portal.example",
+      LOGTO__RESOURCE_API: "https://api.example",
+    }, (m) => logged.push(m)),
+    false,
+  );
+  assertEquals(logged, []);
 });

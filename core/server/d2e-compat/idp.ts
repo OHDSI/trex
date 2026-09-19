@@ -77,22 +77,41 @@ export function resolveIdpConfig(
     const internalBase = env.TREX_OIDC_INTERNAL_BASE
       ? issuerUrl(env.TREX_OIDC_INTERNAL_BASE, `${basePath}/oidc`)
       : issuer;
+    // The identifier the token request names as its RFC 8707 resource, and
+    // therefore the value the access token carries in `aud`. Hoisted out of the
+    // returned object because the audience list is derived from it: the two
+    // describe the same identifier from opposite ends, and a deployment that
+    // overrides one without the other rejects every access token it issues.
+    //
+    // The issuer rather than nothing. `resolveResourcePolicy` returns no
+    // audience claim at all for a request that named no resource
+    // (dist/introspect-njKASm3q.mjs:453-462), and the access token is then an
+    // opaque string rather than a JWT — which the portal cannot decode for
+    // `roles` and auth.ts cannot verify against the JWKS. The portal's
+    // authorize request carries no `resource`, so the /oauth/token proxy is
+    // the only leg that can supply one; the plugin honours it there because
+    // the stored code named none to narrow it against
+    // (`resource ?? storedResources`, :1937).
+    const resource = env.D2E_IDP_RESOURCE ?? issuer;
     return {
       idp,
       issuer,
       jwksUri: `${internalBase}/.well-known/jwks.json`,
       // Two values, not the client id alone. The access token's `aud` is the
-      // RFC 8707 resource identifier — the issuer, because that is what
-      // provider.ts declares as the only resource — plus
-      // `<issuer>/oauth2/userinfo`, which the plugin appends whenever `openid`
-      // was granted. The id_token's `aud` is still the client id, and that is
-      // the token scripts/lib/idp-login.cjs picks (`id_token || access_token`).
-      // The portal sends the ACCESS token as its bearer, so the client id alone
-      // 401s every portal call on an audience mismatch. jose accepts a token
-      // whose `aud` carries any one of these, so naming both verifies both
-      // without widening either.
+      // RFC 8707 resource identifier plus `<issuer>/oauth2/userinfo`, which the
+      // plugin appends whenever `openid` was granted. The id_token's `aud` is
+      // still the client id, and that is the token scripts/lib/idp-login.cjs
+      // picks (`id_token || access_token`). The portal sends the ACCESS token as
+      // its bearer, so the client id alone 401s every portal call on an audience
+      // mismatch. jose accepts a token whose `aud` carries any one of the
+      // configured values, so naming both verifies both without widening either.
+      //
+      // Derived from `resource`, not from `issuer`: they are the same string
+      // until a deployment sets D2E_IDP_RESOURCE, and from then on it is the
+      // resource that lands in `aud`. Deriving from the issuer would leave that
+      // deployment refusing every access token it just configured.
       audiences: splitList(
-        env.D2E_IDP_AUDIENCES ?? `${issuer},${env.TREX_OIDC_CLIENT_ID ?? ""}`,
+        env.D2E_IDP_AUDIENCES ?? `${resource},${env.TREX_OIDC_CLIENT_ID ?? ""}`,
       ),
       clientId: env.TREX_OIDC_CLIENT_ID ?? "",
       clientSecret: env.TREX_OIDC_CLIENT_SECRET ?? "",
@@ -109,16 +128,7 @@ export function resolveIdpConfig(
       // in the cutover, and the reason to read them from the document rather
       // than to restate them here is exactly this line.
       tokenUrl: `${internalBase}/oauth2/token`,
-      // The issuer rather than nothing. `resolveResourcePolicy` returns no
-      // audience claim at all for a request that named no resource
-      // (dist/introspect-njKASm3q.mjs:453-462), and the access token is then an
-      // opaque string rather than a JWT — which the portal cannot decode for
-      // `roles` and auth.ts cannot verify against the JWKS. The portal's
-      // authorize request carries no `resource`, so the /oauth/token proxy is
-      // the only leg that can supply one; the plugin honours it there because
-      // the stored code named none to narrow it against
-      // (`resource ?? storedResources`, :1937).
-      resource: env.D2E_IDP_RESOURCE ?? issuer,
+      resource,
       // Browser-visible paths, relative to the public gateway origin. They carry
       // the mount's base path because the d2e front door does NOT strip it: it
       // proxies /trex/* to this node as-is, and routes a bare /oidc/* to Logto.
@@ -185,4 +195,43 @@ export function isSystemAdminClaims(
   }
 
   return false;
+}
+
+/**
+ * Warns at boot when the configured audience list cannot match an access token.
+ *
+ * `D2E_IDP_AUDIENCES` REPLACES the default pair rather than adding to it, and
+ * the value that was correct before the provider moved onto
+ * `@better-auth/oauth-provider` — the bare client id — is now the one that
+ * breaks. An operator who sets it that way sees every portal call answer 401
+ * with nothing in the log connecting the two, because a token that fails the
+ * audience check fails it the same way a forged one does.
+ *
+ * Checked against `resource`, not against the issuer: the access token's `aud`
+ * is whatever the token request named as its RFC 8707 resource, and a
+ * deployment that sets D2E_IDP_RESOURCE to a resource of its own has legitimate
+ * reason for the issuer to be absent from the list. That is also the only such
+ * reason, which is why this is a warning about the resource rather than one
+ * about the issuer.
+ *
+ * A warning and not a refusal: a deployment may deliberately accept only
+ * id_tokens, and boot is not the place to overrule it. An empty list — the
+ * documented "do not check the audience at all" — is left alone for the same
+ * reason.
+ */
+export function warnOnUnmatchableAudience(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+  log: (msg: string) => void = console.warn,
+): boolean {
+  const { idp, audiences, resource } = resolveIdpConfig(env);
+  if (idp !== "trex") return false;
+  if (audiences.length === 0 || !resource) return false;
+  if (audiences.includes(resource)) return false;
+  log(
+    `[d2e-compat] D2E_IDP_AUDIENCES does not name "${resource}", the resource ` +
+      `identifier every access token carries in its \`aud\` — access tokens ` +
+      `will be rejected and every portal call will answer 401. ` +
+      `Configured: ${audiences.join(", ")}`,
+  );
+  return true;
 }
