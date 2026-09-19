@@ -26,10 +26,9 @@ import { cliLoginRouter } from "./routes/cli-login.ts";
 import { nativeIdpEnabled } from "./auth/native-idp.ts";
 import { rolesRouter } from "./auth/roles-api.ts";
 import { federationAdminRouter } from "./auth/federation/admin-api.ts";
-import { oidcProviderEnabled, registerOidcRoutes } from "./auth/oidc/router.ts";
-import { seedClientFromEnv } from "./auth/oidc/seed.ts";
+import { oidcProviderEnabled } from "./auth/oidc/config.ts";
+import { seedOAuthClientFromEnv } from "./auth/oidc/seed-client.ts";
 import { registerFederationRoutes } from "./auth/federation/router.ts";
-import { getActiveSigningKey } from "./auth/oidc/keys.ts";
 import { fnmap } from "./plugin/function.ts";
 import { apiLimiter } from "./middleware/rate-limit.ts";
 import { applyD2eCompat, applyD2eCompatEarly, assertD2eProvisioned, D2E_COMPAT, runD2eAtlasDbInit, runD2eBoot, syncD2ePlugins } from "./d2e-compat/index.ts";
@@ -207,12 +206,21 @@ app.use(`${BASE_PATH}/admin/federation`, federationAdminRouter);
 // login, or the reverse. Off by default, so nothing changes for a stack that
 // does not ask for it.
 if (oidcProviderEnabled()) {
-  app.use(`${BASE_PATH}/oidc`, registerOidcRoutes(BASE_PATH));
+  // Imported here rather than at the top of the file so that a deployment with
+  // the provider switched off never evaluates the engine. For one that has it
+  // on, this import is where a bad TREX_OIDC_ISSUER now stops the node coming
+  // up: assertIssuerScheme used to be a first-request 500, because better-auth
+  // .ts was only ever `await import`ed. Refusing to boot is the better failure
+  // — a node that serves tokens no relying party accepts looks healthy — and
+  // the throw propagates out of this top-level statement, so /trex/api/ready
+  // never comes up.
+  const { mountOidcProvider } = await import("./auth/oidc/mount.ts");
+  await mountOidcProvider(app);
   console.log(`OIDC provider mounted on ${BASE_PATH}/oidc`);
   // Registers the client named in the environment, if any. Not awaited: a
   // client is only needed once a browser arrives at /authorize, and boot must
   // not wait on the database for it.
-  void seedClientFromEnv();
+  void seedOAuthClientFromEnv();
 }
 
 // Deno doesn't have `global` — polyfill for npm packages that expect Node.js
@@ -839,15 +847,24 @@ app.all(`${BASE_PATH}/pg/v1/*`, express.json({ limit: "5mb" }), async (req, res)
 try {
   await initDek(pool);
   console.log("[boot] DEK initialized");
-  // Mint the OIDC signing key now rather than on the first token. Relying
-  // parties fetch jwks_uri as soon as they discover the provider, and a JWKS
-  // served empty can be cached that way, leaving every id_token unverifiable
-  // until the client happens to refresh. It has to come after initDek: the
-  // private key is stored encrypted, so minting it any earlier fails with
-  // "DEK not initialized". Fire-and-forget, like the client seed.
+  // Carry trex's existing RS256 key into the jwt plugin's table before anything
+  // can ask for the key set. The jwks row id IS the kid in every JWS header, so
+  // reusing it keeps id_tokens already in browsers verifiable; let the plugin
+  // mint its own first and it publishes a key set under a random id, every
+  // cached id_token stops verifying, and every live portal and Atlas session is
+  // bounced to the sign-in page.
+  //
+  // After initDek, because the stored private key is encrypted with the DEK —
+  // anything earlier fails with "DEK not initialized". AWAITED, unlike the
+  // client seed: the route registered above is inert until server.listen at the
+  // end of this file, so awaiting here is what actually orders the import
+  // before the first JWKS fetch. Fire-and-forget would leave that a race.
+  // Non-fatal, because an installation that never ran the hand-written provider
+  // has no key to carry and the plugin correctly mints its own.
   if (oidcProviderEnabled()) {
-    void getActiveSigningKey().catch((err) =>
-      console.error("[oidc] could not prepare the signing key:", err)
+    const { importOidcSigningKey } = await import("./auth/oidc/import-signing-key.ts");
+    await importOidcSigningKey().catch((err) =>
+      console.error("[oidc] could not import the signing key:", err)
     );
   }
 } catch (err) {

@@ -501,8 +501,6 @@ dbTest("a pre-linked user with a 12-character id signs in end to end", async (db
   const { createTokenResponse, authRouter } = await runtimeImport("../auth-router.ts");
   const express = (await runtimeImport("express")).default;
   const { verifyAccessToken } = await import("../jwt.ts");
-  const { issueCode, consumeCode } = await import("../oidc/codes.ts");
-  const { buildIdTokenClaims } = await import("../oidc/claims.ts");
 
   const id = ctx.id(11);
   assertEquals(/^[a-z0-9]{12}$/.test(id), true);
@@ -560,30 +558,16 @@ dbTest("a pre-linked user with a 12-character id signs in end to end", async (db
     await new Promise((resolve) => server.close(resolve));
   }
 
-  // OIDC authorization code for the same user (V15 made user_id TEXT).
-  const clientId = `link-test-${ctx.providerId}`;
-  await db.query(
-    `INSERT INTO trexdb.oidc_client (client_id, name, redirect_uris) VALUES ($1, 'link test', ARRAY['https://rp.test/cb'])`,
-    [clientId],
-  );
-  try {
-    const { code } = await issueCode({
-      clientId, userId: id, redirectUri: "https://rp.test/cb", scope: "openid",
-      nonce: null, codeChallenge: null, codeChallengeMethod: null,
-    });
-    const consumed = await consumeCode(code);
-    assertEquals(consumed.ok && consumed.record.userId, id);
-  } finally {
-    // Codes cascade with their client.
-    await db.query(`DELETE FROM trexdb.oidc_client WHERE client_id = $1`, [clientId]);
-  }
-  assertEquals(
-    buildIdTokenClaims(
-      { id, email: ctx.email(11), role: "user", appRoles: [] },
-      { issuer: "https://trex.test", audience: clientId, scopes: ["openid"] },
-    ).sub,
-    id,
-  );
+  // The OIDC half of this test went with the provider it exercised. It pinned
+  // that a 12-character id survives an authorization code and an id_token, both
+  // of which the hand-written provider stored in tables of its own (V15 had to
+  // widen oidc_authorization_code.user_id to TEXT for it).
+  // @better-auth/oauth-provider keeps codes in trexdb.verification and tokens in
+  // trexdb."oauthRefreshToken", neither of which types the subject any
+  // differently from trexdb."user".id — and driving a code out of the plugin
+  // needs a mounted provider, a seeded client and a session, which is
+  // auth/oidc/soft-delete.test.ts's business rather than this file's. What this
+  // test is actually about is the link, and everything above asserts it.
 
   // auth.uid() is what RLS policies compare row owners against.
   await db.query("BEGIN");

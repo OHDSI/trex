@@ -1,19 +1,31 @@
-// The authentication engine. Not mounted publicly: /auth/v1 keeps the
-// GoTrue-compatible wire contract and calls this, because trex issues stateless
-// access tokens and rotating refresh tokens, which Better Auth has no concept
-// of (see the spec's "The router is kept, not replaced").
+// The authentication engine, and — since the OAuth provider is one of its
+// plugins — the OIDC provider too.
+//
+// /auth/v1 keeps the GoTrue-compatible wire contract and calls this through
+// `auth.api`, because trex issues stateless access tokens and rotating refresh
+// tokens, which Better Auth has no concept of (see the spec's "The router is
+// kept, not replaced"). What IS served over HTTP is the provider, at the issuer
+// path and nothing else: oidc/mount.ts 404s every Better Auth route that is not
+// the provider's own.
 import { betterAuth } from "better-auth";
 import { APIError } from "better-auth/api";
 import { admin, jwt } from "better-auth/plugins";
 import { pool } from "../db.ts";
-import { BASE_PATH } from "../config.ts";
-import { issuerUrl } from "./oidc/config.ts";
+import { oidcIssuer } from "./oidc/config.ts";
+import { trexOAuthProvider } from "./oidc/provider.ts";
 import { deriveSubkeyBase64, LABELS } from "./keys.ts";
 import { hashPassword, verifyPassword } from "./password.ts";
 import { nativePasswordLoginEnabled } from "./federation/config.ts";
 
+/**
+ * Where the engine answers. Every endpoint URL in the discovery document is
+ * `${ctx.context.baseURL}/oauth2/...` and better-call routes on
+ * `new URL(ctx.baseURL).pathname` (better-auth@1.7.5 api/index.ts:154), so the
+ * base path is not a free choice: it has to BE the issuer path, or the
+ * document advertises endpoints that are not where the provider listens.
+ */
 export function authBasePath(): string {
-  return `${BASE_PATH}/_auth`;
+  return new URL(oidcIssuer()).pathname;
 }
 
 /**
@@ -21,22 +33,20 @@ export function authBasePath(): string {
  * request happens to arrive, which is how callbacks and redirects come to work
  * in development and break behind an ingress.
  *
- * Only the origin of BETTER_AUTH_URL is used, because that variable already
- * carries a path elsewhere in trex — index.ts defaults it to
- * `http://localhost:8001${BASE_PATH}` for the edge-function workers — and
- * concatenating that with a base path that also starts with BASE_PATH would
- * yield /trex/trex/_auth. auth/jwt.ts narrows the same variable the same way
- * when it builds the token issuer.
+ * It is the issuer, not BETTER_AUTH_URL's origin, and that is the whole of the
+ * cutover's URL story: `authServerMetadata` builds authorization_endpoint,
+ * token_endpoint, userinfo_endpoint, end_session_endpoint and jwks_uri from
+ * `ctx.context.baseURL` and only `issuer` from the jwt plugin's own issuer
+ * option, so a base URL that disagreed with the issuer would advertise a
+ * document Spring's `fromOidcIssuerLocation` refuses.
+ *
+ * One consequence worth knowing before it surprises somebody: the session
+ * cookie's name follows the base URL's scheme. An https issuer gives Better
+ * Auth's `createCookieGetter` the `__Secure-` prefix and `secure: true`, where
+ * an http BETTER_AUTH_URL did not.
  */
 function authBaseUrl(): string {
-  const raw = Deno.env.get("BETTER_AUTH_URL") || "http://localhost:8000";
-  let origin: string;
-  try {
-    origin = new URL(raw).origin;
-  } catch {
-    origin = raw;
-  }
-  return `${origin}${authBasePath()}`;
+  return oidcIssuer();
 }
 
 // The same variable and the same split as the CORS allow-list in index.ts, so
@@ -48,51 +58,6 @@ const trustedOrigins = (Deno.env.get("BETTER_AUTH_TRUSTED_ORIGINS") || "")
 // Better Auth wants a string; the root key is 32 raw bytes and is never handed
 // to a third party directly.
 const secret = await deriveSubkeyBase64(LABELS.betterAuthEngine);
-
-/**
- * The `iss` every token carries. The same expression d2e-compat/idp.ts:65 uses
- * to tell relying parties where to look, so the two cannot drift.
- */
-function oidcIssuer(): string {
-  const issuer = issuerUrl(Deno.env.get("TREX_OIDC_ISSUER"), `${BASE_PATH}/oidc`);
-  assertIssuerScheme(issuer);
-  return issuer;
-}
-
-/**
- * The OAuth provider plugin does not refuse an `http:` issuer on a routable
- * host: validateIssuerUrl rewrites the scheme to `https:` and strips query and
- * hash (@better-auth/oauth-provider@1.7.5). Tokens would then be minted with an
- * `iss` nobody configured, and the mismatch surfaces at the relying party as an
- * invalid token rather than here as a misconfiguration. Fail boot instead.
- *
- * Deliberately no laxer than the plugin's own loopback test: anything this
- * accepts, validateIssuerUrl leaves alone.
- */
-function assertIssuerScheme(issuer: string): void {
-  let url: URL;
-  try {
-    url = new URL(issuer);
-  } catch {
-    throw new Error(`TREX_OIDC_ISSUER is not a URL: ${issuer}`);
-  }
-  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  const loopback = host === "localhost" || host.endsWith(".localhost") ||
-    host === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
-  if (url.protocol !== "https:" && !loopback) {
-    throw new Error(
-      `The OIDC issuer must be https: or a loopback host, not ${issuer}. ` +
-        "Better Auth silently rewrites the scheme to https:, so tokens would " +
-        "be issued with an `iss` no relying party expects.",
-    );
-  }
-  if (url.search || url.hash) {
-    throw new Error(
-      `The OIDC issuer must carry no query and no fragment, not ${issuer}. ` +
-        "Better Auth strips both, so the issued `iss` would not be this value.",
-    );
-  }
-}
 
 /**
  * A raw `Error` thrown out of either password hook is not caught by Better
@@ -174,8 +139,11 @@ export const auth = betterAuth({
     // default JWT decoder rejects anything else — the same failure already seen
     // with Logto's ES384 tokens.
     //
-    // jwksPath puts the key set exactly where trex serves it today, so
-    // d2e-compat/idp.ts and every cached discovery document keep resolving.
+    // jwksPath is relative to the base URL, which is now the issuer — so the
+    // key set is served at `<issuer>/.well-known/jwks.json`, exactly where trex
+    // serves it today and exactly what the discovery document advertises.
+    // Before the cutover the same line resolved under ${BASE_PATH}/_auth; the
+    // comment describing it as the issuer path only became true here.
     // disableSettingJwtHeader is what the jwt plugin's own types recommend when
     // an OAuth provider plugin is installed: session payloads must not be
     // signed into a response header.
@@ -187,6 +155,12 @@ export const auth = betterAuth({
       jwt: { issuer: oidcIssuer() },
       disableSettingJwtHeader: true,
     }),
+    // Installed unconditionally, while TREX_OIDC_PROVIDER_ENABLED gates the
+    // HTTP mount rather than the plugin. Keeping the option block constant is
+    // what lets schema-validate.test.ts see the same tables a provider
+    // deployment needs, and the plugin serves nothing on its own — it only adds
+    // routes to a handler that, without the mount, nothing calls.
+    trexOAuthProvider(),
   ],
 });
 

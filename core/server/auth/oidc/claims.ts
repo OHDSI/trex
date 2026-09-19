@@ -1,24 +1,10 @@
-// id_token claim construction.
+// The federation block trex writes onto a user, and how it is read back.
 //
-// Split from the signing code so the claim rules — what each scope adds, what
-// the role looks like, how long a token lives — can be tested without a signing
-// key or a database.
-
-export interface IdTokenUser {
-  id: string;
-  /** NULL for a federated user whose upstream asserted no address (V14). */
-  email: string | null;
-  name?: string | null;
-  /** trex's own admin/user role. Gates trex features; not application access. */
-  role: string;
-  /** Named application roles. This is what a relying party authorizes against. */
-  appRoles: string[];
-  emailVerified?: boolean;
-  /** Raw upstream group identifiers. Unmapped: meaning belongs to the relying party. */
-  idpGroups?: string[];
-  /** sso_provider.id the session was federated from; absent for native logins. */
-  idpProvider?: string;
-}
+// What was here besides — the hand-rolled id_token claim builder — went with
+// the provider it served; oidc/custom-claims.ts rebuilds the same claim set on
+// the plugin's callbacks. This stays because the producer
+// (federation/router.ts) and the consumers (auth-router.ts, federation's own
+// router, custom-claims.ts) must agree on one key name and none of them owns it.
 
 /**
  * Where a federated sign-in records the upstream identity it came from, inside
@@ -27,8 +13,8 @@ export interface IdTokenUser {
  * a native sign-in can drop the whole thing with a single `- 'idp'`.
  *
  * The name lives here, next to the claims it feeds, because the producer
- * (federation/router.ts) and the consumer (oidc/router.ts's fetchUser) must
- * agree on it and neither owns it.
+ * (federation/router.ts) and the consumer (oidc/custom-claims.ts) must agree
+ * on it and neither owns it.
  */
 export const IDP_METADATA_KEY = "idp";
 
@@ -61,93 +47,4 @@ export function federationFromAppMetadata(
     ? groups as string[]
     : [];
   return { idpProvider: provider, idpGroups: list };
-}
-
-export interface IdTokenOptions {
-  issuer: string;
-  audience: string;
-  nonce?: string | null;
-  scopes: string[];
-  ttlSeconds?: number;
-  authTime?: number;
-}
-
-export const DEFAULT_ID_TOKEN_TTL_SECONDS = 3600;
-
-export interface IdTokenClaims {
-  iss: string;
-  sub: string;
-  aud: string;
-  exp: number;
-  iat: number;
-  auth_time: number;
-  nonce?: string;
-  email?: string;
-  email_verified?: boolean;
-  name?: string;
-  trex_role: string;
-  // Named application roles, not the system role: what a relying party
-  // authorizes against.
-  roles: string[];
-  app_metadata: { trex_role: string };
-  idp_groups?: string[];
-  idp_provider?: string;
-}
-
-/**
- * Claims are scope-gated: `profile` and `email` add nothing unless requested.
- * The role is not gated — it is the reason a relying party asks for a token at
- * all — and is emitted both top-level and under app_metadata so a consumer
- * reads it the same way it reads the native access token.
- */
-export function buildIdTokenClaims(user: IdTokenUser, opts: IdTokenOptions): IdTokenClaims {
-  const now = Math.floor(Date.now() / 1000);
-  const claims: IdTokenClaims = {
-    iss: opts.issuer,
-    sub: user.id,
-    aud: opts.audience,
-    iat: now,
-    exp: now + (opts.ttlSeconds ?? DEFAULT_ID_TOKEN_TTL_SECONDS),
-    auth_time: opts.authTime ?? now,
-    trex_role: user.role,
-    // Application roles, never the system role: they are different concepts and
-    // conflating them would grant application access on a trex admin flag.
-    roles: user.appRoles,
-    app_metadata: { trex_role: user.role },
-  };
-
-  if (opts.nonce) claims.nonce = opts.nonce;
-  // A user with no address emits neither claim, rather than a null `email` or
-  // an `email_verified` about nothing: OIDC says an absent claim is simply
-  // omitted, and a relying party that keys accounts off `email` must fail to
-  // find one rather than key off a null.
-  //
-  // Since V17 restored user.email NOT NULL, no user reaches that branch: a
-  // federated user whose upstream asserted no address carries a synthesised
-  // <subject>@d2e.local, so trex emits it outbound. This is the mirror of the
-  // inbound hole findLinkCandidateByEmail closes — a relying party that links
-  // accounts by address could attach two trex users to one of its own, or
-  // attach one to an unrelated account, on an address nobody proved. What keeps
-  // it safe is that a placeholder row is never `"emailVerified"`, so the pair
-  // goes out as `email_verified: false`, and a relying party is required to
-  // treat an unverified address as not an identifier. That is the whole of the
-  // protection: a relying party that links on `email` while ignoring
-  // `email_verified` is not defended against here and cannot be.
-  if (opts.scopes.includes("email") && user.email) {
-    claims.email = user.email;
-    claims.email_verified = Boolean(user.emailVerified);
-  }
-  if (opts.scopes.includes("profile") && user.name) {
-    claims.name = user.name;
-  }
-  // Behind its own scope: group lists are large and only usermgmt needs them,
-  // so relying parties that do not ask are not made to carry them. Gated also
-  // on idpProvider so a native (password) login never emits either claim,
-  // scope request notwithstanding — there is no upstream identity to report.
-  if (opts.scopes.includes("idp_groups") && user.idpProvider) {
-    claims.idp_groups = user.idpGroups ?? [];
-    claims.idp_provider = user.idpProvider;
-  }
-
-  return claims;
 }

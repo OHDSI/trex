@@ -2,6 +2,12 @@
 // jwks row's id IS the kid in the JWS header, so reusing it means relying
 // parties do not have to re-fetch, re-register or re-authenticate.
 //
+// The legacy key is written here in SQL rather than minted through
+// oidc/keys.ts, which the cutover deleted along with the provider it served.
+// trexdb.oidc_signing_key is not dropped — it is the source the import reads,
+// and on a real installation it holds the key the hand-written provider signed
+// with — so the fixture is what that installation looks like.
+//
 // Gated on DATABASE_URL like the other auth suites, and skipping rather than
 // inventing one: DATABASE_URL is process-wide and every later DB-backed suite
 // gates itself on it too.
@@ -27,7 +33,7 @@ async function load() {
   try {
     return {
       importer: await import("./import-signing-key.ts"),
-      keys: await import("./keys.ts"),
+      crypto: await import("../crypto.ts"),
       db: await import("../../db.ts"),
       auth: (await import("../better-auth.ts")).auth,
     };
@@ -45,6 +51,55 @@ const mod = DATABASE_URL ? await load() : null;
 // independent of TREX_ROOT_KEY at call time, which no other suite leaves set.
 if (mod) _setDekForTests(new Uint8Array(32).map((_, i) => 200 - i));
 
+interface LegacyKey {
+  kid: string;
+  jwk: Record<string, string>;
+}
+
+/**
+ * The row the hand-written provider left behind: an RS256 private key stored
+ * base64 PKCS#8 under the DEK, its public half as a JWK, and the kid every
+ * id_token in the wild names. Rebuilt on each call so a re-run of this suite
+ * against the same database is not testing a key it already imported.
+ */
+async function writeLegacyKey(m: NonNullable<typeof mod>): Promise<LegacyKey> {
+  const pair = await crypto.subtle.generateKey(
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: "SHA-256",
+    },
+    true,
+    ["sign", "verify"],
+  );
+  const publicJwk = await crypto.subtle.exportKey("jwk", pair.publicKey);
+  const pkcs8 = btoa(
+    String.fromCharCode(
+      ...new Uint8Array(await crypto.subtle.exportKey("pkcs8", pair.privateKey)),
+    ),
+  );
+  const kid = crypto.randomUUID().replaceAll("-", "");
+  const jwk = {
+    kid,
+    kty: publicJwk.kty ?? "RSA",
+    alg: "RS256",
+    use: "sig",
+    n: publicJwk.n ?? "",
+    e: publicJwk.e ?? "AQAB",
+  };
+
+  // The importer takes the newest active row, so the previous one is retired
+  // rather than left to race with this fixture.
+  await m.db.pool.query(`UPDATE trexdb.oidc_signing_key SET is_active = false WHERE is_active`);
+  await m.db.pool.query(
+    `INSERT INTO trexdb.oidc_signing_key (kid, alg, private_key_encrypted, public_jwk, is_active)
+     VALUES ($1, 'RS256', $2, $3, true)`,
+    [kid, await m.crypto.encryptSecret(pkcs8), JSON.stringify(jwk)],
+  );
+  return { kid, jwk };
+}
+
 /**
  * The pg pool is a singleton owned by ../../db.ts and outlives every test, so
  * the resource and op sanitizers would report it as a leak.
@@ -60,29 +115,24 @@ function test(name: string, fn: (m: NonNullable<typeof mod>) => Promise<void>) {
 }
 
 test("the existing signing key is imported under its own kid", async (m) => {
-  // The importer is idempotent by design, so a second run of this suite against
-  // the same database would otherwise see the row it wrote last time and report
-  // `imported: false`. Clear it, not the oidc_signing_key row: the key trex
-  // signs with must stay the key under test.
-  m.keys._resetSigningKeyCache();
-  const existing = await m.keys.getActiveSigningKey();
-  await m.db.pool.query(`DELETE FROM trexdb.jwks WHERE id = $1`, [existing.kid]);
+  const legacy = await writeLegacyKey(m);
 
   const { kid, imported } = await m.importer.importOidcSigningKey();
-  assertEquals(kid, existing.kid);
+  assertEquals(kid, legacy.kid);
   assertEquals(imported, true);
 
   const row = await m.db.pool.query(
     `SELECT id, alg, "publicKey" FROM trexdb.jwks WHERE id = $1`,
-    [existing.kid],
+    [legacy.kid],
   );
   assertEquals(row.rows.length, 1);
   assertEquals(row.rows[0].alg, "RS256");
   // Copied verbatim, so the published JWKS entry is unchanged.
-  assertEquals(JSON.parse(row.rows[0].publicKey), (await m.keys.getJwks()).keys[0]);
+  assertEquals(JSON.parse(row.rows[0].publicKey), legacy.jwk);
 });
 
 test("importing twice changes nothing", async (m) => {
+  await writeLegacyKey(m);
   await m.importer.importOidcSigningKey();
   const second = await m.importer.importOidcSigningKey();
   assertEquals(second.imported, false);
@@ -95,8 +145,8 @@ test("the plugin signs with the imported key rather than minting a new one", asy
   // holding the bare ciphertext reads as a decryption failure — the plugin then
   // throws, or mints a fresh key, and every token in the wild stops verifying.
   // Ask the plugin's own resolver instead of re-implementing its unwrapping.
+  const legacy = await writeLegacyKey(m);
   await m.importer.importOidcSigningKey();
-  const expected = await m.keys.getActiveSigningKey();
 
   const jwtPlugin = m.auth.options.plugins.find((p: { id: string }) => p.id === "jwt");
   assertNotEquals(jwtPlugin, undefined);
@@ -107,6 +157,6 @@ test("the plugin signs with the imported key rather than minting a new one", asy
     // deno-lint-ignore no-explicit-any
     (jwtPlugin as any).options,
   );
-  assertEquals(resolved?.kid, expected.kid);
+  assertEquals(resolved?.kid, legacy.kid);
   assertEquals(resolved?.alg, "RS256");
 });

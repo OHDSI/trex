@@ -10,7 +10,7 @@
 //
 // The callbacks are handed only the user and the granted scopes — no client, no
 // session, no grant — so the application roles are read straight from
-// trexdb.user_role, exactly as oidc/router.ts's fetchUser does today.
+// trexdb.user_role, exactly as the deleted oidc/router.ts's fetchUser did.
 import { pool } from "../../db.ts";
 import { federationFromAppMetadata } from "./claims.ts";
 
@@ -96,7 +96,7 @@ export async function accessTokenClaims(
 
 /**
  * Today's /userinfo returns strictly {sub, email?, email_verified?, name?,
- * trex_role} (oidc/router.ts's userinfo handler).
+ * trex_role} (the deleted oidc/router.ts's userinfo handler).
  *
  * The plugin merges this on top of its own standard-claim set without a base
  * argument, which is its documented first-party override path: what is returned

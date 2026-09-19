@@ -1,5 +1,6 @@
 // Provider configuration and small request helpers. No database, no express:
 // everything here is a pure function of its input so it can be tested directly.
+import { BASE_PATH } from "../../config.ts";
 
 /** Off unless explicitly enabled, like the native IdP. */
 export function oidcProviderEnabled(
@@ -18,6 +19,63 @@ export function issuerUrl(
   basePath = "",
 ): string {
   return (base ?? "http://localhost:33001").replace(/\/+$/, "") + basePath;
+}
+
+/**
+ * The `iss` every token carries, and — since the provider's endpoint URLs are
+ * all built from Better Auth's base URL — the URL the whole engine is mounted
+ * at. The same expression d2e-compat/idp.ts:65 uses to tell relying parties
+ * where to look, so the two cannot drift.
+ *
+ * Lives here rather than in better-auth.ts because provider.ts needs the same
+ * value for its RFC 8707 resource identifier, and better-auth.ts imports
+ * provider.ts.
+ */
+export function oidcIssuer(): string {
+  const issuer = issuerUrl(Deno.env.get("TREX_OIDC_ISSUER"), `${BASE_PATH}/oidc`);
+  assertIssuerScheme(issuer);
+  return issuer;
+}
+
+/**
+ * The OAuth provider plugin does not refuse an `http:` issuer on a routable
+ * host: validateIssuerUrl rewrites the scheme to `https:` and strips query and
+ * hash (@better-auth/oauth-provider@1.7.5). Tokens would then be minted with an
+ * `iss` nobody configured, and the mismatch surfaces at the relying party as an
+ * invalid token rather than here as a misconfiguration. Fail boot instead.
+ *
+ * Since the cutover this is a startup refusal rather than a first-request 500:
+ * index.ts imports the engine while it mounts the provider, so a bad
+ * TREX_OIDC_ISSUER stops the node coming up. That is deliberate — a node that
+ * boots and then issues tokens no relying party accepts is the worse outcome,
+ * and a failed boot fails /trex/api/ready loudly.
+ *
+ * Deliberately no laxer than the plugin's own loopback test: anything this
+ * accepts, validateIssuerUrl leaves alone.
+ */
+export function assertIssuerScheme(issuer: string): void {
+  let url: URL;
+  try {
+    url = new URL(issuer);
+  } catch {
+    throw new Error(`TREX_OIDC_ISSUER is not a URL: ${issuer}`);
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const loopback = host === "localhost" || host.endsWith(".localhost") ||
+    host === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+  if (url.protocol !== "https:" && !loopback) {
+    throw new Error(
+      `The OIDC issuer must be https: or a loopback host, not ${issuer}. ` +
+        "Better Auth silently rewrites the scheme to https:, so tokens would " +
+        "be issued with an `iss` no relying party expects.",
+    );
+  }
+  if (url.search || url.hash) {
+    throw new Error(
+      `The OIDC issuer must carry no query and no fragment, not ${issuer}. ` +
+        "Better Auth strips both, so the issued `iss` would not be this value.",
+    );
+  }
 }
 
 /** Where an unauthenticated /authorize sends the browser; trex hosts no login UI. */

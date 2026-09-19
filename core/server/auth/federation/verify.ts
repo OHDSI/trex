@@ -3,10 +3,11 @@
 // permitted algorithm set — an id_token that is merely well-formed proves
 // nothing about who issued it.
 //
-// Named verifyFederatedIdToken, not verifyIdToken: oidc/id-token.ts already
-// exports a verifyIdToken with a different signature (verifies a token this
-// provider issued, against its own keys). Distinct names keep an import of one
-// from silently compiling against the other.
+// Named verifyFederatedIdToken, not verifyIdToken: this verifies an UPSTREAM
+// provider's token, where trex is the relying party. The token trex itself
+// issues is verified by @better-auth/oauth-provider against its own JWKS.
+// Distinct names keep an import of one from silently compiling against the
+// other.
 import { createRemoteJWKSet, jwtVerify } from "npm:jose";
 import type { DiscoveryDoc } from "./discovery.ts";
 

@@ -51,11 +51,14 @@ function test(name: string, fn: (m: NonNullable<typeof mod>) => void) {
   Deno.test({ name, ignore: !mod, fn: () => fn(mod!) });
 }
 
-test("better-auth is mounted on a private base path", ({ authBasePath }) => {
-  // Not a public surface: everything the outside world calls is /auth/v1,
-  // /oidc or /admin. Anything reaching /_auth directly is a mistake we want to
-  // be able to see in a route table.
-  assertEquals(authBasePath().endsWith("/_auth"), true);
+test("better-auth is mounted on the issuer path", ({ authBasePath }) => {
+  // It moved off the private /_auth prefix in the cutover, and not by
+  // preference: better-call routes on the base URL's pathname and the
+  // discovery document builds every endpoint URL from the same value, so the
+  // engine has to answer where the issuer says it does. What keeps the rest of
+  // Better Auth off the public surface is oidc/mount.ts, which 404s everything
+  // outside /oauth2/ and /.well-known/ — not the base path.
+  assertEquals(authBasePath(), "/trex/oidc");
 });
 
 test("the instance exposes the credential endpoints the router will call", ({ auth }) => {
@@ -73,13 +76,16 @@ test("both password hooks are trex's, not Better Auth's defaults", ({ auth }) =>
   assertEquals(typeof password?.verify, "function");
 });
 
-test("the base URL is BETTER_AUTH_URL's origin plus the base path, once", ({ auth, authBasePath }) => {
+test("the base URL is the OIDC issuer, not BETTER_AUTH_URL", ({ auth }) => {
   // Left unset, Better Auth derives the origin from whichever request arrives,
-  // which works in development and breaks behind an ingress. Naive
-  // concatenation is the other failure: BETTER_AUTH_URL already carries
-  // BASE_PATH in trex's own default, and the base path starts with BASE_PATH
-  // too, so appending one to the other yields /trex/trex/_auth.
-  assertEquals(auth.options.baseURL, `http://auth.example.test:9999${authBasePath()}`);
+  // which works in development and breaks behind an ingress. BETTER_AUTH_URL
+  // is no longer the answer either: authorization_endpoint, token_endpoint,
+  // userinfo_endpoint, end_session_endpoint and jwks_uri are all
+  // `${ctx.context.baseURL}/...`, so a base URL that is not the issuer
+  // advertises a document Spring's fromOidcIssuerLocation refuses. The
+  // environment here still sets BETTER_AUTH_URL to an unrelated origin, which
+  // is the case worth pinning.
+  assertEquals(auth.options.baseURL, "http://localhost:33001/trex/oidc");
 });
 
 test("trusted origins come from the variable the CORS allow-list uses", ({ auth }) => {
@@ -100,8 +106,27 @@ test("the jsonb user columns are declared json, not string", ({ auth }) => {
 });
 
 test("nothing is mounted on the public /auth/v1 prefix", ({ authBasePath }) => {
-  // Task 3 adds the engine only. If this ever starts with /auth/v1 the engine
-  // has begun answering the GoTrue contract directly, which is a different
-  // task and a different set of response envelopes.
+  // If this ever starts with /auth/v1 the engine has begun answering the
+  // GoTrue contract directly, which is a different task and a different set of
+  // response envelopes.
   assertEquals(authBasePath().includes("/auth/v1"), false);
+});
+
+test("the OAuth provider plugin is installed and keeps trex's contract", ({ auth }) => {
+  // The plugin's own defaults differ from what trex has served since V7 on
+  // every one of these: 600-second codes, 36000-second id_tokens, and no
+  // offline_access scope at all — which is its gate on issuing a refresh token.
+  const provider = auth.options.plugins.find(
+    (p: { id: string }) => p.id === "oauth-provider",
+  ) as { options: Record<string, unknown> } | undefined;
+  assertEquals(typeof provider, "object");
+  assertEquals(provider!.options.codeExpiresIn, 60);
+  assertEquals(provider!.options.idTokenExpiresIn, 3600);
+  assertEquals(
+    (provider!.options.scopes as string[]).includes("offline_access"),
+    true,
+  );
+  // Client administration is not a surface trex offers over HTTP; clients are
+  // seeded from the environment.
+  assertEquals(typeof provider!.options.clientPrivileges, "function");
 });
