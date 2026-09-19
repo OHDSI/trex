@@ -224,20 +224,39 @@ test("PKCE is required of this client even though it is confidential", async (_m
 });
 
 test("a code issued with a challenge needs the verifier that produced it", async (_m, flow) => {
-  const authorized = await authorize(flow);
-  assertNotEquals(authorized.code, null);
-  const refused = await postToken(flow, {
-    grant_type: "authorization_code",
-    code: authorized.code!,
-    redirect_uri: REDIRECT_URI,
-    code_verifier: "not-the-verifier",
-    resource: flow.server.issuer,
-  });
-  assertNotEquals(refused.status, 200);
-  // invalid_request, not invalid_grant: the plugin throws
-  // UNAUTHORIZED/invalid_request for a failed verification
-  // (dist/introspect-njKASm3q.mjs:2007-2010).
-  assertEquals(refused.body.error, "invalid_request");
+  // Wrong, missing and empty are three ways to fail, and the plugin answers
+  // all three with invalid_request rather than invalid_grant: it throws
+  // UNAUTHORIZED/invalid_request for the mismatch and for the absence alike
+  // (dist/introspect-njKASm3q.mjs:1997-2009). So the description is asserted
+  // as well — without it this test would go on passing if a refusal moved to
+  // a different branch, and the branch is the only thing that stops a stolen
+  // code being redeemed by whoever intercepted it.
+  for (
+    const [verifier, description] of [
+      ["not-the-verifier", "code verification failed"],
+      // An empty verifier is not "no PKCE": it is a falsy one, so it lands on
+      // the same branch as sending none at all. Measured, and one branch
+      // earlier than the "code_verifier required because PKCE was used in
+      // authorization" the plugin also carries (:1997-2000) — this client's
+      // requirePKCE column is checked first (:1985-1990), so a client with the
+      // column unset would fail here with the other message.
+      ["", "PKCE is required for this client"],
+      [null, "PKCE is required for this client"],
+    ] as const
+  ) {
+    const authorized = await authorize(flow);
+    assertNotEquals(authorized.code, null);
+    const refused = await postToken(flow, {
+      grant_type: "authorization_code",
+      code: authorized.code!,
+      redirect_uri: REDIRECT_URI,
+      ...(verifier === null ? {} : { code_verifier: verifier }),
+      resource: flow.server.issuer,
+    });
+    assertNotEquals(refused.status, 200, String(verifier));
+    assertEquals(refused.body.error, "invalid_request", String(verifier));
+    assertStringIncludes(refused.body.error_description ?? "", description);
+  }
 });
 
 // ── refresh_token ───────────────────────────────────────────────────────────
