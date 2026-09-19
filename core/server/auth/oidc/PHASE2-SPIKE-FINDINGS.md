@@ -499,8 +499,11 @@ The name and `secure` follow the issuer's scheme through `createCookieGetter`
 (`better-auth/dist/cookies/index.mjs:20-46`) — an https issuer gives `__Secure-better-auth.session_token`
 with `secure: true`, which is why nothing writes the name or the attributes out by hand.
 
-**`maxAge` is seconds; express's `res.cookie` counts milliseconds.** A cookie set from these attributes
-without the conversion expires in ten minutes over a session row that lives a week.
+**better-auth counts `maxAge` in SECONDS; express's `res.cookie` counts it in MILLISECONDS.** Anything
+that takes these attributes and hands them to express has to multiply by 1000, or the browser gets a cookie
+that expires in ten minutes over a session row that lives a week — and nothing shows it, because the cookie
+has the right name, the right value and the right path. `auth-router.contract.test.ts` pins
+`Max-Age=604800` for exactly that reason.
 
 There is no cookie cache (`session.cookieCache` is undefined), so the signed cookie against `trexdb.session`
 is the whole of the session — which is also what makes `endEngineSessions`' bare DELETE authoritative.
@@ -540,7 +543,32 @@ back to the login page. The router's own header comment ("issue exactly the sess
 grant issues — so from the moment /callback finishes the request is indistinguishable from a native
 login") is false as it stands.
 
-**Not fixed in task 9**, and deliberately: the call is one line, but nothing in `auth/federation/` drives
-`/callback` over HTTP — there is no stub upstream with a token endpoint and a JWKS — so the change could
-not be pinned, and an unpinned change to that route is worse than a recorded gap. It is worth a task of
-its own, together with the harness.
+**Fixed in task 9's fix round**, once the harness turned out to be assemblable after all. The route makes
+all three of its outbound calls through the **global** `fetch` — `loadDiscovery(provider.discoveryUrl)` with
+no injected fetch, the token exchange, and the JWKS jose resolves the id_token against, because
+`verifyFederatedIdToken` is called without its test-only `jwks` argument. So one `globalThis.fetch` stub
+stands in for the whole upstream and no server is needed for it. (The `stubFetch` already in
+`federation.test.ts` is a *parameter* to `loadDiscovery`, not a global patch, and does not reach the other
+two calls.) Everything else is constructible: `signState`/`hashBinding` build the state and the binding
+cookie, `registerFederationRoutes(app, "/trex", pool)` mounts on a `listen(0, "127.0.0.1")` listener, and
+`loadProviders` reads `clientSecret` straight from the column, so no DEK is needed to configure a provider.
+
+Two things that are not obvious and cost a round each:
+
+- `_setDekForTests` IS needed, for a different reason: `upsertAccount` seals the upstream access and refresh
+  tokens, and `initDek()` normally runs at boot.
+- `TREX_ROOT_KEY` has to be set **before** `better-auth.ts` is first imported, because it derives its secret
+  while it evaluates.
+
+The test asserts the response's `better-auth.session_token` is accepted by `auth.api.getSession`, not merely
+that a cookie of that name is present: nothing else on the route sets one — `clearBinding` clears the two
+federation cookies and `createTokenResponse` sets `sb-access-token` alone — and the test was watched failing
+on exactly that assertion before the one-line fix.
+
+### `/sync-cookie` now answers 500 where it answered 204, for a purged user
+
+`trexdb.session."userId"` is a foreign key to `trexdb."user"`, so a still-valid bearer for a row that
+`purge_deleted_users()` has removed raises `session_userId_fkey` inside `createSession` and the route's own
+handler answers `500 {"error":"server_error"}` with the cause logged. It used to answer 204 and set a cookie
+for a user that no longer exists. Chosen deliberately — a logged 500 beats a silent 204 handing out a
+credential for nobody — and pinned by test so it is a decision on the record rather than a surprise.

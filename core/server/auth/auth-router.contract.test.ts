@@ -2360,3 +2360,33 @@ contractTest(
     assertEquals(await engineSessionCount(pool, user.id), 0);
   },
 );
+
+// A behaviour change, recorded rather than discovered later: before the engine
+// session was established here this answered 204 and set a cookie for a user
+// that no longer exists. The session row now carries a foreign key to
+// trexdb."user", so the same request raises and the route's own handler answers
+// 500 — which is logged, where the 204 was silent. The trade is deliberate; the
+// test exists so it is a decision on the record.
+contractTest(
+  "POST /sync-cookie is 500 for a bearer whose user row is gone",
+  async ({ url, pool }) => {
+    const user = await createUser(pool);
+    const now = Math.floor(Date.now() / 1000);
+    const token = await mintToken({
+      sub: user.id,
+      role: "authenticated",
+      aud: "authenticated",
+      exp: now + 3600,
+      iat: now,
+      session_id: crypto.randomUUID(),
+    });
+
+    // Hard-deleted, the way purge_deleted_users leaves it: the token stays
+    // verifiable for the rest of its hour because it is self-contained.
+    await pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [user.id]);
+
+    const res = await post(`${url}/sync-cookie`, undefined, token);
+    assertEquals(res.status, 500);
+    assertEquals(await res.json(), { error: "server_error" });
+  },
+);
