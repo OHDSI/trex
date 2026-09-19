@@ -859,13 +859,16 @@ try {
   // client seed: the route registered above is inert until server.listen at the
   // end of this file, so awaiting here is what actually orders the import
   // before the first JWKS fetch. Fire-and-forget would leave that a race.
-  // Non-fatal, because an installation that never ran the hand-written provider
-  // has no key to carry and the plugin correctly mints its own.
+  // Fatal, and deliberately so. The "no key to carry" case — an installation
+  // that never ran the hand-written provider — already returns without throwing
+  // (import-signing-key.ts:17-24), so anything that throws here is a key that
+  // exists and could not be imported. Logging that and carrying on produces
+  // exactly the outage this import exists to prevent: the node boots healthy,
+  // the plugin mints a fresh kid, and every id_token signed by the old key
+  // stops verifying at every relying party.
   if (oidcProviderEnabled()) {
     const { importOidcSigningKey } = await import("./auth/oidc/import-signing-key.ts");
-    await importOidcSigningKey().catch((err) =>
-      console.error("[oidc] could not import the signing key:", err)
-    );
+    await importOidcSigningKey();
   }
 } catch (err) {
   console.error("[boot] FATAL: DEK init failed:", err);

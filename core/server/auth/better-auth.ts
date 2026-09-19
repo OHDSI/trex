@@ -80,6 +80,12 @@ export const auth = betterAuth({
   baseURL: authBaseUrl(),
   trustedOrigins,
   secret,
+  // On, not left to the default. The provider's endpoints are mounted at
+  // ${BASE_PATH}/oidc ahead of trex's own apiLimiter, and the deleted router.ts
+  // had authLimiter on /authorize and /token — so without this /oauth2/token is
+  // unthrottled. Better Auth's own default is `isProduction`, which is false
+  // everywhere in this tree because nothing sets NODE_ENV=production.
+  rateLimit: { enabled: true },
   emailAndPassword: {
     enabled: nativePasswordLoginEnabled(),
     // trex's own scrypt: the salt goes into scrypt as the hex string, new
