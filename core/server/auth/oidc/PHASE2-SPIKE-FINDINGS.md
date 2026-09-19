@@ -565,10 +565,64 @@ that a cookie of that name is present: nothing else on the route sets one — `c
 federation cookies and `createTokenResponse` sets `sb-access-token` alone — and the test was watched failing
 on exactly that assertion before the one-line fix.
 
-### `/sync-cookie` now answers 500 where it answered 204, for a purged user
+### A refusal after a `res.cookie` withholds nothing
 
+Recorded because it was accepted as a reasonable trade for a whole round and it is not one.
 `trexdb.session."userId"` is a foreign key to `trexdb."user"`, so a still-valid bearer for a row that
-`purge_deleted_users()` has removed raises `session_userId_fkey` inside `createSession` and the route's own
-handler answers `500 {"error":"server_error"}` with the cause logged. It used to answer 204 and set a cookie
-for a user that no longer exists. Chosen deliberately — a logged 500 beats a silent 204 handing out a
-credential for nobody — and pinned by test so it is a decision on the record rather than a surprise.
+`purge_deleted_users()` has removed raises `session_userId_fkey` inside `createSession`, and `/sync-cookie`'s
+own handler turned that into a 500. That looked like the safe answer. It was not: express queues a
+`Set-Cookie` when `res.cookie` is called and writing a later status does not unqueue it, so **the 500
+response still carried `sb-access-token` for the purged user**. Only the number in the status line changed.
+
+So the rule is about position, not about the status: a route that refuses must refuse **before** it sets any
+cookie. `/sync-cookie` now checks `fetchUserById` first and answers `401 not_authenticated` — the word it
+already uses two lines above for a token that is no longer good. 401 rather than 500 because nothing has
+failed; because it is the only answer that makes an SPA drop the token instead of retrying it for the
+refresh chain's thirty days; and because 500 collapsed "the user is gone" into the same signal as "Postgres
+is down". `fetchUserById` also returns null for a soft-deleted user, which is the stricter and correct
+reading: this route issues the cookie the provider authenticates on.
+
+### Every route that completes an authentication, and the clock that separated them
+
+The engine session cookie's `Max-Age` is 7 days (`session.expiresIn`); trex's refresh chain is 30
+(`auth/refresh-token-ttl.ts`). So "issues sb-access-token but no engine session" is not a binary — a browser
+can hold a valid trex session and an expired engine cookie for three weeks, and spend them looping at
+`/oauth2/authorize`. The complete list, after this task:
+
+| route | engine session |
+|---|---|
+| `POST /token` password grant | `authenticateUser` → `signInEmail` (phase 1) |
+| `POST /signup` | same, through `authenticateUser` |
+| `POST /token` **refresh grant** | `attachEngineSessionCookie`, added here — it was the last one without |
+| `POST /sync-cookie` | `attachEngineSessionCookie` |
+| `GET /callback` (federation) | `attachEngineSessionCookie` |
+
+The refresh grant attaches only when the request presents cookies at all. A caller that stores none could
+never send the session back, so the row would be unreachable from the moment it was written and an hourly
+server-side refresh would leave several hundred behind — and nothing in the tree reaps `trexdb.session`. A
+browser whose engine cookie has expired still sends `sb-access-token`, so the case the attach exists for is
+not the case the gate skips.
+
+### Reusing a session has to renew it, or the dedupe is the leak
+
+`attachEngineSessionCookie` skips creating a row when the request already carries a live session for the same
+user. On its own that still grew: once a session passes `updateAge` (a day), `getSession` slides its
+`expiresAt` seven days out **and re-issues the cookie with it**
+(`better-auth/dist/api/routes/session.mjs:198-214`). Discarding that header renewed the row and not the
+browser, so the cookie died on its original seventh day and the next call minted a fresh row beside the slid
+one — roughly one orphan per user per week, forever. The header is forwarded now.
+
+### `/logout`'s CSRF surface, recorded and not redesigned
+
+Widening the engine branch past `nativePasswordLoginEnabled` extended a shape that already existed wherever
+password login was on, and it is worth writing down rather than discovering:
+
+- the route carries no CSRF token, and the engine branch runs on the request's cookies alone, **before** the
+  bearer check further down — so a cross-site POST with no Authorization header still signs the browser out
+  of its engine session;
+- the bearer and the cookie need not name the same user, so the two halves of a logout can end two different
+  sessions.
+
+Denial of service only — the attacker ends sessions, they do not acquire any — and unchanged in kind by this
+task; only the set of deployments it reaches grew. Left alone deliberately: a CSRF token on `/logout` is a
+change to the wire contract every caller shares, which is not this task's to make.
