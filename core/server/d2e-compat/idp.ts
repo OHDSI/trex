@@ -81,17 +81,44 @@ export function resolveIdpConfig(
       idp,
       issuer,
       jwksUri: `${internalBase}/.well-known/jwks.json`,
-      audiences: splitList(env.D2E_IDP_AUDIENCES ?? env.TREX_OIDC_CLIENT_ID),
+      // Two values, not the client id alone. The access token's `aud` is the
+      // RFC 8707 resource identifier — the issuer, because that is what
+      // provider.ts declares as the only resource — plus
+      // `<issuer>/oauth2/userinfo`, which the plugin appends whenever `openid`
+      // was granted. The id_token's `aud` is still the client id, and that is
+      // the token scripts/lib/idp-login.cjs picks (`id_token || access_token`).
+      // The portal sends the ACCESS token as its bearer, so the client id alone
+      // 401s every portal call on an audience mismatch. jose accepts a token
+      // whose `aud` carries any one of these, so naming both verifies both
+      // without widening either.
+      audiences: splitList(
+        env.D2E_IDP_AUDIENCES ?? `${issuer},${env.TREX_OIDC_CLIENT_ID ?? ""}`,
+      ),
       clientId: env.TREX_OIDC_CLIENT_ID ?? "",
       clientSecret: env.TREX_OIDC_CLIENT_SECRET ?? "",
-      scope: env.D2E_IDP_SCOPE ?? "openid profile email",
+      // offline_access is not optional here: the plugin issues a refresh token
+      // only when that scope was granted
+      // (dist/introspect-njKASm3q.mjs:1798), where trex's own provider issued
+      // one unconditionally. Without it the portal — which renews 180s before
+      // expiry — gets no refresh token at all and drops the user back to the
+      // login page an hour in.
+      scope: env.D2E_IDP_SCOPE ?? "openid profile email offline_access",
       // /oauth2/*, not the bare paths the hand-written provider served:
       // @better-auth/oauth-provider hard-codes them and its discovery document
       // cannot be overridden. This is the one thing a relying party sees change
       // in the cutover, and the reason to read them from the document rather
       // than to restate them here is exactly this line.
       tokenUrl: `${internalBase}/oauth2/token`,
-      resource: env.D2E_IDP_RESOURCE ?? "",
+      // The issuer rather than nothing. `resolveResourcePolicy` returns no
+      // audience claim at all for a request that named no resource
+      // (dist/introspect-njKASm3q.mjs:453-462), and the access token is then an
+      // opaque string rather than a JWT — which the portal cannot decode for
+      // `roles` and auth.ts cannot verify against the JWKS. The portal's
+      // authorize request carries no `resource`, so the /oauth/token proxy is
+      // the only leg that can supply one; the plugin honours it there because
+      // the stored code named none to narrow it against
+      // (`resource ?? storedResources`, :1937).
+      resource: env.D2E_IDP_RESOURCE ?? issuer,
       // Browser-visible paths, relative to the public gateway origin. They carry
       // the mount's base path because the d2e front door does NOT strip it: it
       // proxies /trex/* to this node as-is, and routes a bare /oidc/* to Logto.

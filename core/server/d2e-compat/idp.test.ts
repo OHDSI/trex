@@ -89,7 +89,7 @@ Deno.test("trex: issuer, jwks and token endpoint come from the provider's own co
   assertEquals(c.tokenUrl, "https://trex.example/oidc/oauth2/token");
   assertEquals(c.clientId, "d2e-portal");
   assertEquals(c.clientSecret, "t-secret");
-  assertEquals(c.audiences, ["d2e-portal"]);
+  assertEquals(c.audiences, ["https://trex.example/oidc", "d2e-portal"]);
   assertEquals(c.authorizePath, "oidc/oauth2/authorize");
   // Selecting trex must not leak Logto's endpoints through.
   assertEquals(c.tokenUrl.includes("logto"), false);
@@ -105,7 +105,7 @@ Deno.test("trex: the issuer carries the base path AND the /oidc mount", () => {
   assertEquals(c.jwksUri, "https://trex.example/trex/oidc/.well-known/jwks.json");
 });
 
-Deno.test("trex: D2E_IDP_AUDIENCES overrides the client-id default", () => {
+Deno.test("trex: D2E_IDP_AUDIENCES overrides the default pair", () => {
   const c = resolveIdpConfig({
     D2E_IDP: "trex",
     TREX_OIDC_ISSUER: "https://trex.example",
@@ -113,6 +113,89 @@ Deno.test("trex: D2E_IDP_AUDIENCES overrides the client-id default", () => {
     D2E_IDP_AUDIENCES: "one,two",
   }, "");
   assertEquals(c.audiences, ["one", "two"]);
+});
+
+Deno.test("trex: the audience list names the resource the access token carries", () => {
+  // Measured against the plugin: the access token's `aud` is
+  // ["<resource identifier>", "<issuer>/oauth2/userinfo"] and never the client
+  // id, which rides as `client_id`/`azp`. The resource identifier is the issuer
+  // (auth/oidc/provider.ts declares `resources: [oidcIssuer()]`). The portal
+  // presents that access token to the d2e-compat gate, so a list holding only
+  // the client id 401s every portal call.
+  const c = resolveIdpConfig({
+    D2E_IDP: "trex",
+    TREX_OIDC_ISSUER: "https://d2e.example:41100",
+    TREX_OIDC_CLIENT_ID: "d2e-portal",
+  }, "/trex");
+  assertEquals(c.audiences[0], c.issuer);
+});
+
+Deno.test("trex: the client id stays on the list, because the id_token carries it", () => {
+  // The id_token's `aud` IS the client id, and it is the token
+  // scripts/lib/idp-login.cjs prefers (`body.id_token || body.access_token`).
+  // Dropping the client id in favour of the resource would unauthenticate it.
+  const c = resolveIdpConfig({
+    D2E_IDP: "trex",
+    TREX_OIDC_ISSUER: "https://d2e.example:41100",
+    TREX_OIDC_CLIENT_ID: "d2e-portal",
+  }, "/trex");
+  assertEquals(c.audiences.includes("d2e-portal"), true);
+});
+
+Deno.test("trex: no client id yields the resource alone, not a blank audience", () => {
+  // A deployment that registers no client still has a resource to check against.
+  // The default is built by joining, so an unset client id leaves a trailing
+  // separator; splitList is what drops the empty entry. Pinned because an
+  // audience list carrying "" is one jose can never match, and the mismatch
+  // would read as a signing problem rather than as a missing client id.
+  const c = resolveIdpConfig(
+    { D2E_IDP: "trex", TREX_OIDC_ISSUER: "https://d2e.example:41100" },
+    "/trex",
+  );
+  assertEquals(c.audiences, ["https://d2e.example:41100/trex/oidc"]);
+});
+
+Deno.test("trex: the token request names the issuer as its resource", () => {
+  // Without a resource on the exchange the plugin mints an OPAQUE access token
+  // (no audience claim -> not a JWT), which the portal cannot decode for `roles`
+  // and auth.ts cannot verify. The portal's /authorize leg sends no `resource`,
+  // so the /oauth/token proxy is the only leg left to supply one.
+  const c = resolveIdpConfig(
+    { D2E_IDP: "trex", TREX_OIDC_ISSUER: "https://d2e.example:41100" },
+    "/trex",
+  );
+  assertEquals(c.resource, c.issuer);
+  // The resource is what lands in `aud`, so it must be the value the audience
+  // list expects -- the two cannot be configured apart by accident.
+  assertEquals(c.audiences.includes(c.resource), true);
+});
+
+Deno.test("trex: D2E_IDP_RESOURCE still overrides the issuer default", () => {
+  const c = resolveIdpConfig({
+    D2E_IDP: "trex",
+    TREX_OIDC_ISSUER: "https://d2e.example:41100",
+    D2E_IDP_RESOURCE: "https://api.example",
+  }, "/trex");
+  assertEquals(c.resource, "https://api.example");
+});
+
+Deno.test("trex: the requested scope asks for offline_access", () => {
+  // The plugin gates refresh-token issuance on the scope having been granted
+  // (trex's own provider issued one unconditionally). Without it the portal's
+  // silent renewal has nothing to renew with.
+  const c = resolveIdpConfig(
+    { D2E_IDP: "trex", TREX_OIDC_ISSUER: "https://d2e.example:41100" },
+    "/trex",
+  );
+  assertEquals(c.scope, "openid profile email offline_access");
+  assertEquals(
+    resolveIdpConfig({
+      D2E_IDP: "trex",
+      TREX_OIDC_ISSUER: "https://d2e.example:41100",
+      D2E_IDP_SCOPE: "openid",
+    }, "/trex").scope,
+    "openid",
+  );
 });
 
 // ── Admin claims ────────────────────────────────────────────────────────────
