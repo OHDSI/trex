@@ -460,6 +460,8 @@ jobs:
                    auth/oidc/import-signing-key.test.ts \
                    auth/oidc/custom-claims.test.ts \
                    auth/oidc/seed-client.test.ts \
+                   auth/oidc/discovery.test.ts \
+                   auth/oidc/soft-delete.test.ts \
                    mcp/tools/users.test.ts; do
             # `|| true` so a no-match grep does not kill the script under
             # `bash -e {0}` before the diagnosis below can be printed. A run

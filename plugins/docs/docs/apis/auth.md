@@ -91,6 +91,49 @@ When a federated sign-in is refused (unknown account, disabled user, etc.) and
 page with `error` (one of trex's fixed refusal codes) and `return_to` query
 params instead of returning a bare JSON error.
 
+## OIDC Provider
+
+Off unless `TREX_OIDC_PROVIDER_ENABLED` is `true` or `1`. When on, trex is an
+OpenID Connect provider for its own relying parties (WebAPI, the d2e portal),
+served by `@better-auth/oauth-provider` under `${BASE_PATH}/oidc`.
+
+| Path | Description |
+|------|-------------|
+| `/.well-known/openid-configuration` | Discovery. Every other URL below is advertised here; fetch it rather than hard-coding them. |
+| `/.well-known/jwks.json` | The RS256 key set. |
+| `/oauth2/authorize` | Authorization code flow, PKCE required. |
+| `/oauth2/token` | `authorization_code`, `refresh_token`, `client_credentials`. |
+| `/oauth2/userinfo` | |
+| `/oauth2/end-session` | RP-initiated logout. |
+
+Anything under `${BASE_PATH}/oidc` that is not `/oauth2/...` or
+`/.well-known/...` answers 404, including Better Auth's own sign-in and session
+routes: `${BASE_PATH}/auth/v1` owns those. Clients are registered from the
+environment (`TREX_OIDC_CLIENT_ID`, `TREX_OIDC_CLIENT_SECRET`,
+`TREX_OIDC_CLIENT_REDIRECT_URIS`, `TREX_OIDC_CLIENT_POST_LOGOUT_URIS`,
+`TREX_OIDC_CLIENT_ROLES`, `TREX_OIDC_CLIENT_SCOPES`) at boot; there is no HTTP
+surface for creating one.
+
+Two things worth knowing before they surprise you:
+
+- **`TREX_OIDC_ISSUER` is checked at boot, and a bad value stops the node
+  coming up.** It must be `https:` (or a loopback host) and carry no query or
+  fragment; Better Auth would otherwise silently rewrite it, and every token
+  would go out with an `iss` no relying party expects. The failure is loud on
+  purpose — a node that serves unusable tokens looks healthy. `/trex/api/ready`
+  stays down and the reason is on stderr.
+- **The whole engine answers at the issuer path**, not just the protocol
+  endpoints, because the discovery document builds every endpoint URL from it.
+  One consequence: an `https:` issuer gives Better Auth's session cookie the
+  `__Secure-` prefix and the `secure` attribute, so a deployment that terminates
+  TLS elsewhere and speaks plain http to trex will not see that cookie come
+  back.
+
+Relying parties must set their expected audience to the issuer (the access
+token's `aud` is the RFC 8707 resource identifier, not the client id) alongside
+the client id, which is what the id_token carries. In d2e that is
+`D2E_IDP_AUDIENCES`.
+
 ## Tokens
 
 - Access tokens are JWTs signed with an HS256 key derived from `TREX_ROOT_KEY` via HKDF
