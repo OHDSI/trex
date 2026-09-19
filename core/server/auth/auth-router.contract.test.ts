@@ -2171,3 +2171,68 @@ mountTest("the routes are reachable once TREX_IDP_ENABLED is on", async () => {
     }
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The Better Auth session cookie
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// /oauth2/authorize resolves the end user with getSessionFromCtx — Better
+// Auth's own signed cookie against trexdb.session — and the plugin exposes no
+// override for it. Measured at the cutover: a genuine, verifying sb-access-token
+// presented as the only cookie gets the same 302 back to the login page as no
+// cookie at all. So this cookie is not an ornament on the envelope; it is the
+// whole of what makes a sign-in through /auth/v1 reach the provider, and the
+// routes below are every place a browser can acquire or lose one.
+//
+// The envelope, the statuses and the error strings above are unchanged: these
+// assert Set-Cookie and nothing else.
+
+/**
+ * The session token inside Better Auth's signed cookie, whose value is
+ * `encodeURIComponent(`${token}.${base64 hmac}`)`. The signature is standard
+ * base64 and the token is generateId(32), so neither can contain a dot and the
+ * last one separates them.
+ */
+function engineSessionToken(cookie: string): string {
+  const pair = cookie.split(";")[0];
+  const value = decodeURIComponent(pair.slice(pair.indexOf("=") + 1));
+  return value.slice(0, value.lastIndexOf("."));
+}
+
+/**
+ * Who the cookie actually signs in, read from the row rather than from the
+ * cookie. A cleared cookie and a cookie for the wrong user both carry the
+ * expected name, so asserting the name alone would pass on either.
+ */
+async function engineSessionUserId(pool: PgPool, cookie: string): Promise<string | null> {
+  const result = await pool.query(
+    `SELECT "userId" FROM trexdb.session WHERE token = $1`,
+    [engineSessionToken(cookie)],
+  );
+  return result.rows[0]?.userId ?? null;
+}
+
+contractTest(
+  "POST /token password grant sets Better Auth's session cookie beside sb-access-token",
+  async ({ url, pool }) => {
+    const user = await createUser(pool);
+
+    await withEnv({ TREX_NATIVE_PASSWORD_LOGIN_ENABLED: undefined }, async () => {
+      const res = await post(`${url}/token?grant_type=password`, {
+        email: user.email,
+        password: user.password,
+      });
+      assertEquals(res.status, 200);
+      await drain(res);
+
+      assertNotEquals(setCookie(res, "sb-access-token"), undefined);
+      const engine = setCookie(res, "better-auth.session_token");
+      assertNotEquals(engine, undefined);
+      // Wide enough to reach /trex/oidc as well as /trex/auth/v1, which are
+      // different subtrees of the same origin.
+      assertEquals(cookieAttr(engine!, "Path"), "/");
+      assertEquals(engine!.includes("HttpOnly"), true);
+      assertEquals(await engineSessionUserId(pool, engine!), user.id);
+    });
+  },
+);
