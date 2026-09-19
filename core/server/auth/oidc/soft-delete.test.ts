@@ -268,3 +268,110 @@ test("the guard is what refuses, and it refuses at the engine's own lookup", asy
     await endFlow(m, flow);
   }
 });
+
+/**
+ * trex's complete admin ban procedure, as auth-router.ts:1449-1471 performs it:
+ * the flag, the native refresh tokens, and every engine session. What it does
+ * NOT do — because the table did not exist when it was written — is touch
+ * trexdb."oauthRefreshToken", which is where the provider keeps the token that
+ * renews an OIDC session. Nothing anywhere revokes those.
+ */
+async function ban(m: NonNullable<typeof mod>, userId: string) {
+  await m.db.pool.query(
+    `UPDATE trexdb."user" SET banned = true, "updatedAt" = NOW() WHERE id = $1`,
+    [userId],
+  );
+  await m.db.pool.query(
+    `UPDATE trexdb.refresh_token SET revoked = true, "updatedAt" = NOW()
+      WHERE "userId" = $1 AND revoked = false`,
+    [userId],
+  );
+  await m.db.pool.query(`DELETE FROM trexdb.session WHERE "userId" = $1`, [userId]);
+}
+
+test("a banned user gets no token from any of the three paths either", async (m) => {
+  // A ban and a soft delete are two ways trex retires an account, and the
+  // provider has never told them apart: the deleted router.ts refused a banned
+  // user at /authorize outright. Without `banned` in the guard the ban is the
+  // weaker of the two by far — the OIDC refresh token survives it and renews
+  // indefinitely, after the engine session and the native refresh tokens have
+  // all been revoked.
+  const flow = await startFlow(m);
+  try {
+    // ── While the account is live, every path works ────────────────────────
+    const first = await authorize(flow);
+    assertNotEquals(first.code, null);
+    const issued = await postToken(flow, {
+      grant_type: "authorization_code",
+      code: first.code!,
+      redirect_uri: REDIRECT_URI,
+      code_verifier: first.verifier,
+      resource: flow.server.issuer,
+    });
+    assertEquals(issued.status, 200);
+    const accessToken = issued.body.access_token;
+    const refreshToken = issued.body.refresh_token;
+    assertNotEquals(refreshToken, undefined);
+    assertEquals(
+      (await fetch(`${flow.server.url}/oauth2/userinfo`, {
+        headers: { authorization: `Bearer ${accessToken}` },
+      }).then(async (r) => {
+        await r.body?.cancel();
+        return r.status;
+      })),
+      200,
+    );
+
+    const held = await authorize(flow);
+    assertNotEquals(held.code, null);
+
+    // ── The account is banned, by the whole procedure ──────────────────────
+    await ban(m, flow.userId);
+
+    const afterCode = await postToken(flow, {
+      grant_type: "authorization_code",
+      code: held.code!,
+      redirect_uri: REDIRECT_URI,
+      code_verifier: held.verifier,
+      resource: flow.server.issuer,
+    });
+    assertNotEquals(afterCode.status, 200, "the code exchange still issued a token");
+    assertEquals(afterCode.body.id_token, undefined);
+
+    // The one the ban procedure cannot reach on its own, and the reason this
+    // is a guard rather than a revocation.
+    const afterRefresh = await postToken(flow, {
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      resource: flow.server.issuer,
+    });
+    assertNotEquals(afterRefresh.status, 200, "the refresh grant still renewed the session");
+    assertEquals(afterRefresh.body.id_token, undefined);
+    assertEquals(afterRefresh.body.access_token, undefined);
+
+    const afterUserInfo = await fetch(`${flow.server.url}/oauth2/userinfo`, {
+      headers: { authorization: `Bearer ${accessToken}` },
+    });
+    assertNotEquals(afterUserInfo.status, 200, "/userinfo still described the user");
+    await afterUserInfo.body?.cancel();
+  } finally {
+    await endFlow(m, flow);
+  }
+});
+
+test("a banned user's session no longer authorizes at all", async (m) => {
+  const flow = await startFlow(m);
+  try {
+    assertNotEquals((await authorize(flow)).code, null);
+    // The flag alone, with the session left in place: /oauth2/authorize reads
+    // the engine session and never reads the user by id, so this is the case
+    // only findSession can refuse.
+    await m.db.pool.query(
+      `UPDATE trexdb."user" SET banned = true, "updatedAt" = NOW() WHERE id = $1`,
+      [flow.userId],
+    );
+    assertEquals((await authorize(flow)).code, null, "/oauth2/authorize still issued a code");
+  } finally {
+    await endFlow(m, flow);
+  }
+});

@@ -136,8 +136,22 @@ export async function installSoftDeleteGuard(): Promise<void> {
   const adapter = ctx.internalAdapter as unknown as Record<string | symbol, unknown>;
   if (adapter[GUARD_INSTALLED]) return;
 
-  const isRetired = (user: unknown) =>
-    Boolean(user && (user as { deletedAt?: unknown }).deletedAt);
+  // Banned as well as soft-deleted. They are two ways trex retires an account
+  // and the provider has never distinguished them: the deleted router.ts
+  // refused a banned user at /authorize outright (router.ts:104-110, 225-233),
+  // and trex's ban procedure revoked the OIDC refresh tokens because they lived
+  // in trexdb.refresh_token, which auth-router.ts's ban handler deletes. The
+  // provider's refresh tokens live in trexdb."oauthRefreshToken" instead, and
+  // nothing revokes those — so without this a ban leaves the OIDC session
+  // renewing itself forever, after every other door has been shut.
+  //
+  // `banned` is on the row already: the admin() plugin declares it, so the
+  // adapter selects it, exactly as better-auth.ts's additionalFields do for
+  // deletedAt.
+  const isRetired = (user: unknown) => {
+    const u = user as { deletedAt?: unknown; banned?: unknown } | null;
+    return Boolean(u && (u.deletedAt || u.banned));
+  };
 
   const findUserById = ctx.internalAdapter.findUserById.bind(ctx.internalAdapter);
   const findSession = ctx.internalAdapter.findSession.bind(ctx.internalAdapter);
