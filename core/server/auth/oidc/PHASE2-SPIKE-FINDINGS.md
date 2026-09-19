@@ -482,3 +482,65 @@ All three share the error code, so only the description distinguishes the branch
 The query schema pins `z.enum(["S256"])` (`introspect-njKASm3q.mjs:1048`) and the authorize handler
 checks the method again (`authorize-riRRCSbC.mjs:5596`). Removing either alone leaves `plain` refused;
 `auth/oidc/grants.test.ts`'s assertion changes only when both go.
+
+## Measured while giving the browser a session cookie (task 9)
+
+### The cookie, literally
+
+`(await auth.$context).authCookies.sessionToken`, against trex's own config with an http issuer:
+
+```json
+{"name":"better-auth.session_token",
+ "attributes":{"secure":false,"sameSite":"lax","path":"/","httpOnly":true,"maxAge":604800}}
+```
+
+`path` is already `/`, so nothing needed widening: `/trex/oidc` and `/trex/auth/v1` are both reached.
+The name and `secure` follow the issuer's scheme through `createCookieGetter`
+(`better-auth/dist/cookies/index.mjs:20-46`) — an https issuer gives `__Secure-better-auth.session_token`
+with `secure: true`, which is why nothing writes the name or the attributes out by hand.
+
+**`maxAge` is seconds; express's `res.cookie` counts milliseconds.** A cookie set from these attributes
+without the conversion expires in ten minutes over a session row that lives a week.
+
+There is no cookie cache (`session.cookieCache` is undefined), so the signed cookie against `trexdb.session`
+is the whole of the session — which is also what makes `endEngineSessions`' bare DELETE authoritative.
+
+### The engine mints no session without a password
+
+`auth.api.signInEmail` is the only thing in better-auth 1.7.5 that trex can reach which creates a session,
+and it needs the password. `admin.impersonateUser` wants an admin session and writes `impersonatedBy`.
+So a route holding nothing but a verified trex access token — `/sync-cookie` — has to go through
+`internalAdapter.createSession(userId, dontRememberMe, override)` and sign the cookie itself.
+
+`createSession` outside an endpoint is fine: it reads headers through `tryGetCurrentAuthEndpointContext()`
+(`dist/db/internal-adapter.mjs:247-251`), which returns undefined there, and `override` supplies
+`ipAddress`/`userAgent` instead.
+
+The cookie value is `encodeURIComponent(`${token}.${base64(hmac-sha256(token, secret))}`)` —
+better-call's `signCookieValue` (`better-call/dist/crypto.mjs:20-30`), standard base64, not base64url.
+better-call is a transitive dependency with no import-map entry, so `auth-router.ts` reproduces those six
+lines over `crypto.subtle` rather than pinning a second copy of it; the contract test hands the resulting
+cookie back to `auth.api.getSession` so a divergence fails instead of signing people in as nobody.
+
+### Two of the three routes the plan named were already done
+
+Phase 1's `authenticateUser` already forwards `signInEmail`'s `Set-Cookie`, so the password grant and
+`/signup` were never the gap — `auth-engine-cutover.test.ts` had been pinning the session and the cookie
+since the cutover. `/logout` already forwarded `signOut`'s clearing cookie too. The gap was `/sync-cookie`,
+which set `sb-access-token` alone.
+
+### Federated sign-in still reaches the provider as anonymous
+
+Searched rather than assumed, the way task 7's round 2 was: `auth.api.signInEmail` in `authenticateUser`
+is the **only** call in the tree that creates a `trexdb.session` row. `auth/federation/router.ts:324`
+finishes the upstream callback with `createTokenResponse(sessionUser, undefined, res)`, which sets
+`sb-access-token` and nothing else, and then redirects — so a user who signed in through an upstream IdP
+arrives at `/oauth2/authorize` with the one cookie measured above to be no session at all, and bounces
+back to the login page. The router's own header comment ("issue exactly the session the native password
+grant issues — so from the moment /callback finishes the request is indistinguishable from a native
+login") is false as it stands.
+
+**Not fixed in task 9**, and deliberately: the call is one line, but nothing in `auth/federation/` drives
+`/callback` over HTTP — there is no stub upstream with a token endpoint and a JWKS — so the change could
+not be pinned, and an unpinned change to that route is worse than a recorded gap. It is worth a task of
+its own, together with the harness.
