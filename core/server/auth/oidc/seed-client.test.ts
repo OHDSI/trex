@@ -207,3 +207,24 @@ test("the plugin reads the client back, clientRoles included", async () => {
   // USER_DELEGATED_SCOPES list and is refused when a caller sends it.
   assertEquals(client!.clientCredentialsScopes, ["trex:service"]);
 });
+
+test("re-seeding merges into metadata rather than replacing it", async () => {
+  // The plugin reads registration extensions out of this column
+  // (stripReservedOAuthClientMetadataExtensions,
+  // dist/authorize-riRRCSbC.mjs:1161), so it is a general bag and not trex's
+  // private field. An assignment here would discard whatever else a
+  // registration or an operator put there, silently, on every boot.
+  await seedOAuthClientFromEnv(ENV);
+  await pool.query(
+    `UPDATE trexdb."oauthClient"
+        SET "metadata" = COALESCE("metadata", '{}'::jsonb) || $2::jsonb
+      WHERE "clientId" = $1`,
+    [CLIENT_ID, JSON.stringify({ software_statement: "kept", clientRoles: ["STALE"] })],
+  );
+
+  await seedOAuthClientFromEnv(ENV);
+  const metadata = (await clientRow()).metadata as Record<string, unknown>;
+  assertEquals(metadata.software_statement, "kept");
+  // And the merge is right-biased, so the seeder still owns the roles.
+  assertEquals(metadata.clientRoles, ["ALP_USER_ADMIN", "ALP_SYSTEM_ADMIN"]);
+});

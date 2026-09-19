@@ -297,9 +297,83 @@ indefinitely. `mount.ts`'s guard now treats `deletedAt` and `banned` alike.
 
 ### Rate limiting
 
-Better Auth's `rateLimit.enabled` defaults to `isProduction` (`better-auth/dist/context/create-context.mjs:172`)
-and nothing in the trex tree sets `NODE_ENV=production`, so the provider's endpoints — mounted
-ahead of trex's own `apiLimiter` — were unthrottled. Turned on explicitly (100 requests / 10s,
-the plugin defaults). Note the runtime warns that it cannot resolve a client IP and falls back to
-**one shared bucket per path**: `advanced.ipAddress.ipAddressHeaders` / `trustedProxies` is not
-configured, and configuring it means trusting a header, so that decision is left open.
+Better Auth's `rateLimit.enabled` defaults to `isProduction`
+(`better-auth/dist/context/create-context.mjs:172`) and nothing in the trex tree sets
+`NODE_ENV=production`, so the provider's endpoints — mounted ahead of trex's own `apiLimiter` —
+were unthrottled. Turned on explicitly.
+
+**The engine's 100 requests / 10 seconds is not the rule that applies.** A plugin's own
+`customRules` win over it (`better-auth/dist/api/rate-limiter/index.mjs:251-258`), and the OAuth
+provider ships six (`@better-auth/oauth-provider/dist/authorize-riRRCSbC.mjs:5235-5264`):
+
+| path | window | max |
+|---|---|---|
+| `/oauth2/token` | 60s | **20** |
+| `/oauth2/authorize` | 60s | 30 |
+| `/oauth2/introspect` | 60s | 100 |
+| `/oauth2/revoke` | 60s | 30 |
+| `/oauth2/register` | 60s | 5 |
+| `/oauth2/userinfo` | 60s | 60 |
+
+Measured: request 21 to `/oauth2/token` inside a minute is a 429. `auth/oidc/revocation.test.ts`
+reproduced it by accident — three of its seven tests failed on nothing but exhausted budget.
+
+That caps a deployment at roughly twenty sign-ins a minute, against the deleted `router.ts`'s
+`authLimiter` of 600 per 15 minutes (`core/server/middleware/rate-limit.ts:19-28`,
+`TREX_AUTH_RATE_LIMIT_MAX`). `provider.ts` now sets all five reachable paths to that same budget,
+tuneable through `TREX_OIDC_RATE_LIMIT_MAX`; `/oauth2/register` keeps the plugin's 5, because trex
+registers no clients over HTTP.
+
+**Whose budget it is depends on resolving a client IP**, and that is the sharper problem.
+`getIP` reads `x-forwarded-for` by default (`@better-auth/core/dist/utils/ip.mjs:196`), which is
+what Caddy sends — so naming the header buys nothing. What matters is
+`advanced.ipAddress.trustedProxies` (`ip.mjs:177-193`):
+
+- **empty** — a header carrying MORE than one value resolves to `null` (`:190`), and every caller
+  then shares one bucket per path (`rate-limiter/index.mjs:241-245`). Caddy *appends* to
+  `x-forwarded-for` rather than replacing it, so any caller that sends one of its own makes the
+  header two-valued and collapses the whole deployment into that shared bucket at will.
+- **set** — the chain is walked from the RIGHT and the first address that is not a configured
+  proxy wins (`:180-189`). That is spoof-resistant, because a value the client prepended sits to
+  the left of the address Caddy observed.
+
+Wired as `TREX_TRUSTED_PROXIES`, **empty by default**. Seeding it with the RFC 1918 ranges would
+be worse than leaving it empty on an on-premise installation, where real clients live in 10/8 and
+192.168/16: the right-walk would skip the genuine address as "a proxy" and select whatever the
+client prepended. Which ranges are proxies is a property of the deployment.
+
+
+## Measured in fix round 1 (task 7)
+
+### The provider's tokens are outside every revocation path trex owns
+
+The deleted `router.ts:94-102` kept OIDC refresh tokens in `trexdb.refresh_token` precisely so
+that "a token issued here is revoked by the same paths that revoke a password-change or a
+deletion". The plugin keeps `trexdb."oauthRefreshToken"`, which nothing in trex writes to. Measured
+after trex's complete change-password procedure — native refresh rows revoked, engine session
+deleted — the OIDC refresh grant still answered 200 and kept rotating. `mount.ts`'s guard cannot
+cover it: that reads the user ROW, and a password change leaves the row saying the account is fine.
+`auth/oidc/revoke.ts` is called from `/logout`, `PUT /user`, `/change-password` and
+`PUT /admin/users/:id`.
+
+Two of the six paths deliberately take nothing. `POST /token`'s rotation revokes the single token
+it was handed, which is renewal rather than revocation; reaching into the OIDC tables there would
+end the SSO session every few minutes. `POST /revoke-session` scopes on `trexdb.refresh_token`'s
+`session_id`, which is trex's own concept with no column anywhere tying it to a `trexdb.session`
+row — so there is nothing to scope an OIDC revocation to, and revoking by user would sign the
+caller out of every device to honour a request to sign out of one. Both are pinned by test.
+
+### `oauthRefreshToken."sessionId"` is ON DELETE SET NULL
+
+V19 gives it a foreign key to `trexdb.session` with `ON DELETE SET NULL`. So anything that deletes
+an engine session — `endEngineSessions`, `auth.api.signOut`, ordinary expiry — first nulls the
+column a session-scoped revocation joins on, leaving the refresh chain alive AND no longer
+attributable to any session. `/logout` therefore revokes before it signs out. Anything joining on
+that column must do the same.
+
+### Rotation rewrites the token, so a second refresh check is not the same check
+
+`createRefreshToken` revokes the presented row and creates a new one (`:1571-1599`). A test that
+calls the refresh grant once to show a session live and again with the SAME token to show it dead
+proves nothing: the second call fails on rotation whatever the endpoint under test did. The first
+draft of `revocation.test.ts` did exactly that and passed against code that revoked nothing.
