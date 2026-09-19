@@ -11,7 +11,7 @@ import { betterAuth } from "better-auth";
 import { APIError } from "better-auth/api";
 import { admin, jwt } from "better-auth/plugins";
 import { pool } from "../db.ts";
-import { oidcIssuer } from "./oidc/config.ts";
+import { oidcIssuer, trustedProxies } from "./oidc/config.ts";
 import { trexOAuthProvider } from "./oidc/provider.ts";
 import { defaultServiceResource, refuseRetiredSubject } from "./oidc/hooks.ts";
 import { deriveSubkeyBase64, LABELS } from "./keys.ts";
@@ -86,6 +86,14 @@ export const auth = betterAuth({
   // unthrottled. Better Auth's own default is `isProduction`, which is false
   // everywhere in this tree because nothing sets NODE_ENV=production.
   rateLimit: { enabled: true },
+  advanced: {
+    // x-forwarded-for is what Caddy sends and already what Better Auth reads,
+    // so only the proxy list is worth stating. Empty unless the deployment says
+    // otherwise — oidc/config.ts's trustedProxies carries the reasoning, and
+    // the consequence of leaving it empty is a shared bucket rather than a
+    // wrong one.
+    ipAddress: { trustedProxies: trustedProxies() },
+  },
   emailAndPassword: {
     enabled: nativePasswordLoginEnabled(),
     // trex's own scrypt: the salt goes into scrypt as the hex string, new

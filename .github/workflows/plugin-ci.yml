@@ -461,6 +461,7 @@ jobs:
                    auth/oidc/custom-claims.test.ts \
                    auth/oidc/seed-client.test.ts \
                    auth/oidc/grants.test.ts \
+                   auth/oidc/revocation.test.ts \
                    auth/oidc/discovery.test.ts \
                    auth/oidc/soft-delete.test.ts \
                    mcp/tools/users.test.ts; do

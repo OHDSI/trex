@@ -204,3 +204,57 @@ function parseScopes(raw: string | undefined): string[] | undefined {
   if (scopes.length === 0) return undefined;
   return scopes.includes("openid") ? scopes : ["openid", ...scopes];
 }
+
+/**
+ * Per-path ceilings for the provider's own endpoints.
+ *
+ * The plugin ships `customRules` that are far tighter than anything trex has
+ * served: `/oauth2/token` at 20 per 60 seconds and `/oauth2/authorize` at 30
+ * (@better-auth/oauth-provider@1.7.5 dist/authorize-riRRCSbC.mjs:5235-5264).
+ * Measured against the real mount, request 21 is a 429. The deleted router.ts
+ * ran authLimiter — 600 per 15 minutes, TREX_AUTH_RATE_LIMIT_MAX — in front of
+ * /authorize and /token, so the plugin's defaults would cap a whole deployment
+ * at roughly twenty sign-ins a minute.
+ *
+ * Worse while the client IP cannot be resolved: better-auth then keys every
+ * caller into ONE bucket per path (dist/api/rate-limiter/index.mjs:241-245), so
+ * the ceiling is a deployment-wide budget rather than a per-caller one. Sized
+ * from the old per-IP budget for that reason, and tuneable by the same kind of
+ * knob.
+ */
+export function oidcRateLimitMax(
+  raw: string | undefined = Deno.env.get("TREX_OIDC_RATE_LIMIT_MAX"),
+): number {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : 600;
+}
+
+/** The window those ceilings are measured over, in seconds. Matches authLimiter's 15 minutes. */
+export const OIDC_RATE_LIMIT_WINDOW = 15 * 60;
+
+/**
+ * CIDRs to treat as proxies when reading `x-forwarded-for`, which is what Caddy
+ * sends and already what Better Auth reads by default
+ * (@better-auth/core utils/ip.mjs:196) — so naming the header buys nothing and
+ * this is the setting that actually changes behaviour.
+ *
+ * With it set, getIPFromHeader walks the chain from the RIGHT and takes the
+ * first address that is not a configured proxy (ip.mjs:180-189), which is
+ * spoof-resistant: Caddy appends the peer it observed, so a value a client
+ * prepended sits to the left and is never selected. With it empty, a header
+ * carrying more than one value resolves to null (ip.mjs:190) and every caller
+ * shares one bucket — safe, but a lever any anonymous caller can pull by
+ * sending an `X-Forwarded-For` of their own.
+ *
+ * Deliberately EMPTY by default rather than seeded with the RFC 1918 ranges.
+ * On an on-premise installation real clients live in 10/8 and 192.168/16; a
+ * default that declared those trusted would skip the real address and select
+ * whatever the client prepended, turning a shared bucket into an attacker-
+ * chosen one. Which ranges are proxies is a property of the deployment, so the
+ * deployment says so.
+ */
+export function trustedProxies(
+  raw: string | undefined = Deno.env.get("TREX_TRUSTED_PROXIES"),
+): string[] {
+  return (raw ?? "").split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+}

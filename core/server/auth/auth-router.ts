@@ -823,6 +823,13 @@ router.post("/logout", apiLimiter, async (req, res) => {
       // never the session. Scoped to this one session rather than to the
       // account, so logging out here stays as narrow as it has always been.
       const live = await auth.api.getSession({ headers }).catch(() => null);
+      // BEFORE the sign-out, not after. V19 gives
+      // oauthRefreshToken."sessionId" an ON DELETE SET NULL foreign key to
+      // trexdb.session, so deleting the session row nulls the very column this
+      // revocation joins on — leaving the OIDC refresh chain alive and
+      // unattributable to any session. Measured: the rows survive with
+      // sessionId NULL.
+      if (live?.session?.id) await revokeOidcTokensForSession(live.session.id);
       const signedOut = await auth.api.signOut({
         headers,
         returnHeaders: true,
@@ -830,7 +837,6 @@ router.post("/logout", apiLimiter, async (req, res) => {
       for (const cookie of signedOut?.headers.getSetCookie() ?? []) {
         res.append("Set-Cookie", cookie);
       }
-      if (live?.session?.id) await revokeOidcTokensForSession(live.session.id);
     }
 
     const authHeader = req.headers.authorization;

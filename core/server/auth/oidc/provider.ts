@@ -3,7 +3,7 @@
 // difference is one a relying party would notice.
 import { oauthProvider } from "@better-auth/oauth-provider";
 import { accessTokenClaims, idTokenClaims, userInfoClaims } from "./custom-claims.ts";
-import { oidcIssuer, SERVICE_SCOPE } from "./config.ts";
+import { OIDC_RATE_LIMIT_WINDOW, oidcIssuer, oidcRateLimitMax, SERVICE_SCOPE } from "./config.ts";
 import { refreshTokenTtlDays } from "../refresh-token-ttl.ts";
 
 export function trexOAuthProvider() {
@@ -62,6 +62,22 @@ export function trexOAuthProvider() {
         "idp_groups",
         "idp_provider",
       ],
+    },
+    // The plugin's own customRules are 20/60s on /oauth2/token and 30/60s on
+    // /oauth2/authorize (dist/authorize-riRRCSbC.mjs:5235-5264), which caps a
+    // deployment at roughly twenty sign-ins a minute — and, while the client IP
+    // cannot be resolved, caps the WHOLE deployment rather than one caller.
+    // Replaced with the budget the deleted router.ts's authLimiter ran, which
+    // is the number this installation was actually sized against. Every path
+    // gets the same one because they are all steps of the same flow; register
+    // stays at the plugin's 5, since trex registers no clients over HTTP at all
+    // (clientPrivileges below refuses them).
+    rateLimit: {
+      token: { window: OIDC_RATE_LIMIT_WINDOW, max: oidcRateLimitMax() },
+      authorize: { window: OIDC_RATE_LIMIT_WINDOW, max: oidcRateLimitMax() },
+      userinfo: { window: OIDC_RATE_LIMIT_WINDOW, max: oidcRateLimitMax() },
+      introspect: { window: OIDC_RATE_LIMIT_WINDOW, max: oidcRateLimitMax() },
+      revoke: { window: OIDC_RATE_LIMIT_WINDOW, max: oidcRateLimitMax() },
     },
     // Without a clientPrivileges callback every client_credentials
     // configuration call is UNAUTHORIZED (dist/authorize-riRRCSbC.mjs:1178).
