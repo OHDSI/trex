@@ -176,3 +176,52 @@ which is not how trex migrates.
 Foreign keys observed on the created tables, for whoever writes that migration by hand:
 `oauthClientResource."clientId" → oauthClient."clientId" ON DELETE CASCADE` and
 `oauthClientResource."resourceId" → oauthResource.identifier ON DELETE CASCADE`.
+
+## Measured at the cutover (task 6)
+
+Spikes 1 and 2 called `auth.handler()` directly, with no listener and no Express. These three were
+measured against the real mount (`oidc/mount.ts`) on a real `listen(0, "127.0.0.1")`, because they
+only exist once a request has been through Express.
+
+### `req.originalUrl`, not `req.url`
+
+Under `app.use("/trex/oidc", handler)`, a request for
+`/trex/oidc/.well-known/openid-configuration` arrives as:
+
+```
+req.url         = /.well-known/openid-configuration
+req.originalUrl = /trex/oidc/.well-known/openid-configuration
+```
+
+Express strips the mount prefix, and **both** consumers need it back. better-call routes on
+`new URL(ctx.baseURL).pathname` (better-auth@1.7.5 `api/index.ts:154`), which is `/trex/oidc`, and
+the discovery document is served by an `onRequest` hook that compares `new URL(request.url).pathname`
+against `<jwt.issuer pathname>/.well-known/openid-configuration`
+(`dist/authorize-riRRCSbC.mjs:4227`). A `Request` built from `req.url` misses on both: every route
+404s and the document is never served. This settles the `[UNVERIFIED]` in facts C.3.
+
+### `sb-access-token` is not a session at `/oauth2/authorize`
+
+Measured with a **genuine** trex access token — three segments, `verifyAccessToken` returns its
+claims — presented as the only cookie:
+
+| cookie | `GET /oauth2/authorize` |
+|---|---|
+| `sb-access-token=<valid trex JWT>` | 302 to `loginPage` with the signed query — identical to sending no cookie at all |
+| `better-auth.session_token=<engine session>` | 302 to the client's `redirect_uri` with `code`, `state`, `iss` |
+
+The provider reads Better Auth's own signed session cookie and nothing else. `auth-router.ts`'s
+sign-in already forwards the engine's `Set-Cookie` to the browser alongside `sb-access-token`
+(phase 1 added that for exactly this), so a browser that signed in through `/auth/v1` carries both —
+but a login page that sets only `sb-access-token` (or a caller that replays one) reaches the provider
+as anonymous. The cookie name follows the base URL's scheme: `__Secure-better-auth.session_token`
+behind an https issuer.
+
+### The base URL is the issuer, and that is not a free choice
+
+`authServerMetadata` builds `authorization_endpoint`, `token_endpoint`, `userinfo_endpoint`,
+`end_session_endpoint` and `jwks_uri` from `ctx.context.baseURL`, and only `issuer` from the jwt
+plugin's own `jwt.issuer`. `getBaseURL` returns `options.baseURL` unchanged when it already carries a
+path, so `options.basePath` never enters into it. The engine therefore moved off phase 1's
+`${BASE_PATH}/_auth` and onto `${BASE_PATH}/oidc` wholesale; what keeps Better Auth's own routes off
+the public surface is `oidc/mount.ts`'s prefix gate, not the base path.
