@@ -375,3 +375,69 @@ test("a banned user's session no longer authorizes at all", async (m) => {
     await endFlow(m, flow);
   }
 });
+
+/** RFC 7662 introspection, authenticated as the client that was issued the token. */
+async function introspect(flow: Flow, token: string) {
+  const res = await fetch(`${flow.server.url}/oauth2/introspect`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: flow.clientId,
+      client_secret: CLIENT_SECRET,
+      token,
+    }),
+  });
+  return { status: res.status, body: await res.json() as Record<string, unknown> };
+}
+
+test("introspection stops describing a retired user's tokens", async (m) => {
+  // The door the guard on internalAdapter cannot cover. validateJwtAccessToken
+  // (dist/introspect-njKASm3q.mjs:2237-2286) never calls findUserById at all
+  // and reads the session through ctx.context.adapter rather than the wrapped
+  // internalAdapter, so a retired user's JWT introspected as active with its
+  // whole claim set. The opaque and refresh validators do go through the guard,
+  // but only to fill `sub`, and answered active with no subject at all.
+  for (const retire of [
+    (m: NonNullable<typeof mod>, id: string) =>
+      m.db.pool.query(`SELECT trexdb.soft_delete_user($1)`, [id]),
+    (m: NonNullable<typeof mod>, id: string) => ban(m, id),
+  ]) {
+    const flow = await startFlow(m);
+    try {
+      const first = await authorize(flow);
+      const issued = await postToken(flow, {
+        grant_type: "authorization_code",
+        code: first.code!,
+        redirect_uri: REDIRECT_URI,
+        code_verifier: first.verifier,
+        resource: flow.server.issuer,
+      });
+      assertEquals(issued.status, 200);
+      const accessToken = issued.body.access_token;
+      const refreshToken = issued.body.refresh_token;
+      // The premise of the whole fix: trex declares `resources`, so its access
+      // token is a signed JWT and takes validateJwtAccessToken's path. An
+      // opaque token would exercise a different — and already guarded — branch.
+      assertEquals(accessToken.split(".").length, 3, "the access token is not a JWT");
+
+      const live = await introspect(flow, accessToken);
+      assertEquals(live.status, 200);
+      assertEquals(live.body.active, true);
+      assertEquals(live.body.sub, flow.userId);
+      assertEquals((await introspect(flow, refreshToken)).body.active, true);
+
+      await retire(m, flow.userId);
+
+      const afterAccess = await introspect(flow, accessToken);
+      assertEquals(afterAccess.body.active, false, "the access token still introspected active");
+      assertEquals(afterAccess.body.sub, undefined);
+      assertEquals(
+        (await introspect(flow, refreshToken)).body.active,
+        false,
+        "the refresh token still introspected active",
+      );
+    } finally {
+      await endFlow(m, flow);
+    }
+  }
+});
