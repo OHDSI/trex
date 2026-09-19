@@ -225,3 +225,81 @@ plugin's own `jwt.issuer`. `getBaseURL` returns `options.baseURL` unchanged when
 path, so `options.basePath` never enters into it. The engine therefore moved off phase 1's
 `${BASE_PATH}/_auth` and onto `${BASE_PATH}/oidc` wholesale; what keeps Better Auth's own routes off
 the public surface is `oidc/mount.ts`'s prefix gate, not the base path.
+
+## Measured at the grant cutover (task 7)
+
+Against the real mount on `listen(0, "127.0.0.1")`, with the seeded client. Each of these was
+read in `core/server/node_modules/@better-auth/oauth-provider@1.7.5` first and then run.
+
+### `client_credentials` cannot carry any scope trex already declares
+
+`USER_DELEGATED_SCOPES` is exactly `{openid, profile, email, offline_access}`
+(`dist/introspect-njKASm3q.mjs:917-921`). The grant handler rejects a requested scope that is
+either absent from the client's `clientCredentialsScopes` **or** user-delegated (`:2075-2084`,
+`error: invalid_scope`), and the plugin's own `clientCredentialsScopes` validator additionally
+requires the scope to be one the provider advertises in `opts.scopes` (`:939-940`). So
+`clientCredentialsScopes: ["openid"]` is a row the plugin would never have written itself, and
+one whose only usable call is a token request that sends **no** `scope` at all. trex declares
+`trex:service` instead, in `opts.scopes` and in that column and nowhere else — no client's
+`scopes` column lists it, so no authorize request can be granted it.
+
+### The grant produces an opaque token unless the token request carries `resource`
+
+`isJwtAccessToken = audienceClaim && !opts.disableJwtPlugin` (`:1800`), `audienceClaim` comes from
+`resolveResourcePolicy`, and that returns `undefined` outright when the request named no resource
+(`:452-462`). `authorization_code` and `refresh_token` inherit one from the authorize leg or the
+stored refresh token; `client_credentials` has neither. So **without a resource on that grant the
+access token is opaque and `customAccessTokenClaims` never runs** — seeding
+`metadata.clientRoles` alone changes nothing and the grant still answers 200.
+`oidc/hooks.ts`'s `defaultServiceResource` supplies the issuer when the caller names none.
+
+With it: header `{"typ":"at+jwt","alg":"RS256"}`, payload `sub` = the **client id**
+(`createJwtAccessToken`, `:1353`: `user?.id ?? client.clientId`), `aud` = the resource identifier
+alone (no userinfo entry, because the granted scopes do not include `openid`), plus trex's
+`trex_role: "service"`, `app_metadata` and `roles`. No `id_token` and no `refresh_token`.
+
+### `customAccessTokenClaims` is handed the client's metadata, and nothing else about the client
+
+`{ user, scopes, resources, referenceId, metadata }` (`:255-261`), with
+`metadata = parseClientMetadata(client.metadata)` (`:1802`). There is no client object and no
+`clientRoles` column, so the roles a service token authorizes as can only ride in `metadata` —
+which the plugin also treats as the bag registration extensions live in
+(`stripReservedOAuthClientMetadataExtensions`, `dist/authorize-riRRCSbC.mjs:1161`). A seeder that
+assigns the whole column therefore discards them.
+
+### Introspection is a fourth door, and the `internalAdapter` guard does not reach it
+
+`validateJwtAccessToken` (`:2237-2286`) never calls `findUserById` and reads the session through
+`ctx.context.adapter.findOne({model:"session"})` rather than the wrapped
+`internalAdapter.findSession` — so a retired user's JWT access token introspected `active: true`
+with its whole claim set. `validateOpaqueAccessToken` (`:2336`) and `validateRefreshToken`
+(`:2410`) do go through the guard, but only to fill `sub`, and answered `active: true` with
+`sub: undefined`. Refused in `oidc/hooks.ts` on the answer rather than per validator: an active
+response must name a subject, and that subject must still resolve — with `sub === client_id` as
+the one legitimate subject-without-a-user.
+
+### `banned` is a retirement the guard has to know about
+
+The provider keeps its refresh tokens in `trexdb."oauthRefreshToken"`; trex's ban procedure
+(`auth-router.ts:1449-1471`) revokes `trexdb.refresh_token` and the engine sessions, which is
+everything that existed when it was written. So a ban left the OIDC refresh token renewing
+indefinitely. `mount.ts`'s guard now treats `deletedAt` and `banned` alike.
+
+### Error codes, where the plan guessed
+
+- Widening the scope on a refresh: **`invalid_scope`**, `unable to issue scope <s>` (`:2138-2143`).
+  This settles the plan's `[UNVERIFIED]`.
+- A `code_verifier` that does not match the challenge: **`invalid_request`** with status 401
+  (`:2007-2010`), not `invalid_grant`.
+- `code_challenge_method=plain`: refused by the query schema, which pins `z.enum(["S256"])`
+  (`dist/authorize-riRRCSbC.mjs:1048`) — but still answered as a **302 OAuth error redirect** to
+  the client's `redirect_uri` with `error=invalid_request`, not as a bare 400.
+
+### Rate limiting
+
+Better Auth's `rateLimit.enabled` defaults to `isProduction` (`better-auth/dist/context/create-context.mjs:172`)
+and nothing in the trex tree sets `NODE_ENV=production`, so the provider's endpoints — mounted
+ahead of trex's own `apiLimiter` — were unthrottled. Turned on explicitly (100 requests / 10s,
+the plugin defaults). Note the runtime warns that it cannot resolve a client IP and falls back to
+**one shared bucket per path**: `advanced.ipAddress.ipAddressHeaders` / `trustedProxies` is not
+configured, and configuring it means trusting a header, so that decision is left open.
