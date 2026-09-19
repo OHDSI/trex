@@ -214,9 +214,21 @@ export async function attachEngineSessionCookie(
 
   const presented = req?.headers?.cookie;
   if (presented) {
-    const live = await auth.api.getSession({ headers: new Headers({ cookie: presented }) })
-      .catch(() => null);
-    if (live?.session?.userId === userId) return;
+    const live = await auth.api.getSession({
+      headers: new Headers({ cookie: presented }),
+      returnHeaders: true,
+    }).catch(() => null);
+    if (live?.response?.session?.userId === userId) {
+      // Forwarded, not discarded, and this is the difference between a session
+      // that renews and one that accumulates. Once a session passes updateAge
+      // (a day), getSession slides its expiresAt to seven days out AND re-issues
+      // the cookie with it (api/routes/session.mjs:198-214). Dropping that
+      // header renewed the row and not the browser: the cookie still died on
+      // its original seventh day, the next call minted a fresh row beside the
+      // slid one, and nothing in the tree reaps either.
+      for (const cookie of live.headers.getSetCookie()) res.append("Set-Cookie", cookie);
+      return;
+    }
   }
 
   const session = await context.internalAdapter.createSession(userId, undefined, {

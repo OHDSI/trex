@@ -2460,3 +2460,60 @@ contractTest(
     });
   },
 );
+
+// The other half of reusing a session: reusing it has to renew the browser's
+// copy, or the dedupe becomes the leak it was meant to avoid. Better Auth
+// slides expiresAt in the database once a session passes updateAge and re-issues
+// the cookie with it; a route that drops that header renews the row and not the
+// browser, so the cookie still dies on its original seventh day and the next
+// call mints a fresh row beside the slid one. Nothing in the tree reaps either.
+contractTest(
+  "POST /sync-cookie renews the cookie of the session it reuses",
+  async ({ url, pool }) => {
+    const user = await createUser(pool);
+    const now = Math.floor(Date.now() / 1000);
+    const token = await mintToken({
+      sub: user.id,
+      role: "authenticated",
+      aud: "authenticated",
+      exp: now + 3600,
+      iat: now,
+      session_id: crypto.randomUUID(),
+    });
+
+    const first = await post(`${url}/sync-cookie`, undefined, token);
+    assertEquals(first.status, 204);
+    await drain(first);
+    const carried = setCookie(first, "better-auth.session_token")!.split(";")[0];
+
+    // Past updateAge, which is a day: the refresh fires when
+    // expiresAt - expiresIn + updateAge <= now, i.e. once the session has less
+    // than six of its seven days left.
+    await pool.query(
+      `UPDATE trexdb.session SET "expiresAt" = NOW() + interval '5 days' WHERE "userId" = $1`,
+      [user.id],
+    );
+
+    const second = await fetch(`${url}/sync-cookie`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, cookie: carried },
+    });
+    assertEquals(second.status, 204);
+    await drain(second);
+
+    const renewed = setCookie(second, "better-auth.session_token");
+    assertNotEquals(renewed, undefined);
+    // The same session, renewed — not a second one, which is what makes this
+    // different from the reuse test above.
+    assertEquals(await engineSessionCount(pool, user.id), 1);
+    assertEquals(await engineSessionUserId(pool, renewed!), user.id);
+    const expiresAt = await pool.query(
+      `SELECT "expiresAt" FROM trexdb.session WHERE "userId" = $1`,
+      [user.id],
+    );
+    assertEquals(
+      new Date(expiresAt.rows[0].expiresAt).getTime() > Date.now() + 6 * 86400 * 1000,
+      true,
+    );
+  },
+);
