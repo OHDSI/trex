@@ -96,10 +96,38 @@ ID token header `{"alg":"RS256","kid":"<same kid>"}`; payload
 no `name`, no `roles`.
 
 **`aud` on the access token is not the client id.** It is an array of the resource identifier **and**
-`${baseURL}/oauth2/userinfo`. `aud` on the id_token *is* the client id. d2e fills its verifier's audience
-from `D2E_IDP_AUDIENCES ?? TREX_OIDC_CLIENT_ID`, so with the default every portal call presenting an access
-token 401s on an audience mismatch. `D2E_IDP_AUDIENCES` must carry the **resource identifier**; keeping
-`d2e-webapi` alongside is what lets the id_token keep verifying, so set both.
+`${baseURL}/oauth2/userinfo`. `aud` on the id_token *is* the client id.
+
+> **Superseded by task 10.** When this was measured, d2e filled its verifier's audience from
+> `D2E_IDP_AUDIENCES ?? TREX_OIDC_CLIENT_ID`, and every portal call presenting an access token 401d on an
+> audience mismatch. That default is gone: `d2e-compat/idp.ts` now defaults to the **resource identifier and
+> the client id**, derived from `D2E_IDP_RESOURCE ?? issuer` so the two ends cannot be configured apart.
+> `D2E_IDP_AUDIENCES` **replaces** that pair rather than adding to it, so setting it to `TREX_OIDC_CLIENT_ID`
+> — the value this paragraph described as today's — is now the way to reintroduce the 401. Leave it unset
+> unless you mean to narrow it; `warnOnUnmatchableAudience` logs at boot when the list cannot match an access
+> token.
+
+### What accepting the resource as an audience actually buys an attacker
+
+Not a finding from the spike — a consequence of it, recorded here so it is not rediscovered as a surprise.
+
+d2e-compat now accepts **any token whose `aud` contains the issuer**. `provider.ts` declares exactly one
+resource, and `enforcePerClientResources` links every seeded client to it, so that set is every client's
+access token and every `client_credentials` token that names the resource — not only the portal's. The
+audience therefore no longer distinguishes one client from another at the d2e-compat gate, and all
+authorization falls to the `roles` claim. This is inherited from `resources: [oidcIssuer()]`, chosen in task 1
+so the access token would be a JWT at all, rather than created by task 10 — but task 10 is where it became
+reachable, because before it the gate accepted only the client id.
+
+Two things that bound it, both measured rather than assumed:
+
+- **There is no prefix matching.** `resolveResourcePolicy` builds `aud` from the identifiers verbatim
+  (`dist/introspect-njKASm3q.mjs:519`), and jose compares them whole, so a token audienced only at
+  `${issuer}/oauth2/userinfo` is still rejected.
+- **A distinguisher exists and is unused.** The access token's header is `typ: at+jwt`; the id_token's is a
+  plain `JWT`. Nothing in d2e-compat reads it. Whoever needs to tell the two apart — or to tell one client's
+  access token from another's — has `typ`, `client_id` and `azp` to work with, and should use them rather
+  than narrow the audience, which would break the id_token path `scripts/lib/idp-login.cjs` depends on.
 
 Still open: the access token carries no `roles` and no `trex_role`, so the portal's `tokenMissingRoles`
 re-login branch keeps tripping until `customAccessTokenClaims` is wired.

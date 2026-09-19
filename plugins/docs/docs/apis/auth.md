@@ -133,12 +133,21 @@ Relying parties must set their expected audience to the issuer (the access
 token's `aud` is the RFC 8707 resource identifier, not the client id) alongside
 the client id, which is what the id_token carries. In d2e that is
 `D2E_IDP_AUDIENCES`, and it is what `D2E_IDP=trex` now defaults to, so a
-deployment that sets nothing accepts both tokens. Setting it replaces the pair
-rather than adding to it.
+deployment that sets nothing accepts both tokens. **Setting it replaces that pair
+rather than adding to it**, so setting it to the client id alone — the value that
+was correct before the provider moved — rejects every access token and answers
+401 on every portal call. Boot logs a warning naming that symptom when the
+configured list cannot match an access token.
 
 The same identifier is sent as the token request's `resource` (`D2E_IDP_RESOURCE`,
 defaulting to the issuer). Without it the provider mints an opaque access token
-rather than a JWT, and nothing downstream can read or verify it.
+rather than a JWT, and nothing downstream can read or verify it. Overriding it
+moves the default audience with it, so the two cannot be configured apart.
+
+`TREX_OIDC_CLIENT_SCOPES` gains `openid` and `offline_access` when it omits
+them. Both are requested on every sign-in, and `/authorize` refuses any scope the
+client row does not list — so a list without them fails every login rather than
+merely losing silent renewal.
 
 ## Tokens
 
