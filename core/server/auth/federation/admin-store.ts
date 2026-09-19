@@ -2,6 +2,7 @@
 // it; the router owns connection handling.
 import type { LinkRequest, ProviderUpsert } from "./admin-policy.ts";
 import { findLinkedUser, provisionUser, upsertAccount } from "./providers.ts";
+import { isEngineAddressable } from "../engine-address.ts";
 
 // deno-lint-ignore no-explicit-any
 type PgClient = any;
@@ -41,6 +42,7 @@ export async function setProviderEnabled(client: PgClient, id: string, enabled: 
 export type LinkResult =
   | { userId: string; outcome: "linked" | "created" | "already_linked" }
   | { conflict: true; userId: string }
+  | { unaddressableEmail: true; email: string }
   | { unknownProvider: true };
 
 /**
@@ -54,6 +56,19 @@ export type LinkResult =
  * With `r.userId` set, the identity is bound to exactly that trex user id or to
  * nothing. The id is the token `sub`; linking to a user with any other id would
  * hand the person a different `sub` and orphan everything keyed by the old one.
+ *
+ * The address the caller supplies is checked against isEngineAddressable
+ * wherever it would be resolved or written, and nowhere else. It is one of the
+ * six routes that write a login address, all enumerated on isEngineAddressable
+ * — and the one a migration drives, in bulk, AFTER V17 has run, so an address
+ * the engine cannot resolve would walk straight past V17's refusal and create
+ * an account nobody can ever sign in to. A refusal per identity is what a migration wants: it records
+ * the skip with a reason and keeps going, which is strictly better than a user
+ * row that looks migrated and is not.
+ *
+ * Deliberately not checked for an identity that is already linked, nor for one
+ * bound by `r.userId` to a user that exists: neither reads the address at all,
+ * and re-running a migration over rows it already created must stay idempotent.
  */
 export async function linkIdentity(client: PgClient, r: LinkRequest): Promise<LinkResult> {
   const provider = await client.query(`SELECT id FROM trexdb.sso_provider WHERE id = $1`, [r.providerId]);
@@ -92,7 +107,7 @@ export async function linkIdentity(client: PgClient, r: LinkRequest): Promise<Li
       const target = r.userId !== null
         ? await resolveRequestedUser(client, r, r.userId)
         : await resolveUserByEmail(client, r);
-      if ("conflict" in target) {
+      if ("conflict" in target || "unaddressableEmail" in target) {
         // A rollback that itself fails must not replace this outcome.
         await client.query("ROLLBACK").catch(() => {});
         return target;
@@ -114,7 +129,8 @@ export async function linkIdentity(client: PgClient, r: LinkRequest): Promise<Li
 
 type LinkTarget =
   | { userId: string; outcome: "linked" | "created" }
-  | { conflict: true; userId: string };
+  | { conflict: true; userId: string }
+  | { unaddressableEmail: true; email: string };
 
 /** Refuses a user who already carries a different account at this provider. */
 async function otherAccountConflict(
@@ -131,6 +147,10 @@ async function otherAccountConflict(
 }
 
 async function resolveUserByEmail(client: PgClient, r: LinkRequest): Promise<LinkTarget> {
+  // Every path out of here either matches an existing row on this address or
+  // provisions a user with it, so the address has to be one the engine can
+  // resolve before either happens.
+  if (!isEngineAddressable(r.email)) return { unaddressableEmail: true, email: r.email };
   const byEmail = await client.query(
     `SELECT id FROM trexdb."user" WHERE lower(email) = lower($1) AND "deletedAt" IS NULL LIMIT 1 FOR UPDATE`,
     [r.email],
@@ -157,9 +177,13 @@ async function resolveRequestedUser(client: PgClient, r: LinkRequest, userId: st
     if (byId.rows[0].deletedAt != null) return { conflict: true, userId };
     return (await otherAccountConflict(client, userId, r)) ?? { userId, outcome: "linked" };
   }
-  // No user has this id. One holding the address under a different id is the
-  // same person migrated some other way, or a different person; either way the
-  // requested id cannot be honoured without an administrator reconciling them.
+  // No user has this id, so this call is about to resolve or write the address.
+  // Asked here rather than at the top: the branch above never reads it, and an
+  // identity already bound to an existing user must keep linking.
+  if (!isEngineAddressable(r.email)) return { unaddressableEmail: true, email: r.email };
+  // A user holding the address under a different id is the same person migrated
+  // some other way, or a different person; either way the requested id cannot be
+  // honoured without an administrator reconciling them.
   // Deleted rows count too: user.email is UNIQUE across them, so the insert
   // would fail anyway, and a 409 naming the row beats an opaque 500.
   const byEmail = await client.query(

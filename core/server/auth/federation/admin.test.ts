@@ -1,6 +1,7 @@
 import { assertEquals } from "jsr:@std/assert";
 import { type LinkRequest, parseLinkRequest, parseProviderUpsert } from "./admin-policy.ts";
 import { linkIdentity, setProviderEnabled, upsertProvider } from "./admin-store.ts";
+import { PLACEHOLDER_EMAIL_DOMAIN } from "./providers.ts";
 
 const validProvider = {
   displayName: "Logto", clientId: "cid", clientSecret: "sec",
@@ -118,6 +119,48 @@ Deno.test("linkIdentity refuses an email already linked to another account at th
   assertEquals(await linkIdentity(c, link), { conflict: true, userId: "u3" });
   assertEquals(c.ran.some((s) => s.startsWith("INSERT")), false);
   assertEquals(c.ran.at(-1), "ROLLBACK");
+});
+
+// One of the six routes that write a login address (all enumerated on
+// isEngineAddressable), and the one a migration drives: it runs AFTER V17 has
+// refused the installations the engine cannot serve, in bulk, and used to
+// create the user regardless.
+Deno.test("linkIdentity refuses to create a user under an address the engine cannot serve", async () => {
+  const c = fakeClient([["FROM trexdb.sso_provider", [{ id: "logto" }]]]);
+  // Single-label domain: parseLinkRequest accepts it (it has an @), the engine
+  // does not — the same shape an IDP__INITIAL_USER__DOMAIN of "localhost" makes.
+  assertEquals(
+    await linkIdentity(c, { ...link, email: "a@localhost" }),
+    { unaddressableEmail: true, email: "a@localhost" },
+  );
+  assertEquals(c.ran.some((s) => s.startsWith("INSERT")), false);
+  // Refused before the lookup, not after it: the address is not a key either.
+  assertEquals(c.ran.some((s) => s.includes("lower(email) = lower($1)")), false);
+  assertEquals(c.ran.at(-1), "ROLLBACK");
+});
+
+Deno.test("linkIdentity refuses an unservable address on the id-pinned create too", async () => {
+  const c = fakeClient([["FROM trexdb.sso_provider", [{ id: "logto" }]]]);
+  assertEquals(
+    await linkIdentity(c, { ...link, email: "a@localhost", userId: "u9" }),
+    { unaddressableEmail: true, email: "a@localhost" },
+  );
+  assertEquals(c.ran.some((s) => s.startsWith("INSERT")), false);
+});
+
+// Idempotence: a migration re-run over identities it already created must not
+// start failing them. This branch never reads the address, so it never judges it.
+Deno.test("linkIdentity still links to an existing user pinned by id whatever the address says", async () => {
+  const c = fakeClient([
+    ["FROM trexdb.sso_provider", [{ id: "logto" }]],
+    ["WHERE id = $1 FOR UPDATE", [{ id: "u4", deletedAt: null }]],
+  ]);
+  assertEquals(
+    await linkIdentity(c, { ...link, email: "a@localhost", userId: "u4" }),
+    { userId: "u4", outcome: "linked" },
+  );
+  assertEquals(c.ran.some((s) => s.startsWith("INSERT INTO trexdb.account")), true);
+  assertEquals(c.ran.at(-1), "COMMIT");
 });
 
 Deno.test("linkIdentity bans the linked user when asked", async () => {
@@ -490,7 +533,20 @@ dbTest("a pre-linked user with a 12-character id signs in end to end", async (db
   // GoTrue-compatible GET /user with that token.
   const app = express();
   app.use(authRouter);
-  const server = app.listen(0);
+  // Bound to the loopback rather than the wildcard. The ephemeral range contains
+  // the port Postgres listens on, and a wildcard bind is allowed to take it
+  // while Postgres holds 127.0.0.1 specifically — but that binding does not win
+  // the traffic: BSD routes a connection to the most specific match, so
+  // 127.0.0.1:<that port> still reaches Postgres. What breaks is this test's own
+  // fetch, answered by Postgres, which makes nothing of an HTTP request and
+  // closes the socket — "connection closed before message completed". Binding
+  // the loopback turns the same collision into an EADDRINUSE nobody can miss.
+  //
+  // Awaited, because binding to a host resolves the address first and so is not
+  // synchronous the way the wildcard bind was — server.address() is still null
+  // when listen() returns.
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise<void>((r) => server.once("listening", () => r()));
   try {
     const port = (server.address() as { port: number }).port;
     const res = await fetch(`http://127.0.0.1:${port}/user`, {
@@ -541,4 +597,64 @@ dbTest("a pre-linked user with a 12-character id signs in end to end", async (db
 
   const { pool } = await runtimeImport("../../db.ts");
   await pool.end();
+});
+
+// ── Placeholder-domain addresses on the migration's own path ────────────────
+//
+// The rehearsal's finding: this route cannot reach provisionUser's synthesis
+// branch (parseLinkRequest requires an '@'), so a migration with no address to
+// give sends `<username>@<its configured domain>` — byte-identical to
+// PLACEHOLDER_EMAIL_DOMAIN at d2e's default. 66 of 69 users landed that way,
+// unflagged and "verified".
+
+dbTest("a link carrying a placeholder-domain address creates a flagged, unverified row", async (db, ctx) => {
+  const email = `${ctx.id(7)}@${PLACEHOLDER_EMAIL_DOMAIN}`;
+  const r = req(ctx, 7, { email });
+
+  assertEquals(await linkIdentity(db, r), { userId: ctx.id(7), outcome: "created" });
+  const { rows } = await db.query(
+    `SELECT "emailVerified", is_placeholder_email, email_confirmed_at
+       FROM trexdb."user" WHERE id = $1`,
+    [ctx.id(7)],
+  );
+  assertEquals(rows, [{
+    emailVerified: false,
+    is_placeholder_email: true,
+    email_confirmed_at: null,
+  }]);
+
+  // AND THE MIGRATION STILL WORKS. A re-run resolves by (providerId,
+  // accountId), which is consulted before any address lookup, so flagging the
+  // row it created cannot make its own second pass fail.
+  assertEquals(await linkIdentity(db, r), { userId: ctx.id(7), outcome: "already_linked" });
+});
+
+// The other half of "it must not break the migration": the address lookup.
+// findLinkCandidateByEmail (the SIGN-IN path) excludes flagged rows — that is
+// the protection this fix restores — but linkIdentity has its own unfiltered
+// lookup, so an administrator pre-linking an already-flagged row still matches.
+dbTest("the admin link path still matches a flagged placeholder row by address", async (db, ctx) => {
+  const email = `${ctx.id(8)}@${PLACEHOLDER_EMAIL_DOMAIN}`;
+  await db.query(
+    `INSERT INTO trexdb."user" (id, name, email, "emailVerified", is_placeholder_email)
+     VALUES ($1, $1, $2, false, true)`,
+    [ctx.id(8), email],
+  );
+
+  assertEquals(
+    await linkIdentity(db, req(ctx, 8, { email, userId: null })),
+    { userId: ctx.id(8), outcome: "linked" },
+  );
+});
+
+// Narrowness: an ordinary address is untouched. Without this the two above are
+// satisfied by flagging everything, which would mark every migrated user
+// unverified and unlinkable-by-address on the sign-in path.
+dbTest("an ordinary address still creates an unflagged, verified row", async (db, ctx) => {
+  assertEquals(await linkIdentity(db, req(ctx, 9)), { userId: ctx.id(9), outcome: "created" });
+  const { rows } = await db.query(
+    `SELECT "emailVerified", is_placeholder_email FROM trexdb."user" WHERE id = $1`,
+    [ctx.id(9)],
+  );
+  assertEquals(rows, [{ emailVerified: true, is_placeholder_email: false }]);
 });

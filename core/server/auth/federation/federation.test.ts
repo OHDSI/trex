@@ -17,6 +17,9 @@ import {
   findLinkCandidateByEmail,
   findLinkedUser,
   loadProviders,
+  PLACEHOLDER_EMAIL_DOMAIN,
+  placeholderLocalPart,
+  provisionUser,
   readAccountTokens,
   resolveFederatedUser,
   upsertAccount,
@@ -497,6 +500,66 @@ Deno.test("verified email, no user, auto-provision off is refused", () => {
 Deno.test("verified email, no user, auto-provision on provisions", () => {
   assertEquals(
     decideLink(identity(true), provider({ autoProvision: true }), null),
+    { action: "provision" },
+  );
+});
+
+// ── An upstream address the engine cannot serve ─────────────────────────────
+//
+// applyClaimMap takes the `email` claim verbatim, so an IdP is free to assert
+// one V17 would have refused to migrate. auto_provision then writes it, after
+// V17 has run, with no administrator in the loop — the only one of the six
+// address-writing routes (see isEngineAddressable) that needs none.
+
+const unusable = (over: Partial<UpstreamIdentity> = {}): UpstreamIdentity => ({
+  sub: "s-1", email: "alice@localhost", emailVerified: true, ...over,
+});
+
+Deno.test("auto-provision refuses an upstream address the engine cannot serve", () => {
+  assertEquals(
+    decideLink(unusable(), provider({ autoProvision: true }), null),
+    { action: "refuse", reason: "upstream_email_unusable" },
+  );
+});
+
+// The refusal is about writing the address, not about reading it. A row that
+// already holds it was vetted by whichever door created it, and linking writes
+// no address at all — so this must not start refusing established users.
+Deno.test("an unservable upstream address still links to an existing user", () => {
+  assertEquals(
+    decideLink(unusable(), provider({ autoProvision: true }), ordinary()),
+    { action: "link", userId: "u-1" },
+  );
+});
+
+// Order matters: the cheaper, more specific refusals stay ahead of it, so an
+// operator reading the error code learns the first thing that was wrong.
+Deno.test("the earlier refusals still win over the addressability check", () => {
+  assertEquals(
+    decideLink(unusable({ emailVerified: false }), provider({ autoProvision: true }), null),
+    { action: "refuse", reason: "upstream_email_unverified" },
+  );
+  assertEquals(
+    decideLink(
+      unusable(),
+      provider({ autoProvision: true, emailDomainAllowlist: ["corp.test"] }),
+      null,
+    ),
+    { action: "refuse", reason: "email_domain_not_allowed" },
+  );
+  // auto_provision off is already a refusal, and stays the one reported.
+  assertEquals(
+    decideLink(unusable(), provider(), null),
+    { action: "refuse", reason: "no_account" },
+  );
+});
+
+// The address-less branch provisions too, and is deliberately NOT guarded: it
+// mints a placeholder rather than writing what the upstream said. This asserts
+// the exemption is safe rather than assumed.
+Deno.test("an identity with no address still provisions, since its placeholder is addressable", () => {
+  assertEquals(
+    decideLink({ sub: "s-1", email: null, emailVerified: false }, provider({ autoProvision: true }), null),
     { action: "provision" },
   );
 });
@@ -1334,4 +1397,351 @@ Deno.test("refusalRedirect never forwards an off-site return path", () => {
 
 Deno.test("refusalRedirect is null without a login URL, so callers keep the JSON response", () => {
   assertEquals(refusalRedirect(null, "no_account", "/"), null);
+});
+
+// ── Placeholder addresses (providers.ts) ─────────────────────────────────────
+//
+// V17 restored user.email NOT NULL, so the branch decideLink routes an
+// address-less identity down — {action:"provision"} under autoProvision —
+// cannot write a NULL any more. These pin the rule that replaced it, which is
+// shared by hand with V17's DO block.
+
+Deno.test("the placeholder local part is the slug V17 computes", () => {
+  assertEquals(placeholderLocalPart("Alice.Example"), "alice.example");
+  assertEquals(placeholderLocalPart("alice example"), "alice-example");
+  assertEquals(placeholderLocalPart("carol@corp.example"), "carol-corp.example");
+  // btrim(…, '-.') at both ends: a local part may neither start nor end with a
+  // dot, and a run of rejected characters must not leave a trailing dash.
+  assertEquals(placeholderLocalPart(".weird!"), "weird");
+  // Nothing usable survives. The caller has to notice rather than mint the
+  // address `@d2e.local`.
+  assertEquals(placeholderLocalPart("###"), "");
+});
+
+/** Answers provisionUser's collision probe and records what it would insert. */
+function provisionClient(taken: string[] = []) {
+  const inserts: unknown[][] = [];
+  return {
+    inserts,
+    query(sql: string, params: unknown[]): Promise<{ rows: unknown[] }> {
+      if (sql.includes('INSERT INTO trexdb."user"')) {
+        inserts.push(params);
+        return Promise.resolve({ rows: [] });
+      }
+      if (sql.includes("lower(email) = $1")) {
+        return Promise.resolve({ rows: taken.includes(params[0] as string) ? [{ one: 1 }] : [] });
+      }
+      throw new Error(`unexpected query: ${sql}`);
+    },
+  };
+}
+
+const anonymous = (sub: string) => ({ sub, email: null, emailVerified: false });
+
+Deno.test("an identity asserting no address is provisioned with a flagged placeholder", async () => {
+  const c = provisionClient();
+  assertEquals(await provisionUser(c, anonymous("Alice.Example"), { id: "u-1" }), "u-1");
+  // Unverified and flagged. The flag is what every mail path tells a
+  // synthesised address by, and what findLinkCandidateByEmail excludes on;
+  // `"emailVerified"` false is a true statement about a row nobody asserted and
+  // protects nothing on its own, since decideLink reads the incoming identity.
+  assertEquals(c.inserts, [[
+    "u-1",
+    "Alice.Example",
+    `alice.example@${PLACEHOLDER_EMAIL_DOMAIN}`,
+    false,
+    true,
+  ]]);
+});
+
+Deno.test("a subject that slugifies to nothing falls back to the user id", async () => {
+  const c = provisionClient();
+  await provisionUser(c, anonymous("###"), { id: "u-1" });
+  assertEquals(c.inserts[0][2], `u-1@${PLACEHOLDER_EMAIL_DOMAIN}`);
+});
+
+Deno.test("a placeholder whose slug is taken falls back to the user id", async () => {
+  const c = provisionClient([`alice.example@${PLACEHOLDER_EMAIL_DOMAIN}`]);
+  await provisionUser(c, anonymous("Alice.Example"), { id: "u-2" });
+  assertEquals(c.inserts[0][2], `u-2@${PLACEHOLDER_EMAIL_DOMAIN}`);
+});
+
+Deno.test("a placeholder with no address left is refused, never attached to one", async () => {
+  const c = provisionClient([
+    `alice.example@${PLACEHOLDER_EMAIL_DOMAIN}`,
+    `u-2@${PLACEHOLDER_EMAIL_DOMAIN}`,
+  ]);
+  await assertRejects(
+    () => provisionUser(c, anonymous("Alice.Example"), { id: "u-2" }),
+    Error,
+    "already taken",
+  );
+  assertEquals(c.inserts, []);
+});
+
+Deno.test("a user id that slugifies to nothing is refused rather than given `@domain`", async () => {
+  const c = provisionClient();
+  await assertRejects(
+    () => provisionUser(c, anonymous("###"), { id: "!!!" }),
+    Error,
+    "no usable local part",
+  );
+  assertEquals(c.inserts, []);
+});
+
+Deno.test("an identity that asserts an address is provisioned with it, verified and unflagged", async () => {
+  const c = provisionClient();
+  await provisionUser(
+    c,
+    { sub: "s-1", email: "jo@example.test", emailVerified: true },
+    { id: "u-1" },
+  );
+  assertEquals(c.inserts, [["u-1", "jo@example.test", "jo@example.test", true, false]]);
+});
+
+// An address IN the placeholder domain, supplied rather than synthesised. The
+// federation admin link cannot reach the synthesis branch at all —
+// parseLinkRequest requires an '@' — so a migration with no address to give
+// sends `<username>@<its configured domain>`, which at d2e's default is this
+// exact string. 66 of 69 rehearsed users landed here, unflagged, verified and
+// confirmed: candidates for findLinkCandidateByEmail again, and a lie to any
+// mail path that reads the flag.
+Deno.test("an asserted address in the placeholder domain is flagged like a synthesised one", async () => {
+  const c = provisionClient();
+  await provisionUser(
+    c,
+    { sub: "s-1", email: `alice@${PLACEHOLDER_EMAIL_DOMAIN}`, emailVerified: true },
+    { id: "u-1" },
+  );
+  // emailVerified false and the flag true — identical to the synthesis branch,
+  // which is the point: a row from either must be indistinguishable. The name
+  // is the existing fallback chain (name ?? email ?? sub) and is deliberately
+  // not part of this change: it is what an administrator's list shows, and the
+  // address is the only identifier this caller supplied.
+  assertEquals(c.inserts, [[
+    "u-1",
+    `alice@${PLACEHOLDER_EMAIL_DOMAIN}`,
+    `alice@${PLACEHOLDER_EMAIL_DOMAIN}`,
+    false,
+    true,
+  ]]);
+});
+
+// Keyed on the domain, so case and subdomain are decided by emailDomain's rule
+// rather than by a substring test that `evil-d2e.local` would slip past.
+Deno.test("the placeholder domain is matched case-insensitively and exactly", async () => {
+  const upper = provisionClient();
+  await provisionUser(upper, { sub: "s-1", email: "alice@D2E.Local", emailVerified: true }, { id: "u-1" });
+  assertEquals(upper.inserts[0][4], true);
+
+  for (const notIt of ["alice@evil-d2e.local", "alice@d2e.local.evil.test", "alice@sub.d2e.local"]) {
+    const c = provisionClient();
+    await provisionUser(c, { sub: "s-1", email: notIt, emailVerified: true }, { id: "u-1" });
+    assertEquals(c.inserts[0][4], false, notIt);
+    assertEquals(c.inserts[0][3], true, notIt);
+  }
+});
+
+// Gated on DATABASE_URL like admin.test.ts's [db] block: the stubs above pin
+// which address is computed, but only a real database proves the row V17's
+// NOT NULL constraints will actually accept — which is the difference between
+// a placeholder and a 500 on the first sign-in of a username-only user.
+const provisionDbUrl = Deno.env.get("DATABASE_URL");
+
+Deno.test({
+  name: "[db] provisioning an address-less identity writes a row V17 accepts",
+  ignore: !provisionDbUrl,
+  fn: async () => {
+    const { Client } = await import("npm:pg");
+    const db = new Client({ connectionString: provisionDbUrl });
+    await db.connect();
+    const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+    try {
+      const id = await provisionUser(db, anonymous(`Sub ${run}`), { id: `p${run}` });
+      const { rows } = await db.query(
+        `SELECT email, "emailVerified", is_placeholder_email, email_confirmed_at
+           FROM trexdb."user" WHERE id = $1`,
+        [id],
+      );
+      assertEquals(rows, [{
+        email: `sub-${run}@${PLACEHOLDER_EMAIL_DOMAIN}`,
+        emailVerified: false,
+        is_placeholder_email: true,
+        email_confirmed_at: null,
+      }]);
+    } finally {
+      await db.query(`DELETE FROM trexdb."user" WHERE id LIKE $1`, [`p${run}%`]);
+      await db.end();
+    }
+  },
+});
+
+// A synthesised address is an internal identifier, not a claim to an identity.
+// Before this, an upstream asserting `<another user's subject>@d2e.local` as
+// verified would link onto that user's account, because the candidate query
+// never distinguished a placeholder from an address its owner proved. Against
+// a real database rather than a stub: the exclusion is a SQL predicate, so a
+// stub that answers by matching substrings could not tell it from its absence.
+Deno.test({
+  name: "[db] an upstream cannot claim an account through its placeholder address",
+  ignore: !provisionDbUrl,
+  fn: async () => {
+    const { Client } = await import("npm:pg");
+    const db = new Client({ connectionString: provisionDbUrl });
+    await db.connect();
+    const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+    const placeholder = `sub-${run}@${PLACEHOLDER_EMAIL_DOMAIN}`;
+    // The shape the rehearsal found: an address in the placeholder domain that
+    // a caller SUPPLIED rather than one this module synthesised. 66 of 69
+    // migrated users look like this, and until provisionUser flagged them by
+    // domain they were candidates here — which is the takeover, end to end.
+    const supplied = `mig-${run}@${PLACEHOLDER_EMAIL_DOMAIN}`;
+    const real = `jo-${run}@example.test`;
+    try {
+      await provisionUser(db, anonymous(`Sub ${run}`), { id: `p${run}a` });
+      await provisionUser(
+        db,
+        { sub: `s-${run}`, email: real, emailVerified: true },
+        { id: `p${run}b` },
+      );
+      await provisionUser(
+        db,
+        { sub: `s2-${run}`, email: supplied, emailVerified: true },
+        { id: `p${run}c` },
+      );
+
+      assertEquals(await findLinkCandidateByEmail(db, placeholder), null);
+      // Synthesised and supplied must be indistinguishable here, or the
+      // exclusion protects only the rows that never needed a migration.
+      assertEquals(await findLinkCandidateByEmail(db, supplied), null);
+      // Case is no way around it either: the predicate is on the row, not on
+      // the spelling of the address.
+      assertEquals(await findLinkCandidateByEmail(db, placeholder.toUpperCase()), null);
+      // An address its owner actually proved still resolves exactly as before,
+      // so this narrows the placeholder path and nothing else.
+      assertEquals(await findLinkCandidateByEmail(db, real), { id: `p${run}b`, role: "user" });
+    } finally {
+      await db.query(`DELETE FROM trexdb."user" WHERE id LIKE $1`, [`p${run}%`]);
+      await db.end();
+    }
+  },
+});
+
+// The migrated users V17 backfilled are the population this exclusion could
+// plausibly break, so prove the ordering that spares them rather than assert
+// it: resolveFederatedUser answers from the (providerId, accountId) account
+// row and never reaches the email query.
+Deno.test({
+  name: "[db] a migrated user with a placeholder address still signs in through its link",
+  ignore: !provisionDbUrl,
+  fn: async () => {
+    const { Client } = await import("npm:pg");
+    const db = new Client({ connectionString: provisionDbUrl });
+    await db.connect();
+    const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+    _setDekForTests(new Uint8Array(32));
+    const decoyEmail = `decoy-${run}@example.test`;
+    try {
+      const id = await provisionUser(db, anonymous(`Sub ${run}`), { id: `p${run}a` });
+      await upsertAccount(db, { userId: id, providerId: "logto", accountId: `Sub ${run}` });
+      // The address the email path would resolve to, held by somebody else. An
+      // identity asserting no address at all would take decideLink's no-address
+      // branch and never reach the email query, so it could not tell "consulted
+      // first" from "consulted at all"; this can.
+      await provisionUser(
+        db,
+        { sub: `decoy-${run}`, email: decoyEmail, emailVerified: true },
+        { id: `p${run}b` },
+      );
+
+      assertEquals(
+        await resolveFederatedUser(db, provider(), {
+          sub: `Sub ${run}`,
+          email: decoyEmail,
+          emailVerified: true,
+        }),
+        { action: "link", userId: id },
+      );
+    } finally {
+      await db.query(`DELETE FROM trexdb."user" WHERE id LIKE $1`, [`p${run}%`]);
+      await db.end();
+      _resetDekCache();
+    }
+  },
+});
+
+// The exclusion is only correct while the address is still synthesised. V17's
+// column comment defines the flag as "the address is synthesised, not a contact
+// address", so an address the account holder supplied has to clear it — and
+// PUT /user is the one route that writes a caller-supplied address. Without the
+// clear, closing the takeover path would have made every placeholder user
+// permanently unlinkable: a provider asserting the address they had just set
+// would get `no_account`, or, under auto-provision, a UNIQUE violation on
+// user_email_key surfacing as a 500 out of /callback.
+//
+// Driven through the real route rather than an UPDATE of its own: what is being
+// pinned is that the handler clears the flag, which a hand-written statement
+// would assert about itself.
+Deno.test({
+  name: "[db] a placeholder user who sets a real address becomes linkable again",
+  ignore: !provisionDbUrl,
+  // ../db.ts owns a pool that deliberately outlives the test, as in
+  // auth-router.contract.test.ts.
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const { Client } = await import("npm:pg");
+    const express = (await import("express")).default;
+    const { authRouter } = await import("../auth-router.ts");
+    const { _resetJwtSecretCache, signAccessToken } = await import("../jwt.ts");
+    const { _resetRootKeyCache } = await import("../keys.ts");
+
+    _resetRootKeyCache();
+    _resetJwtSecretCache();
+    Deno.env.set("TREX_ROOT_KEY", btoa(String.fromCharCode(...new Uint8Array(32).map((_, i) => i))));
+
+    const db = new Client({ connectionString: provisionDbUrl });
+    await db.connect();
+    const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+    const chosen = `chosen-${run}@example.test`;
+    const app = express();
+    app.use("/trex/auth/v1", authRouter);
+    const server = app.listen(0, "127.0.0.1");
+    await new Promise<void>((r) => server.once("listening", () => r()));
+    const { port } = server.address() as { port: number };
+    try {
+      const id = await provisionUser(db, anonymous(`Sub ${run}`), { id: `p${run}` });
+      const token = await signAccessToken({ id, email: null, role: "user" }, crypto.randomUUID());
+
+      const res = await fetch(`http://127.0.0.1:${port}/trex/auth/v1/user`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ email: chosen }),
+      });
+      assertEquals(res.status, 200);
+      await res.body?.cancel();
+
+      const { rows } = await db.query(
+        `SELECT email, is_placeholder_email FROM trexdb."user" WHERE id = $1`,
+        [id],
+      );
+      assertEquals(rows, [{ email: chosen, is_placeholder_email: false }]);
+
+      // The point of the clear: the candidate query finds them again, and a
+      // provider asserting the address they chose links rather than refusing.
+      assertEquals(await findLinkCandidateByEmail(db, chosen), { id, role: "user" });
+      assertEquals(
+        await resolveFederatedUser(db, provider(), {
+          sub: `other-${run}`,
+          email: chosen,
+          emailVerified: true,
+        }),
+        { action: "link", userId: id },
+      );
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+      await db.query(`DELETE FROM trexdb."user" WHERE id LIKE $1`, [`p${run}%`]);
+      await db.end();
+    }
+  },
 });

@@ -121,6 +121,18 @@ export function buildIdTokenClaims(user: IdTokenUser, opts: IdTokenOptions): IdT
   // an `email_verified` about nothing: OIDC says an absent claim is simply
   // omitted, and a relying party that keys accounts off `email` must fail to
   // find one rather than key off a null.
+  //
+  // Since V17 restored user.email NOT NULL, no user reaches that branch: a
+  // federated user whose upstream asserted no address carries a synthesised
+  // <subject>@d2e.local, so trex emits it outbound. This is the mirror of the
+  // inbound hole findLinkCandidateByEmail closes — a relying party that links
+  // accounts by address could attach two trex users to one of its own, or
+  // attach one to an unrelated account, on an address nobody proved. What keeps
+  // it safe is that a placeholder row is never `"emailVerified"`, so the pair
+  // goes out as `email_verified: false`, and a relying party is required to
+  // treat an unverified address as not an identifier. That is the whole of the
+  // protection: a relying party that links on `email` while ignoring
+  // `email_verified` is not defended against here and cannot be.
   if (opts.scopes.includes("email") && user.email) {
     claims.email = user.email;
     claims.email_verified = Boolean(user.emailVerified);

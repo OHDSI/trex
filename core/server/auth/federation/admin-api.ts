@@ -71,6 +71,11 @@ federationAdminRouter.put("/links", adminLimiter, express.json(), async (req, re
     const result = await linkIdentity(client, parsed);
     if ("unknownProvider" in result) {
       res.status(404).json({ error: "unknown_provider" });
+    } else if ("unaddressableEmail" in result) {
+      // 422, the same answer /signup and /admin/create-user give the same
+      // address, and it names the address so a bulk migration can record which
+      // identity it skipped and why rather than logging one opaque failure.
+      res.status(422).json({ error: "unaddressable_email", email: result.email });
     } else if ("conflict" in result) {
       res.status(409).json({ error: "conflict", userId: result.userId });
     } else {

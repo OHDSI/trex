@@ -318,6 +318,172 @@ jobs:
       - name: devx plugin tests
         run: deno test --no-check --allow-all --import-map plugins/devx/agent/local-test-import-map.json --node-modules-dir=auto plugins/devx/agent/ plugins/devx/functions/
 
+  # The /trex/auth/v1 wire contract, the Better Auth engine underneath it, the
+  # Better Auth schema-drift check and the federation link rules. Its own job
+  # rather than another suite on core-server-tests above, because the two want
+  # incompatible databases: this one needs the WHOLE control plane (core/schema
+  # V1..V17 — the trexdb tables, four cluster roles, the RLS policies, and the
+  # auth/storage compatibility schemas), while core-server-tests deliberately
+  # applies a fragment (a hand-made trexdb schema, a hand-made `authenticated`
+  # role, V6 and the agents migrations) into a pgvector image the gbrain suite
+  # pins to pg16. Pouring V1..V17 into that database would change the
+  # environment the memory and agents suites are asserted against for a reason
+  # that has nothing to do with them. The price is a second checkout and
+  # `npm ci`; the jobs then run in parallel and a red X names which suite broke.
+  core-server-auth-tests:
+    if: |
+      (github.ref_name == 'develop' || github.ref_name == 'main' || contains('release', github.ref_name) || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'pull_request' && !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      # Both legs run to completion. A failure on one major version is a
+      # different diagnosis from a failure on both, and cancelling the survivor
+      # would throw that away.
+      fail-fast: false
+      matrix:
+        # 17 is what the auth suite is developed against; 15 is what production
+        # runs (develop.d2e.sg, postgres:15-alpine). The V13..V17 migrations and
+        # the engine cutover were rehearsed on both and behaved identically, so
+        # this leg is regression protection for what lands next rather than a
+        # suspected difference — the one thing that would make it expensive is
+        # a schema change that quietly needs a 16+ feature, which is exactly
+        # what it is here to catch.
+        postgres: ["15-alpine", "17-alpine"]
+    name: core-server-auth-tests (postgres ${{ matrix.postgres }})
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: trex_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d trex_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Connecting as `postgres` is load-bearing, not incidental: it owns every
+      # table the schema creates, and an owner is exempt from RLS unless the
+      # table FORCEs it. The suite writes trexdb.setting, "user", account,
+      # session and refresh_token directly, and V1 puts policies on the last
+      # four keyed on app.user_id / app.user_role, which no test sets — under
+      # any other role the fixtures would silently not be there.
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/trex_ci
+    steps:
+      - uses: actions/checkout@v4
+        id: checkout_auth_tests
+        continue-on-error: true
+        with:
+          ref: ${{ env.GIT_BRANCH_NAME }}
+          repository: ${{ env.GIT_REPO_FULL_NAME }}
+          submodules: false
+      - if: steps.checkout_auth_tests.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.GIT_BRANCH_NAME }}
+          repository: ${{ env.GIT_REPO_FULL_NAME }}
+          submodules: false
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - name: Install core/server node deps
+        # nodeModulesDir is "manual" (byonm), so npm:better-auth and npm:pg
+        # resolve out of core/server/node_modules. Same reasoning as the
+        # core-server-tests job above, including why this is not `deno install`.
+        run: cd core/server && npm ci
+      - name: Apply core/schema
+        # The whole schema, in version order via sort -V so V11 does not sort
+        # before V2. V10 is absent by design — the file was deleted and its
+        # number burnt, so the glob is the source of truth rather than a range.
+        run: |
+          for f in $(ls core/schema/V*.sql | sort -V); do
+            echo "--- $f"
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+      # --no-check for the reason documented on the core-server-tests legs: the
+      # deno workspace root is core/, and /// <reference types="..."> directives
+      # from npm packages resolve against core/node_modules, which `npm ci` in
+      # core/server cannot create.
+      - name: core/server auth tests (wire contract, Better Auth engine, federation, MCP user tools)
+        env:
+          # deno colourises its summary line even when stdout is a pipe, and the
+          # escape codes land in front of the `ok |` the guard below anchors on.
+          NO_COLOR: "1"
+        run: |
+          set -o pipefail
+          cd core/server
+          log="${RUNNER_TEMP:-/tmp}/auth-test.log"
+          # mcp/tools/ alongside auth/: user-create is the sixth door onto
+          # trexdb."user" and asks the same engine-address rule, so its test
+          # belongs to this job even though it lives outside auth/.
+          deno test --no-check --allow-all auth/ mcp/tools/ 2>&1 | tee "$log"
+
+          # The files below carry the wire contract, the Better Auth engine
+          # construction, the schema-drift guard, the federation link rules (in
+          # federation.test.ts for sign-in, admin.test.ts for the pre-link the
+          # migration drives), the V17 slug parity, the email-case account
+          # takeover, the MCP user-create door, and the three-way parity between
+          # this predicate, V17's expression and the live engine
+          # (auth-engine-cutover.test.ts, the one DATABASE_URL-gated auth file
+          # that was missing from this list), and V17's behaviour over a
+          # population that predates it (v17-migration.test.ts, which builds its
+          # own database at V16 because every other file here runs against one
+          # where V17 has already been applied). All of them
+          # gate on DATABASE_URL and SKIP without one, so a service that never
+          # came up, a half-applied schema or a renamed variable would report
+          # green while testing none of it.
+          #
+          # Asserted per file and with a floor on the count, not over the run
+          # above: an aggregate cannot tell "nothing was ignored" from "nothing
+          # was collected", so a file renamed or moved out of auth/ would take
+          # its tests with it and leave the summary green. Naming the files is
+          # also what keeps this guard from objecting to an unconditionally
+          # ignored test somebody adds elsewhere under auth/ for its own good
+          # reasons.
+          for f in auth/auth-router.contract.test.ts \
+                   auth/auth-engine-cutover.test.ts \
+                   auth/better-auth.test.ts \
+                   auth/schema-validate.test.ts \
+                   auth/federation/federation.test.ts \
+                   auth/federation/admin.test.ts \
+                   auth/federation/placeholder-slug-parity.test.ts \
+                   auth/email-case.test.ts \
+                   auth/v17-migration.test.ts \
+                   mcp/tools/users.test.ts; do
+            # `|| true` so a no-match grep does not kill the script under
+            # `bash -e {0}` before the diagnosis below can be printed. A run
+            # that FAILED prints no `ok |` line either, so it lands on the same
+            # branch rather than escaping the loop.
+            summary=$(deno test --no-check --allow-all "$f" 2>&1 | tee -a "$log" \
+              | grep -E '^ok \| [0-9]+ passed' | tail -1) || true
+            echo "$f -> ${summary:-<no ok summary>}"
+            case "$summary" in
+              "")
+                echo "::error file=$f::no passing deno test summary — the file failed or did not run to completion"
+                exit 1
+                ;;
+              # Before the count floor below: a wholly gated file reports both
+              # `0 passed` and an ignored count, and the missing database is the
+              # diagnosis worth printing.
+              *ignored*)
+                echo "::error file=$f::skipped tests ($summary); DATABASE_URL is not reaching a usable database"
+                exit 1
+                ;;
+              "ok | 0 passed"*)
+                echo "::error file=$f::collected no tests; it has been renamed, moved, or emptied"
+                exit 1
+                ;;
+            esac
+          done
+
   build:
     needs: [pick_runner]
     # PR builds run only for same-repo PRs. Fork PRs are excluded — they'd otherwise check out
@@ -1668,6 +1834,17 @@ jobs:
               cp -a /newcore/server/. /usr/src/core/server/
               cp -a /newcore/event/.  /usr/src/core/event/
               cd /usr/src
+              # This branch may declare npm dependencies the pulled image predates, and
+              # core/server/deno.json sets "nodeModulesDir": "manual", so Deno resolves
+              # bare specifiers out of node_modules and never installs on its own. Without
+              # this the bundle dies on the first new import with "Could not find <pkg> in
+              # a node_modules folder" and the e2e never runs our own code at all.
+              # NOTE: this whole block is a single-quoted argument to bash -c, so it
+              # must contain no apostrophe at all. One closes the quote early and the
+              # rest of the script silently runs on the runner instead of in here.
+              # Same command the image builds these directories with (Dockerfile:317).
+              (cd core/server && npm install --omit=dev --no-audit --no-fund)
+              (cd core/event  && npm install --omit=dev --no-audit --no-fund)
               trex bundle ./core/server/index.ts ./core/server/index.eszip
               trex bundle ./core/event/index.ts  ./core/event/index.eszip
               cp ./core/server/index.eszip /out/core-server.eszip

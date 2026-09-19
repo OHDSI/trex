@@ -7,6 +7,39 @@ sidebar_position: 2
 This page explains *how* Trex authenticates users and authorizes requests. For
 the endpoint-by-endpoint reference, see [APIs → Auth](../apis/auth).
 
+## The Engine and the Compatibility Surface
+
+Two different things own authentication, and it is worth being precise about
+which does what:
+
+- **Better Auth is the engine.** It owns `trexdb.user`, `trexdb.session`,
+  `trexdb.account` and `trexdb.verification`, and it is the only thing that
+  verifies a password. A credential lives in `trexdb.account.password` for
+  `providerId = 'credential'`; the engine hashes and verifies it with trex's own
+  scrypt, through hooks installed in `core/server/auth/better-auth.ts`, so the
+  hashes that existed before the cutover verify unchanged.
+- **`/trex/auth/v1` is the compatibility surface.** It is a GoTrue-shaped
+  router — `/token`, `/signup`, `/user`, `/change-password`, `/admin/users` —
+  that reads and writes through the engine and then answers in Supabase's
+  vocabulary.
+
+Both exist because the clients and the engine disagree about the wire, not
+about the model. Everything already pointed at trex — `supabase-js`, the web
+UI, the CLI, the MCP server, every plugin — speaks GoTrue: a JWT access token,
+an opaque rotating refresh token, `error`/`error_description` bodies. Better
+Auth speaks none of that; it issues a session cookie and has no refresh-token
+concept for this path. Replacing the wire would have meant changing every
+caller at once. So the router kept its wire contract (pinned test-by-test in
+`core/server/auth/auth-router.contract.test.ts`) and had its insides replaced:
+credential verification, user reads and writes, and the admin block all go
+through the engine now, and the JWT the caller receives is still minted by
+`core/server/auth/jwt.ts`.
+
+The practical consequence for an operator: the session cookie Better Auth sets
+alongside the JWT is not decoration. It is what the OIDC provider
+(`/trex/auth/v1/oauth2/authorize`) authenticates against, and it is signed with
+the `trex.better-auth.engine.v1` subkey rather than the JWT signing key.
+
 ## Two Identity Surfaces
 
 Trex carries two parallel identity surfaces, both backed by Postgres tables in
@@ -137,6 +170,72 @@ each provider, settings come from one of two sources:
 Enabled providers appear in the login page. The actual OAuth dance is driven
 by the auth router's social provider plumbing.
 
+### Placeholder Addresses
+
+Better Auth requires an address on every user, but an upstream identity
+provider is free to assert none — and plenty do, for service accounts and for
+directory entries that were never mailboxes. Those users get a synthesised
+address of the form `<slug>@d2e.local`, where the slug comes from the
+identifier they actually sign in with (the upstream subject), and the row is
+marked `is_placeholder_email = true`.
+
+**A placeholder is an internal identifier, not a contact address.** Nobody
+asserted it and nothing resolves it. Two rules follow:
+
+- **Nothing may mail it.** trex sends no mail today, so this is a constraint on
+  whatever is added next — a password-reset mail, a notification plugin, an
+  export that feeds a mailing list. Branch on `is_placeholder_email`, not on the
+  domain, and skip the row. And branch on it rather than assuming the domain is
+  unreachable: `d2e.local` is d2e's own internal service domain
+  (`TLS__INTERNAL__DOMAIN`), chosen here because it is what d2e's migration
+  mints, not because it is reserved. Mail sent there goes somewhere.
+- **Federated sign-in never matches a candidate user on one.** Enforced in
+  `core/server/auth/federation/providers.ts`: an upstream asserting
+  `<someone else's subject>@d2e.local` as a verified address would otherwise be
+  handed that person's account.
+
+**Two ways a row becomes a placeholder, and they must look identical.**
+
+1. **trex synthesised it**, because the identity asserted no address. `V17`
+   backfilled the rows that existed at the cutover; the federation provisioning
+   path mints the ones that arrive afterwards, under the same domain and the
+   same slug rule.
+2. **A caller supplied an address already in `d2e.local`.** A migration that has
+   no address to give for a user sends `<username>@<its configured domain>`
+   rather than nothing — the federation admin link requires an address — and at
+   the default domain that string is exactly a placeholder. Such a row is
+   flagged the same way, keyed on the domain alone and not on who asked or what
+   the local part looks like.
+
+   This holds for five of the six routes that write a login address: the
+   federation admin link, federated auto-provision, `POST /admin/users`, MCP
+   `user-create` and `PUT /user` (which derives the flag from the new address on
+   every update rather than clearing it). **`POST /signup` is the exception, on
+   purpose:** an account somebody registers for themselves — the bootstrap
+   administrator among them — should not be written `emailVerified = false`, and
+   it is the one route where the flag costs nothing anyway, because
+   `user_email_lower_key` stops a registration taking an address a row already
+   holds and the placeholder slug falls back to `<id>@d2e.local` when one is
+   taken, so such an address cannot be used to reach anybody else's row.
+
+   **The exception rests on both of those facts and dies with either** — add a
+   mail path that reads the column, or relax the unique index, and `/signup`
+   has to join the other five. It also does not claim squatting is harmless:
+   registering an address before its owner arrives puts their federated identity
+   inside the squatter's account. That is `decideLink`'s posture on every
+   domain, with `emailDomainAllowlist` as the intended control, so `d2e.local`
+   is neither more nor less exposed than any other.
+
+The second case is not hypothetical: it is how 66 of 69 users looked in a
+migration rehearsal, and before the domain rule they were written
+`is_placeholder_email = false`, `emailVerified = true`, with
+`email_confirmed_at` set — which is the flag telling a mail path the exact
+opposite of the truth, and, because federated sign-in excludes only *flagged*
+rows, leaving every one of them claimable by another upstream asserting its
+address.
+
+`PUT /user` clears the flag when a real address is set.
+
 ## API Keys for MCP & CLI
 
 API keys give code paths the same authorization story as user sessions, with
@@ -166,7 +265,7 @@ sequenceDiagram
 
     U->>W: Open admin UI
     W->>A: POST /auth/v1/token (password grant)
-    A->>DB: Verify trexdb.user.password_hash
+    A->>DB: Engine verifies trexdb.account.password
     A->>DB: INSERT trexdb.refresh_token
     A-->>W: { access_token, refresh_token }
     W->>API: GET /trex/graphql<br/>Authorization: Bearer access_token
