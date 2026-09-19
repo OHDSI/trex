@@ -457,6 +457,9 @@ jobs:
                    auth/federation/placeholder-slug-parity.test.ts \
                    auth/email-case.test.ts \
                    auth/v17-migration.test.ts \
+                   auth/oidc/import-signing-key.test.ts \
+                   auth/oidc/custom-claims.test.ts \
+                   auth/oidc/seed-client.test.ts \
                    mcp/tools/users.test.ts; do
             # `|| true` so a no-match grep does not kill the script under
             # `bash -e {0}` before the diagnosis below can be printed. A run
