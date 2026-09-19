@@ -198,11 +198,26 @@ export function parseSeedClient(
  * request outright with invalid_scope, so a scope list that omits it can only
  * ever be a configuration mistake, and one whose symptom points nowhere near
  * the setting that caused it.
+ *
+ * `offline_access` is added on the same argument, which now holds for it
+ * verbatim. /authorize narrows a request to `client.scopes ?? opts.scopes` and
+ * refuses any scope outside it (dist/authorize-riRRCSbC.mjs:5558-5562), and
+ * d2e-compat asks for `openid profile email offline_access` on every sign-in
+ * (d2e-compat/idp.ts) because the plugin issues a refresh token only when that
+ * scope was granted. So a deployment that sets
+ * TREX_OIDC_CLIENT_SCOPES="openid,profile,email" — the list it would have
+ * written before, and one this column's own first-insert default disagrees with
+ * (seed-client.ts) — fails EVERY sign-in, with an invalid_scope naming a scope
+ * the operator never typed.
+ *
+ * Adding it to the column grants nothing by itself: /authorize issues only what
+ * the request asks for, and this list is the ceiling rather than the grant.
  */
 function parseScopes(raw: string | undefined): string[] | undefined {
   const scopes = splitList(raw);
   if (scopes.length === 0) return undefined;
-  return scopes.includes("openid") ? scopes : ["openid", ...scopes];
+  const required = ["openid", "offline_access"].filter((s) => !scopes.includes(s));
+  return required.length === 0 ? scopes : [...required, ...scopes];
 }
 
 /**

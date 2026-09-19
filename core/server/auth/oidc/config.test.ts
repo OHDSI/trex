@@ -15,6 +15,10 @@ import {
   parseSeedClient,
   readCookie,
 } from "./config.ts";
+// The one cross-module invariant this file pins: the scope list the seeder
+// writes must cover the scope d2e-compat asks for, and neither side reads the
+// other.
+import { resolveIdpConfig } from "../../d2e-compat/idp.ts";
 
 Deno.test("the provider is off unless explicitly enabled", () => {
   for (const v of [undefined, "", "false", "0", "yes", "TRUE"]) {
@@ -82,15 +86,20 @@ Deno.test("a seeded client can be configured with the scopes it may be granted",
     TREX_OIDC_CLIENT_REDIRECT_URIS: "https://a.test/cb/openid",
   };
   assertEquals(
-    parseSeedClient({ ...base, TREX_OIDC_CLIENT_SCOPES: "openid profile email idp_groups" })
-      ?.allowedScopes,
-    ["openid", "profile", "email", "idp_groups"],
+    parseSeedClient({
+      ...base,
+      TREX_OIDC_CLIENT_SCOPES: "openid profile email offline_access idp_groups",
+    })?.allowedScopes,
+    ["openid", "profile", "email", "offline_access", "idp_groups"],
   );
   // openid is what makes the request an OIDC one; /authorize refuses without
   // it, so a list that omits it gets it.
   assertEquals(
-    parseSeedClient({ ...base, TREX_OIDC_CLIENT_SCOPES: "email, idp_groups" })?.allowedScopes,
-    ["openid", "email", "idp_groups"],
+    parseSeedClient({
+      ...base,
+      TREX_OIDC_CLIENT_SCOPES: "email, idp_groups, offline_access",
+    })?.allowedScopes,
+    ["openid", "email", "idp_groups", "offline_access"],
   );
   // Unset means "leave the row's scopes alone", not "reset them".
   assertEquals(parseSeedClient(base)?.allowedScopes, undefined);
@@ -98,6 +107,49 @@ Deno.test("a seeded client can be configured with the scopes it may be granted",
     parseSeedClient({ ...base, TREX_OIDC_CLIENT_SCOPES: "  " })?.allowedScopes,
     undefined,
   );
+});
+
+Deno.test("a configured scope list gets offline_access whether or not it asked", () => {
+  // d2e-compat requests `openid profile email offline_access` on EVERY sign-in,
+  // and /authorize refuses any scope outside `client.scopes`
+  // (dist/authorize-riRRCSbC.mjs:5558-5562). So a scope list written the way it
+  // would have been before the provider moved -- "openid,profile,email" -- does
+  // not merely lose silent renewal, it fails every login, naming a scope the
+  // operator never typed. The column's own first-insert default in
+  // seed-client.ts already carries offline_access; this stops an explicit list
+  // from disagreeing with it.
+  const base = {
+    TREX_OIDC_CLIENT_ID: "d2e-portal",
+    TREX_OIDC_CLIENT_REDIRECT_URIS: "https://a.test/cb",
+  };
+  const scopes = parseSeedClient({
+    ...base,
+    TREX_OIDC_CLIENT_SCOPES: "openid,profile,email",
+  })?.allowedScopes;
+  assertEquals(scopes?.includes("offline_access"), true);
+  // Still exactly one entry: forcing it must not duplicate a list that has it.
+  const already = parseSeedClient({
+    ...base,
+    TREX_OIDC_CLIENT_SCOPES: "openid,profile,email,offline_access",
+  })?.allowedScopes ?? [];
+  assertEquals(already.filter((s) => s === "offline_access").length, 1);
+});
+
+Deno.test("the seeded scope list is a superset of what d2e-compat requests", () => {
+  // The two defaults live in different modules and neither reads the other, so
+  // this is the only thing stopping them drifting: every scope the portal asks
+  // for on the authorize leg must be one the client row allows, or the sign-in
+  // is refused before a code is ever issued.
+  const requested = resolveIdpConfig(
+    { D2E_IDP: "trex", TREX_OIDC_ISSUER: "https://d2e.example" },
+    "/trex",
+  ).scope.split(" ");
+  const allowed = parseSeedClient({
+    TREX_OIDC_CLIENT_ID: "d2e-portal",
+    TREX_OIDC_CLIENT_REDIRECT_URIS: "https://a.test/cb",
+    TREX_OIDC_CLIENT_SCOPES: "openid,profile,email",
+  })?.allowedScopes ?? [];
+  assertEquals(requested.filter((s) => !allowed.includes(s)), []);
 });
 
 Deno.test("a seeded client carries the roles it is configured with", () => {
