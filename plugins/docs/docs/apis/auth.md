@@ -132,7 +132,13 @@ Two things worth knowing before they surprise you:
 Relying parties must set their expected audience to the issuer (the access
 token's `aud` is the RFC 8707 resource identifier, not the client id) alongside
 the client id, which is what the id_token carries. In d2e that is
-`D2E_IDP_AUDIENCES`.
+`D2E_IDP_AUDIENCES`, and it is what `D2E_IDP=trex` now defaults to, so a
+deployment that sets nothing accepts both tokens. Setting it replaces the pair
+rather than adding to it.
+
+The same identifier is sent as the token request's `resource` (`D2E_IDP_RESOURCE`,
+defaulting to the issuer). Without it the provider mints an opaque access token
+rather than a JWT, and nothing downstream can read or verify it.
 
 ## Tokens
 

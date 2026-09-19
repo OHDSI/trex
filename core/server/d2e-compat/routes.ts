@@ -387,9 +387,16 @@ export function mountD2eRoutes(app: Express): void {
     );
 
     try {
-      // client_secret_post only (secret is in the body). Logto rejects requests
-      // that present client auth via two mechanisms, so do NOT also send a Basic
-      // Authorization header.
+      // client_secret_post only (secret is in the body). Do NOT also send a
+      // Basic Authorization header. Logto rejects a request that presents
+      // client auth two ways, and trex's provider now refuses it for a
+      // different reason: @better-auth/oauth-provider resolves the method from
+      // how the credentials arrived — Basic wins outright over the body
+      // (extractClientCredentials, dist/utils-CWjOhEQb.mjs:725-739) — and then
+      // refuses any method other than the one the client is registered for
+      // (validateClientCredentials, :641). Both clients are seeded
+      // client_secret_post precisely because this proxy posts the secret
+      // (auth/oidc/seed-client.ts:143-149).
       const r = await postToIdpToken(tokenUrl, params.toString());
       // Not every response is JSON: a rate-limited request comes back as plain
       // text, and parsing it unconditionally turned a 429 the caller could act
