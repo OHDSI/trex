@@ -425,3 +425,60 @@ from one that never existed: there is no record that a revocation happened, who 
 Recorded rather than fixed. Neither `oauthRefreshToken` nor `oauthAccessToken` carries an audit
 contract today and nothing reads them for history. Whoever wants one should not add it by flagging
 `revoked` instead — that reopens the replay — but by writing an audit row alongside the delete.
+
+## Measured while re-expressing the protocol tests (task 8)
+
+Against the real mount, as everything since task 6.
+
+### RP-initiated logout verifies `id_token_hint` by fetching its own JWKS over HTTP
+
+`verifyLogoutHint` builds a JWKS set from
+`jwks.remoteUrl ?? ${ctx.context.baseURL}${jwks.jwksPath ?? "/jwks"}` and fetches it
+(`dist/authorize-riRRCSbC.mjs:547` → `@better-auth/core/dist/oauth2/verify.mjs:99`). It does not
+read the key it signed the id_token with minutes earlier. With better-auth.ts's
+`jwksPath: "/.well-known/jwks.json"` that URL is `<issuer>/.well-known/jwks.json`, which the mount
+does serve — but it is the **public** issuer, so the trex process has to be able to reach its own
+public FQDN through Caddy, over TLS, with a certificate it trusts. Where it cannot, every hint
+verifies as invalid and `/oauth2/end-session` answers 401 to a fetch or an HTML confirmation page to
+a browser navigation, which is indistinguishable from a genuine refusal. Not fixed here; recorded
+because nothing else would show it and because `auth/oidc/end-session.test.ts` has to bind the
+issuer's own port for exactly this reason.
+
+`sid` **is** on the id_token, contrary to the sample payload in spike 1 above, which was taken before
+`customIdTokenClaims` and phase 1's real sessions. `verifyLogoutHint` rejects a hint without one.
+
+### An `http:` redirect_uri on a non-loopback host never reaches the registration check
+
+`SafeUrlSchema` requires https except for a loopback host
+(`@better-auth/core/dist/utils/redirect-uri.mjs`), so `/oauth2/authorize` answers
+`error=invalid_request` at the issuer's error URL rather than the `invalid_redirect` an unregistered
+https URI gets. Same property — the browser is not sent to the requested URI — under a different name.
+
+### Registered loopback redirect URIs match on every character but the port
+
+`findRegisteredRedirectUri` strips the port from an `http:` loopback URI on both sides
+(`:5386-5446`, RFC 8252 §7.3). So registering `http://127.0.0.1:1234/cb` registers every port on that
+host. Stricter than the deleted router.ts, which compared for equality. No trex client registers a
+loopback URI today.
+
+### `post_logout_redirect_uri` is matched with `includes`, and gets none of that licence
+
+`getRegisteredLogoutRedirect` (`:558-573`) is plain string equality against
+`client.postLogoutRedirectUris` — a different column from `redirectUris`, so a registered callback URI
+is not a logout destination. An unregistered one is not an error: the logout still happens, and the
+plugin simply does not navigate (empty 200, or an HTML page saying the destination was not registered
+for a browser navigation).
+
+### An absent or empty `code_verifier` is refused before the challenge is compared
+
+With `requirePKCE` set — which the seeder sets for every client — the refusal is
+`invalid_request` / "PKCE is required for this client" (`dist/introspect-njKASm3q.mjs:1985-1990`),
+not the "code_verifier required because PKCE was used in authorization" of the next branch
+(`:1997-2000`). A wrong verifier is `invalid_request` / "code verification failed" (`:2007-2010`).
+All three share the error code, so only the description distinguishes the branch.
+
+### `code_challenge_method=plain` is refused twice
+
+The query schema pins `z.enum(["S256"])` (`introspect-njKASm3q.mjs:1048`) and the authorize handler
+checks the method again (`authorize-riRRCSbC.mjs:5596`). Removing either alone leaves `plain` refused;
+`auth/oidc/grants.test.ts`'s assertion changes only when both go.
