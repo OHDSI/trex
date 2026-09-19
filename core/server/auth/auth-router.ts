@@ -827,6 +827,20 @@ async function handleRefreshGrant(req: any, res: any) {
     }
 
     const response = await createTokenResponse(user, sessionId, res);
+    // A refresh completes an authentication, and until now it was the last
+    // route that completed one with sb-access-token alone. That matters on a
+    // clock: Better Auth's session cookie lives seven days and trex's refresh
+    // chain thirty, so a browser that keeps refreshing but does not visit
+    // /oauth2/authorize for a week is signed in to trex and anonymous at the
+    // provider — the same loop /callback had, with a longer fuse.
+    //
+    // Only for a caller that presents cookies at all. One that stores none
+    // could not send this cookie back, so the session row would be unreachable
+    // from the moment it was written: a server-side client refreshing hourly
+    // for thirty days would leave several hundred of them and nothing reaps
+    // them. A browser whose engine cookie has expired still sends
+    // sb-access-token, so the case this exists for is not the case it skips.
+    if (req.headers?.cookie) await attachEngineSessionCookie(user.id, req, res);
     res.json(response);
   } catch (err) {
     console.error("[auth] refresh grant error:", err);

@@ -2395,3 +2395,68 @@ contractTest(
     assertEquals(res.headers.getSetCookie(), []);
   },
 );
+
+// A refresh completes an authentication, and it was the last route that
+// completed one without an engine session. The clock is what makes it matter:
+// Better Auth's cookie lives seven days (Max-Age 604800, pinned above) and
+// trex's refresh chain thirty, so a browser refreshing through the gap is
+// signed in to trex and anonymous at the OAuth provider.
+contractTest(
+  "POST /token refresh grant re-arms Better Auth's session cookie",
+  async ({ url, pool }) => {
+    const user = await createUser(pool);
+
+    await withEnv({ TREX_NATIVE_PASSWORD_LOGIN_ENABLED: undefined }, async () => {
+      const signedIn = await post(`${url}/token?grant_type=password`, {
+        email: user.email,
+        password: user.password,
+      });
+      assertEquals(signedIn.status, 200);
+      const { refresh_token } = await signedIn.json();
+      assertEquals(await engineSessionCount(pool, user.id), 1);
+
+      // The seven-day mark, reproduced: the browser still holds
+      // sb-access-token and no longer holds the engine cookie.
+      const refreshed = await fetch(`${url}/token?grant_type=refresh_token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", cookie: "sb-access-token=whatever" },
+        body: JSON.stringify({ refresh_token }),
+      });
+      assertEquals(refreshed.status, 200);
+      await drain(refreshed);
+
+      const engine = setCookie(refreshed, "better-auth.session_token");
+      assertNotEquals(engine, undefined);
+      assertEquals(await engineSessionUserId(pool, engine!), user.id);
+    });
+  },
+);
+
+contractTest(
+  "POST /token refresh grant leaves a caller that stores no cookies alone",
+  async ({ url, pool }) => {
+    const user = await createUser(pool);
+
+    await withEnv({ TREX_NATIVE_PASSWORD_LOGIN_ENABLED: undefined }, async () => {
+      const signedIn = await post(`${url}/token?grant_type=password`, {
+        email: user.email,
+        password: user.password,
+      });
+      assertEquals(signedIn.status, 200);
+      const { refresh_token } = await signedIn.json();
+
+      // No Cookie header at all: a server-side client, which could never send
+      // the session back. A row written for it is unreachable from the moment
+      // it is written, and refreshing hourly for thirty days would leave
+      // several hundred of them behind with nothing to reap them.
+      const refreshed = await post(`${url}/token?grant_type=refresh_token`, {
+        refresh_token,
+      });
+      assertEquals(refreshed.status, 200);
+      await drain(refreshed);
+
+      assertEquals(setCookie(refreshed, "better-auth.session_token"), undefined);
+      assertEquals(await engineSessionCount(pool, user.id), 1);
+    });
+  },
+);
