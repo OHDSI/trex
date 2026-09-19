@@ -2314,3 +2314,49 @@ contractTest(
     assertEquals(sessions.rows[0].n, 1);
   },
 );
+
+async function engineSessionCount(pool: PgPool, userId: string): Promise<number> {
+  const result = await pool.query(
+    `SELECT count(*)::int AS n FROM trexdb.session WHERE "userId" = $1`,
+    [userId],
+  );
+  return result.rows[0].n;
+}
+
+contractTest(
+  "POST /logout ends the engine session whatever the password switch says",
+  async ({ url, pool }) => {
+    const user = await createUser(pool);
+    const now = Math.floor(Date.now() / 1000);
+    const token = await mintToken({
+      sub: user.id,
+      role: "authenticated",
+      aud: "authenticated",
+      exp: now + 3600,
+      iat: now,
+      session_id: crypto.randomUUID(),
+    });
+
+    const synced = await post(`${url}/sync-cookie`, undefined, token);
+    assertEquals(synced.status, 204);
+    await drain(synced);
+    const cookie = setCookie(synced, "better-auth.session_token")!.split(";")[0];
+    assertEquals(await engineSessionCount(pool, user.id), 1);
+
+    await withEnv({ TREX_NATIVE_PASSWORD_LOGIN_ENABLED: "false" }, async () => {
+      const res = await fetch(`${url}/logout`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, cookie },
+      });
+      assertEquals(res.status, 204);
+      await drain(res);
+      assertNotEquals(setCookie(res, "better-auth.session_token"), undefined);
+    });
+
+    // /sync-cookie issues engine sessions without consulting the password
+    // switch, so a logout that consulted it would leave a session this process
+    // handed out standing — and the OAuth provider reads that session and never
+    // sees this request.
+    assertEquals(await engineSessionCount(pool, user.id), 0);
+  },
+);

@@ -890,13 +890,19 @@ router.post("/logout", apiLimiter, async (req, res) => {
     // OAuth provider. The engine is handed the request's own cookies because it
     // is the only thing that knows which of its sessions they name.
     //
-    // Behind the same switch as every other engine call, and not only because
-    // a deployment with password sign-in off has no engine session to end:
-    // better-auth.ts reads that switch once, while it evaluates, so whichever
-    // request imports it first decides emailAndPassword.enabled for the life of
-    // the process. An ungated logout could be that request.
+    // No longer behind nativePasswordLoginEnabled, and the reason is that the
+    // premise of that gate has gone: a deployment with password sign-in off is
+    // no longer one with no engine session to end, because /sync-cookie issues
+    // one for any bearer it verifies, federated or not. Honouring the switch
+    // here would leave standing exactly the session this process handed out,
+    // and the OAuth provider reads that session and never sees this request.
+    //
+    // The gate's other purpose — keeping an ungated logout from being the
+    // request that imports better-auth.ts and so fixes emailAndPassword.enabled
+    // for the life of the process — is no longer something it can serve either:
+    // /sync-cookie imports the engine without consulting the switch at all.
     const engineCookies = req.headers.cookie;
-    if (nativePasswordLoginEnabled() && engineCookies) {
+    if (engineCookies) {
       const { auth } = await import("./better-auth.ts");
       const headers = new Headers({ cookie: engineCookies });
       // Resolved BEFORE the sign-out, because it is the only moment the engine
