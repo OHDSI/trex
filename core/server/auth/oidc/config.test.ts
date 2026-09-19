@@ -1,17 +1,13 @@
-// What survives of the hand-written provider's suite: the configuration
-// helpers and the federation block, both of which outlived the eight modules
-// the cutover deleted.
+// The configuration helpers: everything in config.ts is a pure function of its
+// input, so these need neither a database nor a listener.
 //
-// Everything that asserted protocol behaviour — redirect_uri matching, PKCE,
-// scope narrowing, code issue and consume, the id_token claim builder,
-// return_to — asserted an implementation that no longer exists.
-// @better-auth/oauth-provider owns those rules now, and the way to assert them
-// is against the mounted provider rather than against a helper:
-// discovery.test.ts and soft-delete.test.ts start that, and task 8 finishes it.
-// The claim shapes themselves are covered by custom-claims.test.ts, which tests
-// the callbacks that replaced buildIdTokenClaims.
+// What used to share this file — the hand-written provider's protocol suite —
+// went with the eight modules the cutover deleted, and the rules it asserted
+// are now the plugin's. They are pinned against the mounted provider instead:
+// authorize.test.ts for redirect_uri and scope, grants.test.ts for PKCE and the
+// three grants, end-session.test.ts for the post-logout list, and
+// custom-claims.test.ts for the claim set.
 import { assertEquals } from "jsr:@std/assert";
-import { federationFromAppMetadata, IDP_METADATA_KEY } from "./claims.ts";
 import {
   issuerUrl,
   loginUrl,
@@ -130,48 +126,4 @@ Deno.test("a seeded client without a secret is public and falls back to its id f
   assertEquals(spec?.clientSecret, undefined);
   assertEquals(spec?.name, "atlas");
   assertEquals(spec?.postLogoutRedirectUris, []);
-});
-
-// ── The federated-session end of the claims contract ────────────────────────
-//
-// The producer is federation/router.ts, which writes trexdb."user".app_metadata
-// inside the callback transaction; the consumer is oidc/custom-claims.ts, which
-// spreads federationFromAppMetadata(user.app_metadata) into the claims the
-// plugin emits. These exercise the join between the two without a database.
-
-Deno.test("a federated session's app_metadata is read back as provider and groups", () => {
-  const written = {
-    provider: "sso",
-    trex_role: "user",
-    [IDP_METADATA_KEY]: { provider: "logto", groups: ["alp-admins", "study-42"] },
-  };
-  assertEquals(federationFromAppMetadata(written), {
-    idpProvider: "logto",
-    idpGroups: ["alp-admins", "study-42"],
-  });
-});
-
-Deno.test("a native session's app_metadata yields no idp fields at all", () => {
-  const native = { provider: "email", providers: ["email"], trex_role: "user" };
-  assertEquals(federationFromAppMetadata(native), {});
-});
-
-// app_metadata is a free-form JSONB column that long predates federation.
-Deno.test("a malformed federation block degrades to a native session", () => {
-  assertEquals(federationFromAppMetadata(null), {});
-  assertEquals(federationFromAppMetadata(undefined), {});
-  assertEquals(federationFromAppMetadata("nonsense"), {});
-  assertEquals(federationFromAppMetadata({ [IDP_METADATA_KEY]: "logto" }), {});
-  assertEquals(federationFromAppMetadata({ [IDP_METADATA_KEY]: { groups: ["a"] } }), {});
-  assertEquals(federationFromAppMetadata({ [IDP_METADATA_KEY]: { provider: "" } }), {});
-  // A provider with an unusable group list is still a federated session; it
-  // simply asserts no groups, rather than being demoted to a native one.
-  assertEquals(
-    federationFromAppMetadata({ [IDP_METADATA_KEY]: { provider: "logto" } }),
-    { idpProvider: "logto", idpGroups: [] },
-  );
-  assertEquals(
-    federationFromAppMetadata({ [IDP_METADATA_KEY]: { provider: "logto", groups: [1, 2] } }),
-    { idpProvider: "logto", idpGroups: [] },
-  );
 });
