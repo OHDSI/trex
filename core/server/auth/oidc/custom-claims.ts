@@ -80,17 +80,43 @@ export async function idTokenClaims(
  * decodes whichever it was handed to read `roles` and passes it to d2e-compat.
  *
  * `user` is null or absent on a client_credentials grant, which has no end
- * user. Such a token authorizes as the service it was issued to, so it names
- * the system role trex uses for one and carries no application roles.
+ * user. Such a token authorizes as the service it was issued to, so `roles`
+ * carries the CLIENT's own roles — the deleted router.ts emitted
+ * `appRoles: client.clientRoles` there, seeded from TREX_OIDC_CLIENT_ROLES
+ * (ALP_USER_ADMIN, ALP_SYSTEM_ADMIN), and a service token that authorizes as
+ * nobody is a silent loss of every machine-to-machine permission.
+ *
+ * The roles arrive in `metadata`, which the plugin fills with
+ * `parseClientMetadata(client.metadata)` before calling this
+ * (dist/introspect-njKASm3q.mjs:1802, 239-260) — there is no column for them,
+ * and the callback is handed no client object to read one from.
+ *
+ * NOTE this callback only ever runs for a JWT access token: `createUserTokens`
+ * gates it on `isJwtAccessToken`, which is `audienceClaim && !disableJwtPlugin`
+ * (:1800), and `audienceClaim` is undefined unless the request carried a
+ * `resource` (:454). client_credentials has no authorize leg to inherit one
+ * from, so the token request itself must send `resource=` — otherwise the
+ * token is opaque and none of this is reached. provider.ts's
+ * `requireServiceResource` is what makes sure it does.
  */
 export async function accessTokenClaims(
   info: {
     user?: Record<string, unknown> | null;
     referenceId?: string;
     scopes: readonly string[];
+    metadata?: Record<string, unknown> | null;
   },
 ): Promise<Record<string, unknown>> {
-  if (!info.user) return { trex_role: "service", roles: [] };
+  if (!info.user) {
+    const clientRoles = info.metadata?.clientRoles;
+    return {
+      trex_role: "service",
+      roles: Array.isArray(clientRoles) ? clientRoles.map(String) : [],
+      // The pair the id_token path emits too: d2e-compat reads trex_role off
+      // the bearer, and the deleted claims.ts put it in both places.
+      app_metadata: { trex_role: "service" },
+    };
+  }
   return await idTokenClaims({ user: info.user, scopes: info.scopes });
 }
 

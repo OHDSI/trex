@@ -29,6 +29,8 @@ interface Fixtures {
   withRoles: string;
   /** Holds none, so the roles claim has to come back empty rather than absent. */
   withoutRoles: string;
+  /** The name that role carries, unique per run. */
+  roleName: string;
 }
 
 /**
@@ -41,8 +43,17 @@ interface Fixtures {
 async function withFixtures(fn: (f: Fixtures) => Promise<void>): Promise<void> {
   const { pool } = mod!.db;
   const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
-  const f: Fixtures = { withRoles: `claims-${run}-a`, withoutRoles: `claims-${run}-b` };
   const roleId = `claims-${run}-role`;
+  // trexdb.role.name is UNIQUE (V1__initial_schema.sql:365-371), so inserting a
+  // real role name — `role.systemadmin` — passes on a scratch CI database and
+  // fails on any database that already carries it. The name is per-run for the
+  // same reason the ids are.
+  const roleName = `claims-${run}-role.systemadmin`;
+  const f: Fixtures = {
+    withRoles: `claims-${run}-a`,
+    withoutRoles: `claims-${run}-b`,
+    roleName,
+  };
   try {
     for (const id of [f.withRoles, f.withoutRoles]) {
       await pool.query(`INSERT INTO trexdb."user" (id, name, email) VALUES ($1, $1, $2)`, [
@@ -52,7 +63,7 @@ async function withFixtures(fn: (f: Fixtures) => Promise<void>): Promise<void> {
     }
     await pool.query(`INSERT INTO trexdb.role (id, name) VALUES ($1, $2)`, [
       roleId,
-      "role.systemadmin",
+      roleName,
     ]);
     await pool.query(`INSERT INTO trexdb.user_role ("userId", "roleId") VALUES ($1, $2)`, [
       f.withRoles,
@@ -95,7 +106,7 @@ test("the roles claim carries application roles, not the system role", async (f)
     user: user(f.withRoles),
     scopes: ["openid"],
   });
-  assertEquals(claims.roles, ["role.systemadmin"]);
+  assertEquals(claims.roles, [f.roleName]);
   assertEquals(claims.trex_role, "admin");
   assertEquals(claims.app_metadata, { trex_role: "admin" });
 });
@@ -174,9 +185,39 @@ test("an access token carries the same claims as the id_token", async (f) => {
 test("a client_credentials token names a service, not a user", async (_f) => {
   // No end user exists on that grant, and `user` arrives null rather than
   // absent, so the null has to be handled as well as the undefined.
-  for (const info of [{ scopes: ["openid"] }, { user: null, scopes: ["openid"] }]) {
+  for (const info of [{ scopes: ["trex:service"] }, { user: null, scopes: ["trex:service"] }]) {
     const claims = await mod!.claims.accessTokenClaims(info);
     assertEquals(claims.trex_role, "service");
+    assertEquals(claims.app_metadata, { trex_role: "service" });
+    // No client was named, so there are no roles to carry.
+    assertEquals(claims.roles, []);
+  }
+});
+
+test("a client_credentials token carries the CLIENT's roles", async (_f) => {
+  // The regression this restores: the deleted router.ts emitted
+  // `appRoles: client.clientRoles` here, seeded from TREX_OIDC_CLIENT_ROLES,
+  // and a service token that authorizes as nobody loses every machine-to-machine
+  // permission d2e's usermgmt relies on. The plugin hands the roles over in
+  // `metadata`, which is parseClientMetadata(client.metadata).
+  const claims = await mod!.claims.accessTokenClaims({
+    user: null,
+    scopes: ["trex:service"],
+    metadata: { clientRoles: ["ALP_USER_ADMIN", "ALP_SYSTEM_ADMIN"] },
+  });
+  assertEquals(claims.roles, ["ALP_USER_ADMIN", "ALP_SYSTEM_ADMIN"]);
+  assertEquals(claims.trex_role, "service");
+});
+
+test("a client with no roles, or metadata that is not a list, carries none", async (_f) => {
+  // metadata is a free-form jsonb bag an operator can write by hand, so a
+  // clientRoles that is not an array must not reach the token as one.
+  for (const metadata of [undefined, null, {}, { clientRoles: null }, { clientRoles: "admin" }]) {
+    const claims = await mod!.claims.accessTokenClaims({
+      user: null,
+      scopes: ["trex:service"],
+      metadata: metadata as Record<string, unknown> | null,
+    });
     assertEquals(claims.roles, []);
   }
 });
@@ -196,7 +237,7 @@ test("userinfo carries trex_role and nothing the id_token does not", async (f) =
 });
 
 test("appRolesFor returns the names in a stable order", async (f) => {
-  assertEquals(await mod!.claims.appRolesFor(f.withRoles), ["role.systemadmin"]);
+  assertEquals(await mod!.claims.appRolesFor(f.withRoles), [f.roleName]);
   assertEquals(await mod!.claims.appRolesFor(f.withoutRoles), []);
   // An id that never existed reads the same as one with no roles: the callback
   // is handed whatever the plugin resolved and has no second chance to 404.

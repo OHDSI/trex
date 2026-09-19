@@ -13,6 +13,7 @@ import { admin, jwt } from "better-auth/plugins";
 import { pool } from "../db.ts";
 import { oidcIssuer } from "./oidc/config.ts";
 import { trexOAuthProvider } from "./oidc/provider.ts";
+import { defaultServiceResource, refuseRetiredSubject } from "./oidc/hooks.ts";
 import { deriveSubkeyBase64, LABELS } from "./keys.ts";
 import { hashPassword, verifyPassword } from "./password.ts";
 import { nativePasswordLoginEnabled } from "./federation/config.ts";
@@ -162,6 +163,13 @@ export const auth = betterAuth({
     // routes to a handler that, without the mount, nothing calls.
     trexOAuthProvider(),
   ],
+  // The provider plugin has no option for either of these and a Better Auth
+  // plugin cannot reach them; oidc/hooks.ts carries the measurement for each.
+  // Both are no-ops on every path but the one they name.
+  hooks: {
+    before: defaultServiceResource,
+    after: refuseRetiredSubject,
+  },
 });
 
 // Better Auth resolves `hash` and `verify` independently — `options.password
