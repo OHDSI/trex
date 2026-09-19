@@ -360,3 +360,31 @@ test("the resource default does not reach the other two grants", async (_m, flow
   // plugin adds for an openid request.
   assertEquals(payload.aud, [flow.server.issuer, `${flow.server.issuer}/oauth2/userinfo`]);
 });
+
+// ── RP-initiated logout ─────────────────────────────────────────────────────
+// Not a grant, but it lives here because this is the suite with a live mount, a
+// signed-in session and a seeded client, which is what the assertion needs.
+
+test("end-session clears trex's own cookie, not only Better Auth's", async (_m, flow) => {
+  // The deleted router.ts cleared sb-access-token on its end-session route
+  // (router.ts:448-457). The plugin cannot: the cookie is trex's, and
+  // /auth/v1/logout — the only other place it is cleared — is not on this path.
+  // Without this a browser that logs out through the relying party keeps a
+  // bearer that same-origin iframes still read.
+  const issued = await exchange(flow, "openid profile email");
+  assertEquals(issued.status, 200);
+
+  const query = new URLSearchParams({
+    id_token_hint: issued.body.id_token,
+    client_id: flow.clientId,
+  });
+  const res = await fetch(`${flow.server.url}/oauth2/end-session?${query}`, {
+    headers: { cookie: flow.cookie },
+    redirect: "manual",
+  });
+  await res.body?.cancel();
+  const cleared = res.headers.getSetCookie().find((c) => c.startsWith("sb-access-token="));
+  assertNotEquals(cleared, undefined, "end-session left sb-access-token in place");
+  assertStringIncludes(cleared!, "sb-access-token=;");
+  assertStringIncludes(cleared!, "Path=/");
+});

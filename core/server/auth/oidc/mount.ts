@@ -84,6 +84,17 @@ export function oidcHandler(): express.RequestHandler {
     );
 
     const response = await auth.handler(request);
+
+    // RP-initiated logout clears trex's own cookie as well. The deleted
+    // router.ts did this unconditionally on its end-session route
+    // (router.ts:448-457), and the plugin cannot: sb-access-token is trex's,
+    // not Better Auth's, and /auth/v1/logout — the only other place it is
+    // cleared — is not on this path. Without it a browser that logs out through
+    // the relying party keeps a bearer that same-origin iframes still read.
+    if (path.startsWith("/oauth2/end-session")) {
+      res.clearCookie("sb-access-token", { path: "/" });
+    }
+
     res.status(response.status);
     // Set-Cookie is the one header that legitimately repeats, and Headers
     // folds repeats into one comma-joined value — which turns two cookies into
