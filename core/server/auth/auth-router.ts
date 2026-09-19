@@ -202,7 +202,7 @@ async function signEngineSessionToken(token: string, secret: string): Promise<st
  * needs auth, and a trexdb.session row per call would be a slow accumulation of
  * credentials nothing ever ends.
  */
-async function attachEngineSessionCookie(
+export async function attachEngineSessionCookie(
   userId: string,
   // deno-lint-ignore no-explicit-any
   req: any,

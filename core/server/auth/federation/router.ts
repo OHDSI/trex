@@ -7,9 +7,14 @@
 // issues — so from the moment /callback finishes the request is
 // indistinguishable from a native login, and neither the OIDC provider nor any
 // relying party needs to know federation exists.
+//
+// "Exactly the session" is two cookies and not one, and the claim above was
+// false for as long as it was one: sb-access-token is measured to be no
+// session at all at /oauth2/authorize, which reads Better Auth's own cookie
+// and nothing else. See attachEngineSessionCookie at the end of /callback.
 import { Router } from "express";
 import { authLimiter } from "../../middleware/rate-limit.ts";
-import { createTokenResponse } from "../auth-router.ts";
+import { attachEngineSessionCookie, createTokenResponse } from "../auth-router.ts";
 import { IDP_METADATA_KEY } from "../oidc/claims.ts";
 import { loginUrl } from "../oidc/config.ts";
 import { applyClaimMap, authorizationEndpointFor, federationEnabled } from "./config.ts";
@@ -318,10 +323,16 @@ export function registerFederationRoutes(
         throw err;
       }
 
-      // Issue exactly the session the password grant issues: it sets the
-      // sb-access-token cookie the OIDC provider reads and returns its body
-      // rather than writing one, so the redirect below is what the browser gets.
+      // Issue exactly the session the password grant issues, which is two
+      // cookies and not one. createTokenResponse sets sb-access-token and
+      // returns its body rather than writing one, so the redirect below is
+      // what the browser gets — but sb-access-token is measured NOT to be a
+      // session at /oauth2/authorize, which resolves the end user through
+      // getSessionFromCtx and has no override for it. Without the second
+      // cookie a federated user reaches the provider anonymous and is sent
+      // back to the login page they just came from, indefinitely.
       await createTokenResponse(sessionUser, undefined, res);
+      await attachEngineSessionCookie(sessionUser.id, req, res);
       // Signed, so already safe; re-checked because the cost is nil and this is
       // the one redirect an attacker would want to reach.
       res.redirect(302, safeRedirectTo(state.redirectTo));

@@ -1745,3 +1745,157 @@ Deno.test({
     }
   },
 });
+
+// ── The session the OIDC provider reads ─────────────────────────────────────
+//
+// /oauth2/authorize resolves the end user with getSessionFromCtx — Better
+// Auth's own signed cookie against trexdb.session — and the plugin exposes no
+// override for it. Measured at the cutover: a genuine sb-access-token presented
+// as the only cookie gets the same redirect back to the login page as no cookie
+// at all. So a federated sign-in that sets only sb-access-token loops, which is
+// the whole of what this drives /callback end to end to prove.
+//
+// The upstream is not a server: the route uses the global fetch for all three
+// of its outbound calls — discovery, the token exchange, and the JWKS jose
+// resolves the id_token's signature against — so one stub covers the lot, and
+// the only thing missing from the flow is a network.
+Deno.test({
+  name: "[db] a federated callback issues the session cookie the OIDC provider reads",
+  ignore: !provisionDbUrl,
+  // ../db.ts owns a pool that deliberately outlives the test, as in
+  // auth-router.contract.test.ts.
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const { _resetJwtSecretCache } = await import("../jwt.ts");
+    const { _resetRootKeyCache } = await import("../keys.ts");
+
+    _resetRootKeyCache();
+    _resetJwtSecretCache();
+    // Before better-auth.ts is imported, not after: it derives its secret from
+    // this variable while it evaluates.
+    Deno.env.set("TREX_ROOT_KEY", btoa(String.fromCharCode(...new Uint8Array(32).map((_, i) => i))));
+    const wasEnabled = Deno.env.get("TREX_FEDERATION_ENABLED");
+    Deno.env.set("TREX_FEDERATION_ENABLED", "true");
+    // upsertAccount seals the upstream tokens, and the DEK is normally set by
+    // initDek() at boot; this test boots no server.
+    _setDekForTests(new Uint8Array(32));
+
+    const express = (await import("express")).default;
+    const { registerFederationRoutes } = await import("./router.ts");
+    const { pool } = await import("../../db.ts");
+    const { auth } = await import("../better-auth.ts");
+    clearDiscoveryCache();
+
+    const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+    const providerId = `t9_${run}`;
+    // A fresh issuer per run, because verify.ts caches one createRemoteJWKSet
+    // per jwks_uri for the life of the process and a reused host would resolve
+    // against a previous run's keys.
+    const issuer = `https://logto-${run}.test/oidc`;
+    const doc = {
+      issuer,
+      authorization_endpoint: `${issuer}/auth`,
+      token_endpoint: `${issuer}/token`,
+      jwks_uri: `${issuer}/jwks`,
+      id_token_signing_alg_values_supported: ["RS256"],
+    };
+    const email = `fed-${run}@example.test`;
+
+    const { privateKey, publicKey } = await generateKeyPair("RS256");
+    const jwk = await exportJWK(publicKey);
+
+    const realFetch = globalThis.fetch;
+    const app = express();
+    registerFederationRoutes(app, "/trex", pool);
+    const server = app.listen(0, "127.0.0.1");
+    await new Promise<void>((r) => server.once("listening", () => r()));
+    const { port } = server.address() as { port: number };
+
+    try {
+      await pool.query(
+        `INSERT INTO trexdb.sso_provider
+           (id, "displayName", "clientId", "clientSecret", enabled, issuer,
+            link_policy, auto_provision)
+         VALUES ($1, 'Task 9', 'd2e-client', 'secret', true, $2, 'verified_email', true)`,
+        [providerId, issuer],
+      );
+
+      const binding = `${crypto.randomUUID()}${crypto.randomUUID()}`;
+      const nonce = crypto.randomUUID();
+      const state = await signState({
+        provider: providerId,
+        redirectTo: "/portal",
+        nonce,
+        verifier: createVerifier(),
+        bind: await hashBinding(binding),
+        exp: Math.floor(Date.now() / 1000) + 300,
+      }, await stateKeys());
+
+      const idToken = await new SignJWT({
+        sub: `upstream-${run}`,
+        email,
+        email_verified: true,
+        nonce,
+      })
+        .setProtectedHeader({ alg: "RS256" })
+        .setIssuer(issuer)
+        .setAudience("d2e-client")
+        .setIssuedAt()
+        .setExpirationTime("5m")
+        .sign(privateKey);
+
+      globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input instanceof Request ? input.url : input);
+        // Loopback is the express server under test; everything else is the
+        // upstream this stub stands in for.
+        if (url.startsWith("http://127.0.0.1:")) return realFetch(input, init);
+        if (url.endsWith("/.well-known/openid-configuration")) {
+          return Promise.resolve(Response.json(doc));
+        }
+        if (url === doc.jwks_uri) return Promise.resolve(Response.json({ keys: [jwk] }));
+        if (url === doc.token_endpoint) {
+          return Promise.resolve(Response.json({
+            id_token: idToken,
+            access_token: `upstream-access-${run}`,
+            expires_in: 3600,
+            scope: "openid profile email",
+          }));
+        }
+        throw new Error(`unstubbed fetch: ${url}`);
+      }) as typeof fetch;
+
+      const res = await realFetch(
+        `http://127.0.0.1:${port}/trex/auth/v1/callback?code=upstream-code&state=${
+          encodeURIComponent(state)
+        }`,
+        { headers: { cookie: `${bindingCookieName(false)}=${binding}` }, redirect: "manual" },
+      );
+      assertEquals(res.status, 302);
+      assertEquals(res.headers.get("location"), "/portal");
+      await res.body?.cancel();
+
+      const cookies = res.headers.getSetCookie();
+      assertEquals(cookies.some((c) => c.startsWith("sb-access-token=")), true);
+      const engine = cookies.find((c) => c.startsWith("better-auth.session_token="));
+      assertNotEquals(engine, undefined);
+
+      // The end-to-end consequence, not the cookie's name: only a cookie the
+      // engine itself accepts is a session at /oauth2/authorize, and nothing
+      // else on this route sets one — clearBinding clears the two federation
+      // cookies and createTokenResponse sets sb-access-token alone.
+      const resolved = await auth.api.getSession({
+        headers: new Headers({ cookie: engine!.split(";")[0] }),
+      });
+      assertEquals(resolved?.user?.email, email);
+    } finally {
+      globalThis.fetch = realFetch;
+      _resetDekCache();
+      await new Promise<void>((r) => server.close(() => r()));
+      await pool.query(`DELETE FROM trexdb."user" WHERE email = $1`, [email]);
+      await pool.query(`DELETE FROM trexdb.sso_provider WHERE id = $1`, [providerId]);
+      if (wasEnabled === undefined) Deno.env.delete("TREX_FEDERATION_ENABLED");
+      else Deno.env.set("TREX_FEDERATION_ENABLED", wasEnabled);
+    }
+  },
+});
