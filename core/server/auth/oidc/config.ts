@@ -55,6 +55,14 @@ export function oidcIssuer(
  * collide with a standard OIDC scope a future relying party asks for, and
  * declared in the provider's `scopes` list because the plugin's validator
  * requires a client_credentials scope to be one the provider advertises.
+ *
+ * Declaring it there does NOT put it on a user token by itself: /authorize
+ * narrows every request to `client.scopes ?? opts.scopes`
+ * (dist/authorize-riRRCSbC.mjs:5558-5565), and the seeder never writes it into
+ * a client's `scopes` column. A deployment that sets
+ * TREX_OIDC_CLIENT_SCOPES="trex:service" can still put it on one — harmless
+ * today, since the claims callback keys `trex_role` off the user's own role and
+ * a user token stays "user", but it is a scope that means nothing on that path.
  */
 export const SERVICE_SCOPE = "trex:service";
 

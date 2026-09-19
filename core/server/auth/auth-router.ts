@@ -21,6 +21,7 @@ import { loadExternalProviders } from "./settings-providers.ts";
 import { nativePasswordLoginEnabled } from "./federation/config.ts";
 import { requireAdmin } from "./require-admin.ts";
 import { IDP_METADATA_KEY } from "./oidc/claims.ts";
+import { revokeOidcTokensForSession, revokeOidcTokensForUser } from "./oidc/revoke.ts";
 import { isEngineAddressable, isPlaceholderAddress } from "./engine-address.ts";
 // Re-exported, not merely imported. V17's twin-of comment and the parity tests
 // both name this module as where the predicate lives, and the federation admin
@@ -814,13 +815,22 @@ router.post("/logout", apiLimiter, async (req, res) => {
     const engineCookies = req.headers.cookie;
     if (nativePasswordLoginEnabled() && engineCookies) {
       const { auth } = await import("./better-auth.ts");
+      const headers = new Headers({ cookie: engineCookies });
+      // Resolved BEFORE the sign-out, because it is the only moment the engine
+      // session this request names still exists. Its id is what the provider
+      // stamped on the OIDC refresh tokens issued off it, and deleting the
+      // session row does not stop those: the refresh grant reads the user and
+      // never the session. Scoped to this one session rather than to the
+      // account, so logging out here stays as narrow as it has always been.
+      const live = await auth.api.getSession({ headers }).catch(() => null);
       const signedOut = await auth.api.signOut({
-        headers: new Headers({ cookie: engineCookies }),
+        headers,
         returnHeaders: true,
       }).catch(() => null);
       for (const cookie of signedOut?.headers.getSetCookie() ?? []) {
         res.append("Set-Cookie", cookie);
       }
+      if (live?.session?.id) await revokeOidcTokensForSession(live.session.id);
     }
 
     const authHeader = req.headers.authorization;
@@ -1005,6 +1015,11 @@ router.put("/user", apiLimiter, async (req, res) => {
         // password change that left it standing would keep signing the account
         // in on the cookie it already holds.
         await endEngineSessions(claims.sub);
+        // And the third half, since the cutover: the provider keeps its refresh
+        // tokens in its own tables, which neither of the two statements above
+        // reaches. Without this the OIDC session outlives the password it was
+        // established with.
+        await revokeOidcTokensForUser(claims.sub);
       } else {
         await pool.query(update, values);
       }
@@ -1137,6 +1152,7 @@ router.post("/change-password", apiLimiter, async (req, res) => {
       [user.id],
     );
     await endEngineSessions(user.id);
+    await revokeOidcTokensForUser(user.id);
 
     res.json({ success: true });
   } catch (err) {
@@ -1213,6 +1229,12 @@ router.post("/revoke-session", apiLimiter, async (req, res) => {
       return;
     }
 
+    // Deliberately NOT paired with endEngineSessions, and for the same reason
+    // not with revokeOidcTokensForSession: that helper joins on the ENGINE
+    // session id, and `session_id` here is trex's own, with no column anywhere
+    // tying the two together. Revoking by user instead would sign the caller
+    // out of every device to honour a request to sign out of one.
+    //
     // Deliberately NOT paired with endEngineSessions, which is wholesale.
     // `session_id` here is trex's own: the value minted with a refresh token
     // and carried in the access token, with no column anywhere tying it to a
@@ -1469,6 +1491,11 @@ router.put("/admin/users/:id", apiLimiter, async (req, res) => {
         [user.id],
       );
       await endEngineSessions(user.id);
+      // The ban half is also covered by oidc/mount.ts's guard, which reads
+      // `banned` off the row. The password half is not: a reset leaves the row
+      // saying the account is fine, so only this statement stops the OIDC
+      // refresh chain the old password established.
+      await revokeOidcTokensForUser(user.id);
     }
 
     const updated = await fetchUserById(user.id);

@@ -27,11 +27,25 @@ import { oidcIssuer } from "./config.ts";
  * answering it with the audience trex would have used anyway. A caller that
  * names a resource keeps it.
  */
+function namesAResource(resource: unknown): boolean {
+  if (typeof resource === "string") return resource.length > 0;
+  if (Array.isArray(resource)) {
+    return resource.some((r) => typeof r === "string" && r.length > 0);
+  }
+  return false;
+}
+
 export const defaultServiceResource = createAuthMiddleware(async (ctx) => {
   if (ctx.path !== "/oauth2/token") return;
   const body = ctx.body as Record<string, unknown> | undefined;
   if (!body || body.grant_type !== "client_credentials") return;
-  if (body.resource !== undefined && body.resource !== "") return;
+  // Normalized the way the plugin does before deciding the caller named one:
+  // `resource` may arrive repeated, and `normalizeResourceParam` discards an
+  // array with no non-empty string in it (dist/introspect-njKASm3q.mjs:394-401).
+  // A bare `!== undefined` therefore lets `resource=` or `resource=&resource=`
+  // through as if it were a real value, and the token goes out opaque — the
+  // exact failure this hook exists to prevent, reached by a caller that tried.
+  if (namesAResource(body.resource)) return;
   return { context: { body: { ...body, resource: oidcIssuer() } } };
 });
 

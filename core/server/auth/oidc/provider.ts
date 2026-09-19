@@ -4,6 +4,7 @@
 import { oauthProvider } from "@better-auth/oauth-provider";
 import { accessTokenClaims, idTokenClaims, userInfoClaims } from "./custom-claims.ts";
 import { oidcIssuer, SERVICE_SCOPE } from "./config.ts";
+import { refreshTokenTtlDays } from "../refresh-token-ttl.ts";
 
 export function trexOAuthProvider() {
   return oauthProvider({
@@ -27,6 +28,15 @@ export function trexOAuthProvider() {
     // defaults to 36000.
     idTokenExpiresIn: 3600,
     accessTokenExpiresIn: 3600,
+    // REFRESH_TOKEN_TTL_DAYS, the same knob trex's own refresh tokens read
+    // (refresh-token-ttl.ts), so a deployment that shortened one does not find
+    // the other still at 30 days. The two are not the same rule and cannot be:
+    // trex's is an ABSOLUTE age measured from the first issuance, while the
+    // plugin recomputes exp as `iat + ttl` on every rotation
+    // (dist/introspect-njKASm3q.mjs:1610-1616), so this is a rolling window.
+    // Wired anyway, because one inert knob is worse than one whose units are
+    // documented.
+    refreshTokenExpiresIn: refreshTokenTtlDays() * 24 * 60 * 60,
     // Required options with no defaults. The login page is d2e's; consent is
     // never reached because the seeded client carries skipConsent, but a string
     // is still mandatory.

@@ -871,7 +871,10 @@ try {
     await importOidcSigningKey();
   }
 } catch (err) {
-  console.error("[boot] FATAL: DEK init failed:", err);
+  // Covers the DEK init AND the OIDC signing-key import above, which is why it
+  // does not name either: a "DEK init failed" line for a key-import failure
+  // would send the reader to the wrong half of this block.
+  console.error("[boot] FATAL: startup key setup failed:", err);
   // This service runs inside the trex host's embedded edge runtime, which does
   // not implement Deno.exit — calling it threw "Deno.exit is not a function",
   // masking the real DEK error above. A worker can't kill the host process
