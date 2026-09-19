@@ -86,18 +86,18 @@ Deno.test("trex: issuer, jwks and token endpoint come from the provider's own co
   assertEquals(c.idp, "trex");
   assertEquals(c.issuer, "https://trex.example/oidc");
   assertEquals(c.jwksUri, "https://trex.example/oidc/.well-known/jwks.json");
-  assertEquals(c.tokenUrl, "https://trex.example/oidc/token");
+  assertEquals(c.tokenUrl, "https://trex.example/oidc/oauth2/token");
   assertEquals(c.clientId, "d2e-portal");
   assertEquals(c.clientSecret, "t-secret");
   assertEquals(c.audiences, ["d2e-portal"]);
-  assertEquals(c.authorizePath, "oidc/authorize");
+  assertEquals(c.authorizePath, "oidc/oauth2/authorize");
   // Selecting trex must not leak Logto's endpoints through.
   assertEquals(c.tokenUrl.includes("logto"), false);
   assertEquals(c.issuer.includes("logto"), false);
 });
 
 Deno.test("trex: the issuer carries the base path AND the /oidc mount", () => {
-  // Must match registerOidcRoutes/buildReturnTo, or token `iss` validation fails.
+  // Must match the provider's own issuer, or token `iss` validation fails.
   // The /oidc segment used to be missing here, which left the issuer naming a
   // path one level above its own discovery document -- see the spec test below.
   const c = resolveIdpConfig({ D2E_IDP: "trex", TREX_OIDC_ISSUER: "https://trex.example" }, "/trex");
@@ -154,7 +154,7 @@ Deno.test("trex: the issuer names the /oidc mount, so discovery sits under it", 
     c.jwksUri,
     "https://d2e.example:41100/trex/oidc/.well-known/jwks.json",
   );
-  assertEquals(c.tokenUrl, "https://d2e.example:41100/trex/oidc/token");
+  assertEquals(c.tokenUrl, "https://d2e.example:41100/trex/oidc/oauth2/token");
   // The invariant that actually matters, stated directly.
   assertEquals(c.jwksUri.startsWith(c.issuer + "/"), true);
 });
@@ -168,13 +168,13 @@ Deno.test("trex: browser paths carry the base path the front door proxies", () =
     { D2E_IDP: "trex", TREX_OIDC_ISSUER: "https://d2e.example:41100" },
     "/trex",
   );
-  assertEquals(c.authorizePath, "trex/oidc/authorize");
-  assertEquals(c.endSessionPath, "trex/oidc/session/end");
+  assertEquals(c.authorizePath, "trex/oidc/oauth2/authorize");
+  assertEquals(c.endSessionPath, "trex/oidc/oauth2/end-session");
   // The gateway builds `${origin}/${authorizePath}`, which must land on the
   // endpoint the discovery document advertises.
   assertEquals(
     `https://d2e.example:41100/${c.authorizePath}`,
-    `${c.issuer}/authorize`,
+    `${c.issuer}/oauth2/authorize`,
   );
 });
 
@@ -183,8 +183,8 @@ Deno.test("trex: browser paths follow a deployment mounted at the root", () => {
     { D2E_IDP: "trex", TREX_OIDC_ISSUER: "https://d2e.example" },
     "",
   );
-  assertEquals(c.authorizePath, "oidc/authorize");
-  assertEquals(`https://d2e.example/${c.authorizePath}`, `${c.issuer}/authorize`);
+  assertEquals(c.authorizePath, "oidc/oauth2/authorize");
+  assertEquals(`https://d2e.example/${c.authorizePath}`, `${c.issuer}/oauth2/authorize`);
 });
 
 Deno.test("trex: an internal base redirects server-side fetches but not `iss`", () => {
@@ -199,7 +199,7 @@ Deno.test("trex: an internal base redirects server-side fetches but not `iss`", 
     TREX_OIDC_INTERNAL_BASE: "http://d2e-trex:33001",
   }, "/trex");
   assertEquals(c.issuer, "https://d2e.example:41100/trex/oidc");
-  assertEquals(c.tokenUrl, "http://d2e-trex:33001/trex/oidc/token");
+  assertEquals(c.tokenUrl, "http://d2e-trex:33001/trex/oidc/oauth2/token");
   assertEquals(c.jwksUri, "http://d2e-trex:33001/trex/oidc/.well-known/jwks.json");
 });
 
@@ -208,6 +208,6 @@ Deno.test("trex: without an internal base everything stays on the issuer", () =>
     D2E_IDP: "trex",
     TREX_OIDC_ISSUER: "https://d2e.example:41100",
   }, "/trex");
-  assertEquals(c.tokenUrl, `${c.issuer}/token`);
+  assertEquals(c.tokenUrl, `${c.issuer}/oauth2/token`);
   assertEquals(c.jwksUri, `${c.issuer}/.well-known/jwks.json`);
 });

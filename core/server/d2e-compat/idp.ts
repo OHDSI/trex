@@ -56,12 +56,11 @@ export function resolveIdpConfig(
 
   if (idp === "trex") {
     // Same issuer the provider stamps into its tokens and advertises in its
-    // discovery document (see registerOidcRoutes) — derived the same way rather
-    // than restated, so the two cannot drift apart.
-    // The issuer carries the mount's base path, because every endpoint the
-    // provider advertises is built from it (see registerOidcRoutes/buildReturnTo).
-    // Includes the `/oidc` mount, matching what registerOidcRoutes advertises
-    // and where the discovery document actually lives.
+    // discovery document — derived the same way rather than restated, so the
+    // two cannot drift apart. It carries the `/oidc` mount, because that is
+    // where the discovery document lives and because Better Auth builds every
+    // endpoint URL it advertises from exactly this value (auth/better-auth.ts
+    // makes it the engine's base URL for that reason).
     const issuer = issuerUrl(env.TREX_OIDC_ISSUER, `${basePath}/oidc`);
     // Where THIS process fetches the provider's own endpoints. Normally the
     // issuer itself, but a deployment can point it at an address that resolves
@@ -86,7 +85,12 @@ export function resolveIdpConfig(
       clientId: env.TREX_OIDC_CLIENT_ID ?? "",
       clientSecret: env.TREX_OIDC_CLIENT_SECRET ?? "",
       scope: env.D2E_IDP_SCOPE ?? "openid profile email",
-      tokenUrl: `${internalBase}/token`,
+      // /oauth2/*, not the bare paths the hand-written provider served:
+      // @better-auth/oauth-provider hard-codes them and its discovery document
+      // cannot be overridden. This is the one thing a relying party sees change
+      // in the cutover, and the reason to read them from the document rather
+      // than to restate them here is exactly this line.
+      tokenUrl: `${internalBase}/oauth2/token`,
       resource: env.D2E_IDP_RESOURCE ?? "",
       // Browser-visible paths, relative to the public gateway origin. They carry
       // the mount's base path because the d2e front door does NOT strip it: it
@@ -94,8 +98,8 @@ export function resolveIdpConfig(
       // Emitting "oidc/authorize" therefore sent the portal's login to Logto,
       // which knows nothing of trex's clients or sessions. Derived from the same
       // issuer the discovery document advertises, so the two cannot drift.
-      authorizePath: `${new URL(issuer).pathname.replace(/^\//, "")}/authorize`,
-      endSessionPath: `${new URL(issuer).pathname.replace(/^\//, "")}/session/end`,
+      authorizePath: `${new URL(issuer).pathname.replace(/^\//, "")}/oauth2/authorize`,
+      endSessionPath: `${new URL(issuer).pathname.replace(/^\//, "")}/oauth2/end-session`,
     };
   }
 
