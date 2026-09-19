@@ -3,7 +3,7 @@
 // difference is one a relying party would notice.
 import { oauthProvider } from "@better-auth/oauth-provider";
 import { accessTokenClaims, idTokenClaims, userInfoClaims } from "./custom-claims.ts";
-import { oidcIssuer } from "./config.ts";
+import { oidcIssuer, SERVICE_SCOPE } from "./config.ts";
 
 export function trexOAuthProvider() {
   return oauthProvider({
@@ -11,7 +11,11 @@ export function trexOAuthProvider() {
     // be granted it. offline_access is the plugin's gate on issuing a refresh
     // token at all (dist/introspect-njKASm3q.mjs:1799); trex issued one
     // unconditionally, so without it every relying party silently loses refresh.
-    scopes: ["openid", "profile", "email", "idp_groups", "offline_access"],
+    // SERVICE_SCOPE is declared here because the plugin requires a
+    // client_credentials scope to be one the provider advertises
+    // (dist/introspect-njKASm3q.mjs:939-940); no client's `scopes` column lists
+    // it, so no authorize request can ever be granted it.
+    scopes: ["openid", "profile", "email", "idp_groups", "offline_access", SERVICE_SCOPE],
     // Declared so the access token is a signed JWT rather than an opaque
     // string: the d2e portal decodes it to read `roles` and sends it as its
     // bearer to d2e-compat, which verifies it against the JWKS.

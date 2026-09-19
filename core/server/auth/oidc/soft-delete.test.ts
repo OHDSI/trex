@@ -87,6 +87,9 @@ async function startFlow(m: NonNullable<typeof mod>): Promise<Flow> {
     postLogoutRedirectUris: [],
     clientRoles: [],
     allowedScopes: ["openid", "profile", "email", "offline_access"],
+    // The seeder links the client to exactly this resource rather than to
+    // whatever rows exist, and the mount's issuer is what the plugin seeded.
+    resourceIdentifier: server.issuer,
   });
 
   const signedUp = await m.auth.api.signUpEmail({

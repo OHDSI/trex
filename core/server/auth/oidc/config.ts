@@ -31,11 +31,32 @@ export function issuerUrl(
  * value for its RFC 8707 resource identifier, and better-auth.ts imports
  * provider.ts.
  */
-export function oidcIssuer(): string {
-  const issuer = issuerUrl(Deno.env.get("TREX_OIDC_ISSUER"), `${BASE_PATH}/oidc`);
+export function oidcIssuer(
+  base: string | undefined = Deno.env.get("TREX_OIDC_ISSUER"),
+): string {
+  const issuer = issuerUrl(base, `${BASE_PATH}/oidc`);
   assertIssuerScheme(issuer);
   return issuer;
 }
+
+/**
+ * The one scope the client_credentials grant may carry.
+ *
+ * It has to be invented, because none of the four scopes trex already declares
+ * can serve: the plugin's USER_DELEGATED_SCOPES set is exactly
+ * {openid, profile, email, offline_access}, and both the grant handler
+ * (dist/introspect-njKASm3q.mjs:2077-2084) and the plugin's own
+ * client_credentials-scope validator (:939-940) refuse a delegated scope
+ * outright. `["openid"]`, which Task 5 seeded, therefore produces the worst
+ * possible shape: a request that sends no `scope` at all succeeds, while the
+ * same request sending `scope=openid` is answered invalid_scope.
+ *
+ * Named with trex's own prefix rather than something generic so it can never
+ * collide with a standard OIDC scope a future relying party asks for, and
+ * declared in the provider's `scopes` list because the plugin's validator
+ * requires a client_credentials scope to be one the provider advertises.
+ */
+export const SERVICE_SCOPE = "trex:service";
 
 /**
  * The OAuth provider plugin does not refuse an `http:` issuer on a routable
@@ -121,6 +142,14 @@ export interface SeedClientSpec {
    * itself, and the whole claims contract would be inert for it.
    */
   allowedScopes?: string[];
+  /**
+   * The RFC 8707 resource identifier this client is linked to. One value, not
+   * "whatever rows exist": `enforcePerClientResources` is the control an
+   * operator has over which resources a client may target, and a seeder that
+   * links every row takes it away — a second resource added later would be
+   * granted to this client without anyone saying so.
+   */
+  resourceIdentifier: string;
 }
 
 const splitList = (raw: string | undefined): string[] =>
@@ -149,6 +178,10 @@ export function parseSeedClient(
     postLogoutRedirectUris: splitList(env.TREX_OIDC_CLIENT_POST_LOGOUT_URIS),
     clientRoles: splitList(env.TREX_OIDC_CLIENT_ROLES),
     allowedScopes: parseScopes(env.TREX_OIDC_CLIENT_SCOPES),
+    // The same expression provider.ts hands the plugin as its `resources`
+    // option, read off the same environment, so the row the plugin seeds and
+    // the row the client is linked to cannot drift.
+    resourceIdentifier: oidcIssuer(env.TREX_OIDC_ISSUER),
   };
 }
 

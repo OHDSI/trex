@@ -14,8 +14,9 @@
 // also atomic where the adapter's find-then-create is a race between two boots.
 // The column types come from `getMigrations(auth.options)` and are pinned by
 // V19; every `string[]` field is jsonb.
+import type { PoolClient } from "pg";
 import { pool } from "../../db.ts";
-import { parseSeedClient, type SeedClientSpec } from "./config.ts";
+import { parseSeedClient, SERVICE_SCOPE, type SeedClientSpec } from "./config.ts";
 
 /**
  * The plugin's `defaultHasher`, reproduced: with the jwt plugin installed
@@ -41,7 +42,31 @@ export async function hashClientSecret(secret: string): Promise<string> {
 export async function upsertOAuthClient(spec: SeedClientSpec): Promise<void> {
   const confidential = Boolean(spec.clientSecret);
 
-  await pool.query(
+  // One transaction, because the two writes are one registration: a client row
+  // with no resource link is a client /oauth2/authorize answers invalid_target
+  // for, and leaving one behind while reporting "client registration failed
+  // (continuing)" describes a state that does not exist.
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+    await registerClient(db, spec, confidential);
+    await db.query("COMMIT");
+  } catch (e) {
+    await db.query("ROLLBACK").catch(() => {});
+    throw e;
+  } finally {
+    db.release();
+  }
+}
+
+type Queryable = Pick<PoolClient, "query">;
+
+async function registerClient(
+  db: Queryable,
+  spec: SeedClientSpec,
+  confidential: boolean,
+): Promise<void> {
+  await db.query(
     // `scopes` is the one field only written when configured: COALESCE leaves
     // an unset TREX_OIDC_CLIENT_SCOPES meaning "whatever the row already has",
     // so a deployment that granted a scope by hand does not lose it on the next
@@ -78,7 +103,15 @@ export async function upsertOAuthClient(spec: SeedClientSpec): Promise<void> {
             "responseTypes" = EXCLUDED."responseTypes",
             "skipConsent" = EXCLUDED."skipConsent",
             "enableEndSession" = EXCLUDED."enableEndSession",
-            "metadata" = EXCLUDED."metadata",
+            -- Merged, not replaced: the plugin treats this column as a general
+            -- bag and reads registration extensions out of it
+            -- (stripReservedOAuthClientMetadataExtensions,
+            -- dist/authorize-riRRCSbC.mjs:1161), so an assignment would make
+            -- every boot silently discard whatever else was stored there.
+            -- The concatenation operator is a shallow right-biased merge, so
+            -- clientRoles can still change.
+            "metadata" = COALESCE(trexdb."oauthClient"."metadata", '{}'::jsonb)
+                         || EXCLUDED."metadata",
             "updatedAt" = now()`,
     [
       spec.clientId,
@@ -93,12 +126,9 @@ export async function upsertOAuthClient(spec: SeedClientSpec): Promise<void> {
       // because the plugin refuses the grant, and refuses these scopes, for a
       // public client — and trex refused it for one too.
       //
-      // `openid` is on the plugin's USER_DELEGATED_SCOPES list, which means a
-      // caller that sends `scope=openid` explicitly is answered invalid_scope
-      // even though the same request with no `scope` at all succeeds with this
-      // exact scope. Task 7 owns the grant semantics and is where a
-      // trex-specific service scope would be introduced.
-      JSON.stringify(confidential ? ["openid"] : []),
+      // Deliberately NOT `openid`: see SERVICE_SCOPE, where the reason lives
+      // next to the value.
+      JSON.stringify(confidential ? [SERVICE_SCOPE] : []),
       // The plugin defaults requirePKCE to true even for a confidential client,
       // which is stricter than trex's own row (require_pkce was set only for
       // public clients). Kept, because it is also the only thing that stops a
@@ -124,27 +154,35 @@ export async function upsertOAuthClient(spec: SeedClientSpec): Promise<void> {
 
   // enforcePerClientResources defaults to true, and an unlinked client is not a
   // degraded flow but a dead one: /oauth2/authorize answers `invalid_target`
-  // and issues no code at all. The link is derived from the resources the
-  // deployment actually serves rather than from a second copy of the issuer,
-  // so the two cannot drift; the plugin seeds exactly one, from its `resources`
-  // option, in its own init.
-  const linked = await pool.query(
+  // and issues no code at all. So the configured resource is (re)linked on
+  // every boot — that link is what the deployment asked for by configuring the
+  // issuer, and without it nothing works.
+  //
+  // Exactly one resource, named: linking whatever rows happen to exist would
+  // hand this client any resource added later, which is precisely the grant
+  // enforcePerClientResources exists to withhold. The identifier is derived
+  // from the same environment expression provider.ts passes as `resources`, so
+  // the row the plugin seeds and the row named here cannot drift.
+  const linked = await db.query(
     `INSERT INTO trexdb."oauthClientResource" ("id", "clientId", "resourceId", "createdAt")
      SELECT gen_random_uuid()::text, $1, r."identifier", now()
        FROM trexdb."oauthResource" r
+      WHERE r."identifier" = $2
      ON CONFLICT ("clientId", "resourceId") DO NOTHING`,
-    [spec.clientId],
+    [spec.clientId, spec.resourceIdentifier],
   );
   if (linked.rowCount === 0) {
-    const existing = await pool.query(
-      `SELECT 1 FROM trexdb."oauthClientResource" WHERE "clientId" = $1 LIMIT 1`,
-      [spec.clientId],
+    const existing = await db.query(
+      `SELECT 1 FROM trexdb."oauthClientResource"
+        WHERE "clientId" = $1 AND "resourceId" = $2 LIMIT 1`,
+      [spec.clientId, spec.resourceIdentifier],
     );
     if (existing.rows.length === 0) {
       console.error(
-        `[oidc] client ${spec.clientId} is linked to no resource: /authorize will ` +
-          "answer invalid_target. The provider seeds trexdb.\"oauthResource\" from its " +
-          "`resources` option at init, so this means the client was seeded first.",
+        `[oidc] client ${spec.clientId} is not linked to ${spec.resourceIdentifier}: ` +
+          "/authorize will answer invalid_target. The provider seeds " +
+          "trexdb.\"oauthResource\" from its `resources` option at init, so this " +
+          "means the client was seeded first, or the two disagree on the issuer.",
       );
     }
   }

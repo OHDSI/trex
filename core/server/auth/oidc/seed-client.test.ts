@@ -17,6 +17,10 @@ const DATABASE_URL = Deno.env.get("DATABASE_URL");
 const CLIENT_ID = "d2e-webapi-seed-test";
 
 const ENV = {
+  // The seeder derives the resource it links to from this, with the same
+  // expression provider.ts hands the plugin, so it has to name the issuer the
+  // instance below seeds oauthResource from.
+  TREX_OIDC_ISSUER: "https://localhost:8443",
   TREX_OIDC_CLIENT_ID: CLIENT_ID,
   TREX_OIDC_CLIENT_SECRET: "s3cret",
   TREX_OIDC_CLIENT_NAME: "D2E WebAPI",
@@ -84,13 +88,12 @@ test("the seeded client never reaches a consent screen", async () => {
 test("the stored secret is what the plugin's default hasher produces", async () => {
   await seedOAuthClientFromEnv(ENV);
   const row = await clientRow();
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("s3cret"));
-  const expected = btoa(String.fromCharCode(...new Uint8Array(digest)))
-    .replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
-  assertEquals(row.clientSecret, expected);
-  // Not the plaintext, and not trex's scrypt either: verifyStoredClientSecret
-  // compares against base64url(sha256(secret)) and nothing else.
-  assertNotEquals(row.clientSecret, "s3cret");
+  // A literal, not a recomputation: deriving the expectation with the same
+  // sequence of calls the seeder uses would agree with it however wrong both
+  // are — padding kept, standard base64 instead of base64url, the wrong digest.
+  // This value was produced by the package's own defaultHasher
+  // (dist/utils-CWjOhEQb.mjs:420-423) for the plaintext "s3cret".
+  assertEquals(row.clientSecret, "HsHCa1DV08WNlYMYGvgHZlX-AHVr9yhZQLo2cPmfy6A");
 });
 
 test("a client with no secret is public and is held to PKCE instead", async () => {
@@ -140,25 +143,40 @@ test("an unset scope list leaves the granted scopes alone", async () => {
   assertEquals((await clientRow()).scopes, ["openid", "profile", "email", "idp_groups", "offline_access"]);
 });
 
-test("the client is linked to every resource, so /authorize does not answer invalid_target", async () => {
+test("the client is linked to the configured resource and to no other", async () => {
   // enforcePerClientResources defaults to true and an unlinked client gets
   // error=invalid_target with no code at all — a failure that reads as a
-  // client misconfiguration rather than as a missing join row.
+  // client misconfiguration rather than as a missing join row. So the
+  // configured link is restored on every boot.
+  //
+  // But ONLY that one. A seeder that links whatever rows exist would hand this
+  // client every resource a deployment adds later, which is exactly the grant
+  // enforcePerClientResources exists to withhold.
   const auth = providerInstance();
   await auth.$context; // the plugin's init is what seeds oauthResource
   await seedOAuthClientFromEnv(ENV);
   await seedOAuthClientFromEnv(ENV);
 
-  const links = await pool.query(
-    `SELECT l."resourceId" FROM trexdb."oauthClientResource" l WHERE l."clientId" = $1`,
-    [CLIENT_ID],
+  const other = "https://localhost:8443/some-other-api";
+  await pool.query(
+    `INSERT INTO trexdb."oauthResource" ("id", "identifier", "name", "createdAt", "updatedAt")
+     VALUES (gen_random_uuid()::text, $1, $1, now(), now())
+     ON CONFLICT ("identifier") DO NOTHING`,
+    [other],
   );
-  const resources = await pool.query(`SELECT identifier FROM trexdb."oauthResource"`);
-  assertNotEquals(resources.rows.length, 0);
-  assertEquals(
-    links.rows.map((r) => r.resourceId).sort(),
-    resources.rows.map((r) => r.identifier).sort(),
-  );
+  // From a clean slate, so what the assertion sees is what THIS boot linked
+  // rather than what some earlier one left behind.
+  await pool.query(`DELETE FROM trexdb."oauthClientResource" WHERE "clientId" = $1`, [CLIENT_ID]);
+  try {
+    await seedOAuthClientFromEnv(ENV);
+    const links = await pool.query(
+      `SELECT l."resourceId" FROM trexdb."oauthClientResource" l WHERE l."clientId" = $1`,
+      [CLIENT_ID],
+    );
+    assertEquals(links.rows.map((r) => r.resourceId), [ISSUER]);
+  } finally {
+    await pool.query(`DELETE FROM trexdb."oauthResource" WHERE "identifier" = $1`, [other]);
+  }
 });
 
 test("the plugin reads the client back, clientRoles included", async () => {
@@ -185,6 +203,7 @@ test("the plugin reads the client back, clientRoles included", async () => {
     ["ALP_USER_ADMIN", "ALP_SYSTEM_ADMIN"],
   );
   // Non-empty or the grant is refused outright; the roles above are what a
-  // service token then authorizes as.
-  assertEquals(client!.clientCredentialsScopes, ["openid"]);
+  // service token then authorizes as. Not "openid" — that is on the plugin's
+  // USER_DELEGATED_SCOPES list and is refused when a caller sends it.
+  assertEquals(client!.clientCredentialsScopes, ["trex:service"]);
 });
