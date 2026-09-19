@@ -384,12 +384,23 @@ test("the resource default does not reach the other two grants", async (_m, flow
 // Not a grant, but it lives here because this is the suite with a live mount, a
 // signed-in session and a seeded client, which is what the assertion needs.
 
-test("end-session clears trex's own cookie, not only Better Auth's", async (_m, flow) => {
+test("the mount clears trex's own cookie on end-session, whatever the plugin answers", async (
+  _m,
+  flow,
+) => {
   // The deleted router.ts cleared sb-access-token on its end-session route
   // (router.ts:448-457). The plugin cannot: the cookie is trex's, and
   // /auth/v1/logout — the only other place it is cleared — is not on this path.
   // Without this a browser that logs out through the relying party keeps a
   // bearer that same-origin iframes still read.
+  //
+  // The name says "whatever the plugin answers" because that is all this
+  // asserts, and it is deliberate: mount.ts clears the cookie on the path
+  // rather than on a successful logout, so the cookie goes even when the
+  // provider refuses. It is also all it CAN assert here — this suite runs on an
+  // ephemeral port, where the id_token_hint cannot be verified (its JWKS is
+  // fetched from the issuer's origin) and the plugin answers 401. The logout
+  // itself is covered by end-session.test.ts, which resolves that origin.
   const issued = await exchange(flow, "openid profile email");
   assertEquals(issued.status, 200);
 
