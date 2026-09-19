@@ -160,6 +160,79 @@ async function engineAdapter() {
 }
 
 /**
+ * Better Auth's session cookie value: `${token}.${base64 hmac-sha256(token)}`,
+ * which better-call's `signCookieValue` (better-call/dist/crypto.mjs:20-30)
+ * produces and the engine's `getSignedCookie` verifies on the way back in.
+ *
+ * Reproduced rather than imported: better-call is a transitive dependency of
+ * the engine with no import-map entry, and adding one would pin a second
+ * version of it beside the one better-auth resolves. What keeps this honest is
+ * that the cookie it builds is handed straight back to auth.api.getSession by
+ * test, so a divergence fails loudly instead of signing people in as nobody.
+ */
+async function signEngineSessionToken(token: string, secret: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(token));
+  return `${token}.${btoa(String.fromCharCode(...new Uint8Array(signature)))}`;
+}
+
+/**
+ * Give the browser Better Auth's own session cookie for this user.
+ *
+ * /oauth2/authorize resolves the end user with getSessionFromCtx — that cookie
+ * against trexdb.session — and the plugin exposes no override for it. Measured
+ * at the cutover: a genuine, verifying sb-access-token presented as the only
+ * cookie gets the same redirect back to the login page as no cookie at all. So
+ * every route that signs a browser in has to hand out this cookie too, or the
+ * provider bounces it back to the page it just came from, indefinitely.
+ *
+ * The name and the attributes come from the engine's own cookie getter rather
+ * than being written out here, because both follow the issuer's scheme: an
+ * https issuer gives the cookie the `__Secure-` prefix, which a browser accepts
+ * only with Secure set.
+ *
+ * A session row is created only when the request does not already carry a live
+ * one for the same user. /sync-cookie is called by every same-origin frame that
+ * needs auth, and a trexdb.session row per call would be a slow accumulation of
+ * credentials nothing ever ends.
+ */
+async function attachEngineSessionCookie(
+  userId: string,
+  // deno-lint-ignore no-explicit-any
+  req: any,
+  // deno-lint-ignore no-explicit-any
+  res: any,
+): Promise<void> {
+  const auth = await engine();
+  const context = await auth.$context;
+
+  const presented = req?.headers?.cookie;
+  if (presented) {
+    const live = await auth.api.getSession({ headers: new Headers({ cookie: presented }) })
+      .catch(() => null);
+    if (live?.session?.userId === userId) return;
+  }
+
+  const session = await context.internalAdapter.createSession(userId, undefined, {
+    ipAddress: req?.ip ?? "",
+    userAgent: req?.headers?.["user-agent"] ?? "",
+  });
+
+  const { name, attributes } = context.authCookies.sessionToken;
+  res.cookie(name, await signEngineSessionToken(session.token, context.secret), {
+    ...attributes,
+    // Better Auth counts maxAge in seconds; express counts it in milliseconds.
+    maxAge: attributes.maxAge === undefined ? undefined : attributes.maxAge * 1000,
+  });
+}
+
+/**
  * The user holding this address, matched the way federation already matches it:
  * case-insensitively, because `Victim@corp.com` and `victim@corp.com` are one
  * mailbox and so one identity.
@@ -791,6 +864,16 @@ router.post("/sync-cookie", apiLimiter, async (req, res) => {
       path: "/",
       maxAge: Math.max(0, (claims.exp || 0) * 1000 - Date.now()),
     });
+    // The point of this route is to turn a token the page holds into a cookie
+    // the browser presents, and sb-access-token is no longer the whole of what
+    // a browser needs: /oauth2/authorize reads Better Auth's session cookie and
+    // nothing else. A page that synced only sb-access-token and then walked to
+    // the provider would arrive anonymous and be sent back here.
+    //
+    // The bearer has already been verified above, and it is the same credential
+    // the sign-in that issued it was given, so nothing weaker is being traded
+    // for a session here.
+    if (claims.sub) await attachEngineSessionCookie(claims.sub, req, res);
     res.status(204).end();
   } catch (err) {
     console.error("[auth] sync-cookie error:", err);

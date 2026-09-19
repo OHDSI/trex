@@ -2236,3 +2236,81 @@ contractTest(
     });
   },
 );
+
+contractTest(
+  "POST /sync-cookie sets Better Auth's session cookie beside sb-access-token",
+  async ({ url, pool }) => {
+    const user = await createUser(pool);
+    const now = Math.floor(Date.now() / 1000);
+    const token = await mintToken({
+      sub: user.id,
+      role: "authenticated",
+      aud: "authenticated",
+      exp: now + 3600,
+      iat: now,
+      session_id: crypto.randomUUID(),
+    });
+
+    const res = await post(`${url}/sync-cookie`, undefined, token);
+    assertEquals(res.status, 204);
+    assertEquals(await res.text(), "");
+
+    assertNotEquals(setCookie(res, "sb-access-token"), undefined);
+    const engine = setCookie(res, "better-auth.session_token");
+    assertNotEquals(engine, undefined);
+    assertEquals(cookieAttr(engine!, "Path"), "/");
+    // The engine's own sessionToken attributes, whose maxAge is the session
+    // lifetime in SECONDS where express counts milliseconds. Pinned because a
+    // missed conversion leaves a cookie that expires in ten minutes over a
+    // session row that lives a week.
+    assertEquals(cookieAttr(engine!, "Max-Age"), "604800");
+    assertEquals(await engineSessionUserId(pool, engine!), user.id);
+
+    // The signature, not only the row: the cookie is built by hand from the
+    // engine's own cookie getter, so the one assertion that proves it is a
+    // credential rather than a string of the right shape is the engine reading
+    // it back.
+    const { auth } = await import("./better-auth.ts");
+    const resolved = await auth.api.getSession({
+      headers: new Headers({ cookie: engine!.split(";")[0] }),
+    });
+    assertEquals(resolved?.user?.id, user.id);
+  },
+);
+
+contractTest(
+  "POST /sync-cookie reuses the session the request already carries",
+  async ({ url, pool }) => {
+    const user = await createUser(pool);
+    const now = Math.floor(Date.now() / 1000);
+    const token = await mintToken({
+      sub: user.id,
+      role: "authenticated",
+      aud: "authenticated",
+      exp: now + 3600,
+      iat: now,
+      session_id: crypto.randomUUID(),
+    });
+
+    const first = await post(`${url}/sync-cookie`, undefined, token);
+    assertEquals(first.status, 204);
+    await drain(first);
+    const carried = setCookie(first, "better-auth.session_token")!.split(";")[0];
+
+    // Every same-origin frame calls this route, so a session row per call would
+    // accumulate credentials nothing ever ends.
+    const second = await fetch(`${url}/sync-cookie`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, cookie: carried },
+    });
+    assertEquals(second.status, 204);
+    await drain(second);
+    assertEquals(setCookie(second, "better-auth.session_token"), undefined);
+
+    const sessions = await pool.query(
+      `SELECT count(*)::int AS n FROM trexdb.session WHERE "userId" = $1`,
+      [user.id],
+    );
+    assertEquals(sessions.rows[0].n, 1);
+  },
+);
