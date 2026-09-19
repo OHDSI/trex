@@ -71,6 +71,8 @@ interface Flow {
   bearer: string;
   /** trex's own session id, carried in that token. Not the engine session's. */
   trexSessionId: string;
+  /** The engine session the OIDC flow authenticates against, which IS joinable. */
+  engineSessionId: string;
 }
 
 /**
@@ -130,6 +132,9 @@ async function startFlow(m: NonNullable<typeof mod>, opts: { admin?: boolean } =
     trexSessionId,
   );
 
+  const cookie = cookieHeader(signedUp.headers.getSetCookie());
+  const engineSession = await m.auth.api.getSession({ headers: new Headers({ cookie }) });
+
   return {
     close: () => new Promise<void>((r) => server.close(() => r())),
     oidc: `${origin}/trex/oidc`,
@@ -138,9 +143,10 @@ async function startFlow(m: NonNullable<typeof mod>, opts: { admin?: boolean } =
     clientId,
     userId,
     email,
-    cookie: cookieHeader(signedUp.headers.getSetCookie()),
+    cookie,
     bearer,
     trexSessionId,
+    engineSessionId: engineSession!.session.id,
   };
 }
 
@@ -414,6 +420,51 @@ test("POST /revoke-session cannot reach the OIDC session, and says so", async (m
       [flow.userId, flow.trexSessionId],
     );
     assertEquals(joinable.rows.length, 0);
+  } finally {
+    await endFlow(m, flow);
+  }
+});
+
+test("the MCP session-revoke tool ends the OIDC session, and leaves no orphan", async (m) => {
+  // The seventh site, and the one whose failure mode is worse than the others':
+  // it deletes trexdb.session directly, which the ON DELETE SET NULL foreign key
+  // turns into a permanent orphan. The refresh chain survives AND becomes
+  // unreachable — no later logout from any device can name the session it
+  // belonged to, because that column has just been nulled. So the ordering is
+  // not a nicety here; without it the tool destroys the ability to revoke.
+  //
+  // Its own description promises "forcing the user to log in again".
+  const { registerSessionTools } = await import("../../mcp/tools/sessions.ts");
+  // deno-lint-ignore no-explicit-any
+  const tools = new Map<string, (args: any) => Promise<any>>();
+  registerSessionTools(
+    // deno-lint-ignore no-explicit-any
+    { tool: (name: string, _d: unknown, _s: unknown, fn: any) => tools.set(name, fn) } as any,
+  );
+  const revokeTool = tools.get("session-revoke")!;
+
+  const flow = await startFlow(m);
+  try {
+    let token = await establishOidcSession(flow);
+    const live = await refresh(flow, token);
+    assertEquals(live.ok, true, "the flow never worked");
+    token = live.next;
+
+    const answer = await revokeTool({ sessionId: flow.engineSessionId });
+    assertEquals(answer.isError, undefined, JSON.stringify(answer));
+
+    assertEquals(
+      (await refresh(flow, token)).ok,
+      false,
+      "session-revoke reported success while the OIDC chain kept minting",
+    );
+    // Gone, not merely nulled: a row left behind with sessionId NULL is one
+    // nothing can ever revoke.
+    const left = await m.db.pool.query(
+      `SELECT "sessionId" FROM trexdb."oauthRefreshToken" WHERE "userId" = $1`,
+      [flow.userId],
+    );
+    assertEquals(left.rows.length, 0);
   } finally {
     await endFlow(m, flow);
   }

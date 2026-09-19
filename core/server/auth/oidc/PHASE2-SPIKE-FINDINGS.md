@@ -377,3 +377,51 @@ that column must do the same.
 calls the refresh grant once to show a session live and again with the SAME token to show it dead
 proves nothing: the second call fails on rotation whatever the endpoint under test did. The first
 draft of `revocation.test.ts` did exactly that and passed against code that revoked nothing.
+
+## Measured in fix round 2 (task 7)
+
+### The complete list of places that end an engine session
+
+Established by search rather than from a brief, because round 1's list was incomplete and the
+missing entry was the worst of them. Everything in the tree that removes a `trexdb.session` row,
+directly or through the engine:
+
+| site | what it is | needs OIDC revocation? |
+|---|---|---|
+| `auth-router.ts:413` `endEngineSessions(userId)` | wholesale by user; called from `PUT /user`, `/change-password`, `PUT /admin/users/:id` | already paired at all three call sites with `revokeOidcTokensForUser`, which keys on `userId` and is therefore immune to the `SET NULL` below |
+| `auth-router.ts:833` `auth.api.signOut` | `POST /logout`, one session | yes — `revokeOidcTokensForSession`, **before** the sign-out |
+| `mcp/tools/sessions.ts:49` `session-revoke` | the MCP tool, one session by id | **yes, and it was the only one missing.** Fixed in this round |
+| `V1`'s `soft_delete_user()` | sets `deletedAt`/`banned`; touches no session | no — and `mount.ts`'s guard refuses the user anyway |
+| `V1`'s `purge_deleted_users()` | deletes the `user` row | no — `oauthRefreshToken."userId"` is `ON DELETE CASCADE`, so the rows go with it |
+| better-auth admin's `revokeUserSession(s)` | plugin endpoints | not reachable: `mount.ts:19`'s `PROVIDER_PREFIXES` 404s them, and nothing calls them server-side |
+
+`auth-router.ts:1225` `POST /revoke-session` is not on this list because it ends no engine session
+at all — it revokes by trex's own `session_id`, which nothing joins to `trexdb.session`.
+
+### `ON DELETE SET NULL` does not merely fail to revoke — it destroys the ability to
+
+Round 1 found that deleting an engine session before revoking nulls the column the revocation
+joins on. The MCP tool showed the consequence in full:
+
+```
+oauthRefreshToken sessionIds before: [{"sessionId":"xLmq…U0yf"},{"sessionId":"xLmq…U0yf"}]
+session-revoke deleted: 1
+oauthRefreshToken sessionIds AFTER:  [{"sessionId":null},{"sessionId":null}]
+>>> OIDC refresh after MCP session-revoke: 200, new access token issued
+```
+
+The surviving rows are **permanently orphaned**: no later `/logout` from any device can reach them,
+because the only session-scoped revocation there is joins on the column that was just nulled. So
+the rule for anything that deletes a session row is not "revoke as well" but "revoke FIRST", and
+the two known sites now say so at the call site.
+
+### Revocation leaves no trace, by construction
+
+`revoke.ts` deletes rather than setting `revoked`, because a revoked-but-present refresh token can
+still be replayed from `rotationReplayResponse` inside the plugin's reuse interval
+(`dist/introspect-njKASm3q.mjs:2147-2155`). The cost is that a deleted row is indistinguishable
+from one that never existed: there is no record that a revocation happened, who caused it, or when.
+
+Recorded rather than fixed. Neither `oauthRefreshToken` nor `oauthAccessToken` carries an audit
+contract today and nothing reads them for history. Whoever wants one should not add it by flagging
+`revoked` instead — that reopens the replay — but by writing an audit row alongside the delete.

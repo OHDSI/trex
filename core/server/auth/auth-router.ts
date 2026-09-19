@@ -1235,20 +1235,17 @@ router.post("/revoke-session", apiLimiter, async (req, res) => {
       return;
     }
 
-    // Deliberately NOT paired with endEngineSessions, and for the same reason
-    // not with revokeOidcTokensForSession: that helper joins on the ENGINE
-    // session id, and `session_id` here is trex's own, with no column anywhere
-    // tying the two together. Revoking by user instead would sign the caller
-    // out of every device to honour a request to sign out of one.
-    //
-    // Deliberately NOT paired with endEngineSessions, which is wholesale.
-    // `session_id` here is trex's own: the value minted with a refresh token
-    // and carried in the access token, with no column anywhere tying it to a
-    // row in trexdb.session. There is no engine session this names, so ending
-    // one would mean ending ALL of them — signing the caller out of every
-    // device to honour a request to sign out of one. The narrower wrong answer
-    // is the better one until the two session concepts are actually joined,
-    // which is phase 2's job along with /oauth2/authorize.
+    // Deliberately NOT paired with endEngineSessions, and — since the cutover
+    // — not with revokeOidcTokensForSession either. Both would need an engine
+    // session to name, and `session_id` here is trex's own: the value minted
+    // with a refresh token and carried in the access token, with no column
+    // anywhere tying it to a row in trexdb.session or to
+    // oauthRefreshToken."sessionId". So there is nothing to scope either
+    // revocation to, and doing it by user would mean signing the caller out of
+    // every device to honour a request to sign out of one. The narrower wrong
+    // answer is the better one until the two session concepts are actually
+    // joined; mcp/tools/sessions.ts's session-revoke, which DOES hold an engine
+    // session id, is what that looks like when the id is available.
     await pool.query(
       `UPDATE trexdb.refresh_token SET revoked = true, "updatedAt" = NOW()
        WHERE "userId" = $1 AND session_id = $2 AND revoked = false`,
