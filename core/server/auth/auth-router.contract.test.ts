@@ -2361,14 +2361,18 @@ contractTest(
   },
 );
 
-// A behaviour change, recorded rather than discovered later: before the engine
-// session was established here this answered 204 and set a cookie for a user
-// that no longer exists. The session row now carries a foreign key to
-// trexdb."user", so the same request raises and the route's own handler answers
-// 500 — which is logged, where the 204 was silent. The trade is deliberate; the
-// test exists so it is a decision on the record.
+// A behaviour change, pinned rather than discovered later: this used to answer
+// 204 and set sb-access-token for a user who no longer exists, because a trex
+// access token is self-contained and outlives the row it names.
+//
+// 401 and not 500: nothing has failed, and only 401 makes a caller drop the
+// token rather than retry it for the rest of the refresh chain's thirty days.
+// The status is the lesser half of the assertion, though — what matters is that
+// the refusal is raised BEFORE any cookie is queued. Express does not unqueue a
+// Set-Cookie when a later status is written, so a refusal after that point
+// changes the number in the status line and withholds nothing at all.
 contractTest(
-  "POST /sync-cookie is 500 for a bearer whose user row is gone",
+  "POST /sync-cookie refuses a bearer whose user row is gone, and sets no cookie",
   async ({ url, pool }) => {
     const user = await createUser(pool);
     const now = Math.floor(Date.now() / 1000);
@@ -2386,7 +2390,8 @@ contractTest(
     await pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [user.id]);
 
     const res = await post(`${url}/sync-cookie`, undefined, token);
-    assertEquals(res.status, 500);
-    assertEquals(await res.json(), { error: "server_error" });
+    assertEquals(res.status, 401);
+    assertEquals(await res.json(), { error: "not_authenticated" });
+    assertEquals(res.headers.getSetCookie(), []);
   },
 );

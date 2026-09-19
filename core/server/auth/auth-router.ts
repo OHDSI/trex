@@ -851,6 +851,28 @@ router.post("/sync-cookie", apiLimiter, async (req, res) => {
       res.status(401).json({ error: "not_authenticated" });
       return;
     }
+    // Before the first cookie is queued, not after, and this ordering is the
+    // whole of the fix: express does not unqueue a Set-Cookie when a later
+    // status is written, so a refusal raised below this point still hands the
+    // browser sb-access-token for a user who is gone.
+    //
+    // A trex access token is self-contained and stays verifiable for its whole
+    // hour, so it outlives the row it names — purge_deleted_users removes the
+    // user, and the engine session this route now creates has a foreign key to
+    // it. 401 rather than 500 because nothing has failed: the token is simply
+    // no longer good, and 401 is this route's existing word for that (above).
+    // It is also the only answer that makes a caller drop the token instead of
+    // retrying it for the rest of the refresh chain's thirty days, and it keeps
+    // "the user is gone" distinguishable from "the database is down".
+    //
+    // fetchUserById also returns null for a soft-deleted user, which is the
+    // stricter reading and the right one: mount.ts's guard exists to keep a
+    // retired user from reaching the provider at all, and this route would
+    // otherwise be issuing them the very cookie the provider authenticates on.
+    if (!claims.sub || !await fetchUserById(claims.sub)) {
+      res.status(401).json({ error: "not_authenticated" });
+      return;
+    }
     const forwardedProto = req.headers?.["x-forwarded-proto"];
     const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
     const secure =
@@ -873,7 +895,7 @@ router.post("/sync-cookie", apiLimiter, async (req, res) => {
     // The bearer has already been verified above, and it is the same credential
     // the sign-in that issued it was given, so nothing weaker is being traded
     // for a session here.
-    if (claims.sub) await attachEngineSessionCookie(claims.sub, req, res);
+    await attachEngineSessionCookie(claims.sub, req, res);
     res.status(204).end();
   } catch (err) {
     console.error("[auth] sync-cookie error:", err);
