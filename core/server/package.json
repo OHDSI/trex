@@ -6,6 +6,7 @@
     "@ai-sdk/anthropic": "^3",
     "@ai-sdk/google": "^3",
     "@ai-sdk/openai": "^3",
+    "@better-auth/oauth-provider": "1.7.5",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "ai": "^6",
     "apache-arrow": "^21.1.0",
@@ -25,6 +26,9 @@
   "overrides": {
     "hono": "^4.12.18",
     "fast-uri": "^3.1.5",
-    "ip-address": "^10.1.1"
+    "ip-address": "^10.1.1",
+    "better-call": {
+      "zod": "$zod"
+    }
   }
 }
