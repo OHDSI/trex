@@ -334,9 +334,21 @@ unrestricted.
 Constraint from `dist/index.mjs:4469-4472`: an `additionalFields` key must not
 collide with a built-in field or a returned provider field, or `sso()` throws at
 construction. `link_policy`, `auto_provision` and `allow_elevated_auto_link` are
-all fine. `email_domain_allowlist` (a `TEXT[]`, V12) was **not** exercised — an
-array column has no Better Auth field type and may need `type: "string[]"` or a
-raw read; `[uncertain — re-measure in Task 3]`.
+all fine.
+
+`email_domain_allowlist` (a `TEXT[]`, V12) was measured separately, both ways,
+because it is the one policy column that is not a scalar. Row seeded with
+`ARRAY['a.test','b.test']`:
+
+| `additionalFields` type | `row.email_domain_allowlist` |
+|---|---|
+| `{ type: "string" }` | `["a.test","b.test"]` |
+| `{ type: "string[]" }` | `["a.test","b.test"]` |
+
+Neither throws and both hand back a real JS array — `node-postgres` parses the
+`TEXT[]` before the adapter sees it, and the adapter passes the value through
+without coercing it. Declaring it `"string[]"` is the honest description; either
+works at runtime.
 
 ### Preconditions `resolveUser` imposes (all satisfied by `database: pool`)
 
