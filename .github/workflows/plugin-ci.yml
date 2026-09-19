@@ -1845,7 +1845,10 @@ jobs:
               # core/server/deno.json sets "nodeModulesDir": "manual", so Deno resolves
               # bare specifiers out of node_modules and never installs on its own. Without
               # this the bundle dies on the first new import with "Could not find <pkg> in
-              # a node_modules folder" and the e2e never runs this branch's code at all.
+              # a node_modules folder" and the e2e never runs our own code at all.
+              # NOTE: this whole block is a single-quoted argument to bash -c, so it
+              # must contain no apostrophe at all. One closes the quote early and the
+              # rest of the script silently runs on the runner instead of in here.
               # Same command the image builds these directories with (Dockerfile:317).
               (cd core/server && npm install --omit=dev --no-audit --no-fund)
               (cd core/event  && npm install --omit=dev --no-audit --no-fund)
