@@ -26,8 +26,6 @@ async function load() {
     return {
       mount: await import("./mount.ts"),
       seed: await import("./seed-client.ts"),
-      config: await import("./config.ts"),
-      express: (await import("express")).default,
       db: await import("../../db.ts"),
       auth: (await import("../better-auth.ts")).auth,
     };
@@ -58,7 +56,7 @@ async function pkce() {
 const cookieHeader = (setCookies: string[]) => setCookies.map((c) => c.split(";")[0]).join("; ");
 
 interface Fixture {
-  /** The issuer, and here also the listener: see startFixture. */
+  /** The listener's own base URL; the issuer's origin resolves here too. */
   url: string;
   issuer: string;
   close(): Promise<void>;
@@ -68,29 +66,48 @@ interface Fixture {
 }
 
 /**
- * Unlike every other suite here this one binds the issuer's OWN host and port
- * rather than an ephemeral one, because `id_token_hint` verification fetches
- * the provider's JWKS over HTTP from `${baseURL}/jwks`
- * (verifyLogoutHint -> getJwks, dist/authorize-riRRCSbC.mjs:547) rather than
- * reading the key it just signed with. On an ephemeral port that fetch hits
- * nothing, every hint verifies as invalid, and the endpoint answers 401 — which
- * is indistinguishable from a real refusal, so a suite that did not do this
- * would be asserting the failure path throughout.
+ * Points the issuer's origin at the listener for the duration.
  *
- * TREX_OIDC_ISSUER is loopback by default and is not written here: the engine
- * is a module singleton shared with every other suite in the process, so
- * changing the issuer would change theirs too.
+ * `id_token_hint` verification does not read the key it signed the token with
+ * minutes earlier: it fetches the provider's JWKS over HTTP from
+ * `${baseURL}${jwksPath}` (verifyLogoutHint -> getJwks,
+ * dist/authorize-riRRCSbC.mjs:547 -> @better-auth/core verify.mjs:99), and
+ * `baseURL` is the configured issuer. On an ephemeral port that fetch reaches
+ * nothing, every hint verifies as invalid, and /oauth2/end-session answers 401
+ * — indistinguishable from a genuine refusal, so a suite that did not deal with
+ * this would assert the failure path throughout.
+ *
+ * The issuer itself cannot move: `auth` reads it once at module construction
+ * and is a singleton shared with every other suite in the process. Binding the
+ * issuer's own port instead was the first fix and was worse — 33001 is trex's
+ * own trexas port, so the suite could not run beside a live trex and failed
+ * with EADDRINUSE, which reads as a broken test; and a non-loopback
+ * TREX_OIDC_ISSUER would have had it try to bind 443 on a public interface.
+ *
+ * So the origin is resolved rather than bound: `fetch` is resolved from
+ * `globalThis` at call time by @better-fetch (dist/index.js:236), which is what
+ * makes this possible at all. Only requests to the issuer's exact origin are
+ * rewritten, and only while the fixture is up.
  */
+function pointIssuerAtListener(issuer: string, listener: string): () => void {
+  const real = globalThis.fetch;
+  const from = new URL(issuer).origin;
+  const to = new URL(listener).origin;
+  globalThis.fetch = (input: string | URL | Request, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (!url.startsWith(`${from}/`)) return real(input, init);
+    const rewritten = to + url.slice(from.length);
+    return real(input instanceof Request ? new Request(rewritten, input) : rewritten, init);
+  };
+  return () => {
+    globalThis.fetch = real;
+  };
+}
+
 async function startFixture(m: NonNullable<typeof mod>): Promise<Fixture> {
-  const issuer = m.config.oidcIssuer();
-  const app = m.express();
-  await m.mount.mountOidcProvider(app);
-  const { hostname, port } = new URL(issuer);
-  const server = app.listen(Number(port) || 80, hostname === "localhost" ? "127.0.0.1" : hostname);
-  await new Promise<void>((resolve, reject) => {
-    server.once("listening", () => resolve());
-    server.once("error", reject);
-  });
+  const listener = await m.mount.startOidcServer();
+  const issuer = listener.issuer;
+  const restoreFetch = pointIssuerAtListener(issuer, listener.url);
 
   const run = crypto.randomUUID().slice(0, 8);
   const clientId = `end-session-${run}`;
@@ -112,9 +129,12 @@ async function startFixture(m: NonNullable<typeof mod>): Promise<Fixture> {
     returnHeaders: true,
   });
   return {
-    url: issuer,
+    url: listener.url,
     issuer,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: async () => {
+      restoreFetch();
+      await listener.close();
+    },
     clientId,
     email,
     userId: signedUp.response.user.id,
