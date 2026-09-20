@@ -10,6 +10,7 @@
 import { betterAuth } from "better-auth";
 import { APIError } from "better-auth/api";
 import { admin, jwt } from "better-auth/plugins";
+import { sso } from "@better-auth/sso";
 import { pool } from "../db.ts";
 import { oidcIssuer, trustedProxies } from "./oidc/config.ts";
 import { trexOAuthProvider } from "./oidc/provider.ts";
@@ -17,6 +18,8 @@ import { defaultServiceResource, refuseRetiredSubject } from "./oidc/hooks.ts";
 import { deriveSubkeyBase64, LABELS } from "./keys.ts";
 import { hashPassword, verifyPassword } from "./password.ts";
 import { nativePasswordLoginEnabled } from "./federation/config.ts";
+import { configuredFederationRedirectUri, ssoProviderSchema } from "./federation/sso-config.ts";
+import { resolveSsoUser } from "./federation/resolve-user.ts";
 
 /**
  * Where the engine answers. Every endpoint URL in the discovery document is
@@ -176,7 +179,68 @@ export const auth = betterAuth({
     // deployment needs, and the plugin serves nothing on its own — it only adds
     // routes to a handler that, without the mount, nothing calls.
     trexOAuthProvider(),
+    // The relying-party half of federation, on trexdb.sso_provider itself
+    // rather than on a second table: one row per provider stays the whole
+    // truth, so the admin API, trex's own router and the plugin can never
+    // disagree about which upstreams exist.
+    //
+    // Mounted unconditionally, like the provider above and for the same
+    // reason: the option block has to be constant for schema-validate.test.ts
+    // to see the tables a federating deployment needs, and the plugin serves
+    // nothing on its own — oidc/mount.ts 404s every path outside /oauth2/ and
+    // /.well-known/, which is all of the plugin's own /sso/* routes.
+    //
+    // V20 is what makes this safe to mount at all: since 1.7 a schema Better
+    // Auth disagrees with throws rather than warns, and the enforcement point
+    // is runWithTransaction, which sign-UP goes through as much as sign-in. So
+    // against an unmigrated table this line would break the whole engine, not
+    // federation. sso-schema.test.ts is the guard on that.
+    sso({
+      schema: { ssoProvider: ssoProviderSchema },
+      // The upstream redirects the browser back to trex's own path, not the
+      // plugin's, because that URI is registered at every existing provider.
+      // Spread rather than passed: the value cannot be resolved at module
+      // scope in a deployment that does not federate. See
+      // configuredFederationRedirectUri.
+      ...(configuredFederationRedirectUri()
+        ? { redirectURI: configuredFederationRedirectUri()! }
+        : {}),
+      // trex's whole per-provider link policy, which the plugin has none of.
+      // Setting it also turns on three things this cutover wants and cannot
+      // ask for separately (dist/index.mjs:3908, :4015-4016): an id_token
+      // becomes mandatory, non-database writes are deferred out of the
+      // transaction, and account binding must be exact.
+      resolveUser: resolveSsoUser,
+      // Provider rows are written by /admin/federation and by nothing else.
+      // This closes update and delete; it is NOT reached on create, which has
+      // no guard hook at all (the create at dist/index.mjs:3473 calls
+      // guardSSOProviderMutation nowhere), so registration is closed by the
+      // limit below instead.
+      //
+      // Both routes would fail anyway, on V1's CHECK (id ~ '^[a-z][a-z0-9_]*$')
+      // — the adapter generates a random id for the insert, and update's
+      // proposal is not trex's to accept. Refusing them here makes that a
+      // stable conflict with a reason rather than a constraint violation
+      // surfacing as a 500.
+      guardProviderMutation: () => {
+        throw new Error("sso_provider rows are written only by /admin/federation");
+      },
+      // Zero is "registration is disabled" (dist/index.mjs:3341), checked
+      // before anything else the register route does. This is the only lever
+      // the plugin offers over create, and without it a session holder could
+      // insert a provider row trex's own id constraint would then reject.
+      providersLimit: 0,
+    }),
   ],
+  account: {
+    // Not Better Auth's cipher: it is XChaCha20-Poly1305 over SHA-256(secret),
+    // it leaves idToken in the clear, and every existing trexdb.account row
+    // holds DEK ciphertext that its isLikelyEncrypted test would hand back as
+    // plaintext. Stated rather than left to the default, because the default
+    // is the thing that would change under us. Task 6 seals these columns in
+    // database hooks instead.
+    encryptOAuthTokens: false,
+  },
   // The provider plugin has no option for either of these and a Better Auth
   // plugin cannot reach them; oidc/hooks.ts carries the measurement for each.
   // Both are no-ops on every path but the one they name.

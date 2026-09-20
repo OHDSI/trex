@@ -152,9 +152,32 @@ export function oidcConfigFor(row: SsoProviderRow): string {
 export function federationRedirectUri(
   configured: string | undefined = Deno.env.get("TREX_FEDERATION_REDIRECT_URI"),
 ): string {
-  if (configured && configured.length > 0) return configured;
+  const value = configuredFederationRedirectUri(configured);
+  if (value) return value;
   throw new Error(
     "TREX_FEDERATION_REDIRECT_URI must be set when federation is enabled: " +
       "@better-auth/sso takes one fixed redirect_uri and cannot derive it per request",
   );
+}
+
+/**
+ * The same value, or `undefined` where a deployment has not stated one.
+ *
+ * This is what better-auth.ts passes, because the plugin is mounted
+ * unconditionally and `federationRedirectUri()` evaluates at module scope: the
+ * throwing form would make the variable mandatory for every deployment,
+ * federating or not, and a missing one an import-time crash of the whole engine
+ * rather than a federation that is simply switched off.
+ *
+ * Omitting the option is not a silent default into something wrong. The plugin
+ * falls back to `${baseURL}/sso/callback` (getOIDCRedirectURI,
+ * dist/index.mjs:3141-3143), which no upstream has registered — so a deployment
+ * that federates without setting the variable fails at the upstream with an
+ * unregistered redirect_uri, visibly, rather than anywhere quieter. The
+ * throwing form stays for whoever needs the value to exist.
+ */
+export function configuredFederationRedirectUri(
+  configured: string | undefined = Deno.env.get("TREX_FEDERATION_REDIRECT_URI"),
+): string | undefined {
+  return configured && configured.length > 0 ? configured : undefined;
 }

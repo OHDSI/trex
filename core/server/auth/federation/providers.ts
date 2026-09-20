@@ -1,6 +1,6 @@
 // The only module in federation/ that talks to the database.
 import { decryptWithDek, encryptWithDek } from "../dek.ts";
-import { decideLink, type ExistingUser, type LinkDecision } from "./link.ts";
+import { decideLink, type ExistingUser, type LinkDecision, normaliseDomains } from "./link.ts";
 import { isPlaceholderAddress, PLACEHOLDER_EMAIL_DOMAIN } from "../engine-address.ts";
 // Re-exported: the domain and the predicate moved beside the engine-address
 // rule they belong to, but V17's twin comment, the slug parity test and the
@@ -121,21 +121,6 @@ export async function findLinkCandidateByEmail(
   const row = rows[0];
   if (!row) return null;
   return { id: row.id, role: row.role ?? null };
-}
-
-/**
- * A configured allowlist, reduced to bare lower-cased domains. Whitespace and
- * a leading '@' (a natural way to write a domain in configuration) are
- * tolerated; anything empty is dropped, and a list left with nothing in it
- * becomes `null`, i.e. "no restriction" — the same as an unset column.
- */
-function normaliseDomains(raw: unknown): string[] | null {
-  if (!Array.isArray(raw)) return null;
-  const out = raw
-    .filter((d): d is string => typeof d === "string")
-    .map((d) => d.trim().replace(/^@/, "").toLowerCase())
-    .filter((d) => d.length > 0);
-  return out.length > 0 ? out : null;
 }
 
 /** An existing (providerId, accountId) link, and whether its user may sign in. */

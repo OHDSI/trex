@@ -86,9 +86,46 @@ export function isElevatedRole(role: string | null | undefined): boolean {
   return normalised !== "" && normalised !== "user";
 }
 
+/**
+ * A configured allowlist, reduced to bare lower-cased domains. Whitespace and
+ * a leading '@' (a natural way to write a domain in configuration) are
+ * tolerated; anything empty is dropped, and a list left with nothing in it
+ * becomes `null`, i.e. "no restriction" — the same as an unset column.
+ *
+ * Moved here from providers.ts, unchanged, because it is now read twice: once
+ * by loadProviders, which normalises a whole ProviderConfig, and once by
+ * resolve-user.ts, which is handed one raw column off an adapter read and has
+ * no ProviderConfig to build. Both have to reach the same answer from the same
+ * column or an allowlist would mean one thing on trex's own router and another
+ * inside the plugin.
+ */
+export function normaliseDomains(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) return null;
+  const out = raw
+    .filter((d): d is string => typeof d === "string")
+    .map((d) => d.trim().replace(/^@/, "").toLowerCase())
+    .filter((d) => d.length > 0);
+  return out.length > 0 ? out : null;
+}
+
+/**
+ * The part of a provider's configuration that decides linking, and nothing
+ * else.
+ *
+ * Narrower than ProviderConfig on purpose: resolve-user.ts is handed a raw
+ * adapter row rather than a loaded ProviderConfig and can honestly produce
+ * exactly these three fields, where widening the row to a ProviderConfig would
+ * mean inventing values for ten columns this decision never reads. A
+ * ProviderConfig still satisfies it, so loadProviders' callers are unchanged.
+ */
+export type LinkPolicy = Pick<
+  ProviderConfig,
+  "autoProvision" | "emailDomainAllowlist" | "allowElevatedAutoLink"
+>;
+
 export function decideLink(
   identity: UpstreamIdentity,
-  provider: ProviderConfig,
+  provider: LinkPolicy,
   existing: ExistingUser | null,
 ): LinkDecision {
   // No address at all. Decided before the verified-email rule, which exists to

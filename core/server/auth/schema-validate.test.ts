@@ -90,7 +90,31 @@ schemaTest("no schema migration is outstanding", async (auth) => {
       toBeAddedIndexes: [],
       unsafeChanges: [],
       schemaProblems: [],
-      complaints: [],
+      // Four, and each one a deliberate divergence on trexdb.sso_provider that
+      // sso() brought into this engine's model when it was mounted. Pinned
+      // rather than emptied, because an empty expectation could only be bought
+      // by giving one of them up — and pinned here as well as in
+      // sso-schema.test.ts because that file measures a rebuilt engine and this
+      // one measures the engine the process actually exports.
+      //
+      //   issuer/domain — V11 left issuer nullable so a pre-federation row
+      //     keeps working and is simply not usable for federation;
+      //     loadProviders' `issuer IS NOT NULL` carries the distinction, and
+      //     domain is derived from issuer so it is NULL for exactly those rows.
+      //   userId — trex has no value for it: the federation admin API
+      //     authenticates with a service-role key that names no user.
+      //   email_domain_allowlist — Better Auth's `string[]` means jsonb on
+      //     postgres and the column is TEXT[] from V12. Reads are unaffected
+      //     (node-postgres parses the array before the adapter sees it) and
+      //     nothing writes it through the engine, but the warning cannot be
+      //     removed without dropping the declaration — which would silently
+      //     drop the column from every adapter read, including resolveUser's.
+      complaints: [
+        'Column "issuer" on table "sso_provider" stays nullable while the schema declares the field required, so existing rows can still hold null. Backfill every row for this column and enforce NOT NULL to remove the drift.',
+        'Column "userId" on table "sso_provider" stays nullable while the schema declares the field required, so existing rows can still hold null. Backfill every row for this column and enforce NOT NULL to remove the drift.',
+        'Column "domain" on table "sso_provider" stays nullable while the schema declares the field required, so existing rows can still hold null. Backfill every row for this column and enforce NOT NULL to remove the drift.',
+        "Field email_domain_allowlist in table sso_provider has a different type in the database. Expected string[] but got _text.",
+      ],
     },
   );
 });
