@@ -391,12 +391,18 @@ jobs:
         continue-on-error: true
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
+          # The dispatch ref is attacker-choosable, so this checkout must not leave
+          # the job's credential on disk for the code it just fetched.
+          persist-credentials: false
           repository: ${{ env.GIT_REPO_FULL_NAME }}
           submodules: false
       - if: steps.checkout_auth_tests.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
+          # The dispatch ref is attacker-choosable, so this checkout must not leave
+          # the job's credential on disk for the code it just fetched.
+          persist-credentials: false
           repository: ${{ env.GIT_REPO_FULL_NAME }}
           submodules: false
       - uses: denoland/setup-deno@v2
