@@ -792,7 +792,14 @@ dbTest("a provider with no issuer is left without a configuration", async (db, c
   assertEquals(await oidcConfigOf(db, ctx.providerId), null);
 });
 
-dbTest("save_sso_provider's own edits stay in step with the plugin", async (db, ctx) => {
+dbTest("the rebuild picks up an edit save_sso_provider made", async (db, ctx) => {
+  // Named for what it does. This calls save_sso_provider and then the rebuild
+  // ITSELF, so it pins that the rebuild reads the columns that function wrote —
+  // and pins nothing at all about whether anybody calls it. The tool that has
+  // to is covered where it lives, in mcp/tools/sso.test.ts; a test named for
+  // that path while supplying the call by hand would hide exactly the defect
+  // that mattered.
+  //
   // The MCP sso-save tool rotates clientId and clientSecret through this
   // function, and both are read by the plugin out of the serialized
   // configuration rather than out of the columns.
