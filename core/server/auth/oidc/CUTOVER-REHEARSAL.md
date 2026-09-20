@@ -207,3 +207,112 @@ inferred: the response body is quoted above.
 **`email_verified` is `false`** in all three places (access token, id_token,
 userinfo) for `admin@d2e.local` — the placeholder-domain case, reproduced on a
 real stack. What the relying parties do with it is §7.
+
+## 5. WebAPI does not sign in. Two independent refusals, both measured
+
+This is the finding the rehearsal existed to produce. Both `[UNVERIFIED]`s in
+question 1 are now settled, and **both answers are the bad one**.
+
+### 5a. Spring Security sends no PKCE, and `requirePKCE: true` refuses it
+
+`GET /WebAPI/user/login/openid` (browser navigation, through Caddy) answers 302
+to the new endpoint — the endpoint move itself is fine — with **exactly** these
+parameters:
+
+```
+response_type=code
+client_id=d2e-webapi
+scope=openid profile email
+state=…
+redirect_uri=https://localhost:41100/WebAPI/user/oauth/callback/openid
+nonce=…
+```
+
+**No `code_challenge`. No `code_challenge_method`. No `resource`.**
+
+Following that redirect with a valid engine session:
+
+```
+302 https://localhost:41100/WebAPI/user/oauth/callback/openid
+      ?error=invalid_request
+      &error_description=pkce+is+required+for+this+client
+      &state=…&iss=https%3A%2F%2Flocalhost%3A41100%2Ftrex%2Foidc
+```
+
+So **every WebAPI login fails at `/authorize`**, exactly as the dispatch
+predicted. `seed-client.ts:138-142` sets `requirePKCE` to `true` for every
+client with the comment that it is "the only thing that stops a stolen
+authorization code being redeemed"; that is true, and it is also what makes
+WebAPI unable to log in at all.
+
+### 5b. Spring uses `client_secret_basic`, and the row says `client_secret_post`
+
+With `requirePKCE` set to false in `trexdb."oauthClient"` and nothing else
+changed, the code comes back and the exchange then fails:
+
+```
+WebAPI log:
+  o.o.webapi.security.authc.OidcAuthConfig - OIDC: Authentication failed:
+  [invalid_token_response] An error occurred while attempting to retrieve the
+  OAuth 2.0 Access Token Response: 401 Unauthorized: [no body]
+browser:
+  https://localhost:41100/atlas/#/welcome?error=oidc_failed
+```
+
+Setting `tokenEndpointAuthMethod` to `client_secret_basic` on the same row, and
+changing nothing else, makes WebAPI sign in:
+
+```
+o.o.webapi.security.authc.OidcAuthConfig - OIDC: Authenticated user sub=casuqjzdgzw9abykasofshhnfeupp2rg
+o.o.webapi.security.authc.LoginService  - LoginService: onSuccess: casuqjzdgzw9abykasofshhnfeupp2rg (origin: OIDC)
+browser: https://localhost:41100/atlas/#/welcome?code=2aab128e-…   (Atlas3 loads)
+```
+
+**So Spring's method is `client_secret_basic`.** This resolves the `[UNVERIFIED]`
+in Task 5 and contradicts `seed-client.ts:143-149`, whose comment says both
+clients are seeded `client_secret_post` "precisely because this proxy posts the
+secret".
+
+### 5c. The two are mutually exclusive on one client row — and there is only one row
+
+With the row on `client_secret_basic`, the portal's own exchange, which posts
+the secret in the body (`d2e-compat/routes.ts:384-399` deliberately sends **no**
+Basic header), is refused:
+
+```
+POST /oauth2/token   (client_secret_post)
+400 {"error":"invalid_client",
+     "error_description":"client registered for client_secret_basic cannot use client_secret_post"}
+```
+
+Measured both ways on the same stack:
+
+| `tokenEndpointAuthMethod` | WebAPI sign-in | portal / `/d2e/oauth/token` |
+|---|---|---|
+| `client_secret_post` (as seeded) | **fails** — 401 at token, `error=oidc_failed` | works |
+| `client_secret_basic` | **works** | **fails** — `invalid_client` |
+
+Together with 5a this is a **release blocker**, not a tuning question. The
+release needs one of:
+
+1. **Two client rows** — `d2e-webapi` registered `client_secret_basic` with
+   `requirePKCE: false`, and a separate public/confidential client for the
+   portal and the Atlas login bridge keeping PKCE. This is the only option that
+   does not weaken the portal, and `seed-client.ts` already takes a spec per
+   client.
+2. Send Basic **as well** from `d2e-compat/routes.ts` and register the single
+   row `client_secret_basic` — cheap, but `extractClientCredentials` makes Basic
+   win outright, so the body secret becomes dead weight, and the comment there
+   records that Logto refuses a request presenting client auth twice, which
+   matters while `D2E_IDP_MODE=logto-federated` is still a supported mode.
+3. Make Spring send PKCE and post the secret. Nothing in d2e or trex can do
+   that; it is a WebAPI change.
+
+Whichever is chosen, **`requirePKCE` cannot stay true for the row WebAPI uses.**
+
+### 5d. WebAPI lowercases the subject
+
+`sub=casuqjzdgzw9abykasofshhnfeupp2rg` in the WebAPI log, against
+`cAsuqJZDGzw9aBykaSOFSHHnFeUPp2rG` in the token. Better Auth ids are
+case-sensitive and mixed-case by construction. Anything that joins WebAPI's
+recorded login to a trex user id, or to usermgmt, has to know that.
