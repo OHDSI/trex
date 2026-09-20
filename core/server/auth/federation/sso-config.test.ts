@@ -214,21 +214,49 @@ Deno.test("federationRedirectUri refuses to invent a value", () => {
   // The plugin takes one fixed redirect_uri at construction and has no request
   // to derive one from. A missing value must be a boot-time error, not a
   // sign-in that fails at the upstream with a redirect_uri it never registered.
-  assertEquals(federationRedirectUri("https://trex.example.test/auth/v1/callback"), "https://trex.example.test/auth/v1/callback");
-  let threw = false;
+  //
+  // The environment is cleared around the no-value case rather than passing
+  // `undefined`, which is what this used to do and what made it vacuous:
+  // `configured` has a default parameter, and in JS a default fires on an
+  // EXPLICIT `undefined` as readily as on an omitted argument. So
+  // `federationRedirectUri(undefined)` has always read Deno.env — it asserted
+  // "the developer has not set TREX_FEDERATION_REDIRECT_URI", which was true
+  // until a sibling test file in the same process set it, and then this failed
+  // on a directory run while passing file by file. There is exactly one way to
+  // test "no value" through a defaulted parameter, and it is to make the
+  // default resolve to nothing.
+  const prior = Deno.env.get("TREX_FEDERATION_REDIRECT_URI");
   try {
-    federationRedirectUri(undefined);
-  } catch (error) {
-    threw = true;
-    assertEquals((error as Error).message.includes("TREX_FEDERATION_REDIRECT_URI"), true);
-  }
-  assertEquals(threw, true);
+    assertEquals(
+      federationRedirectUri("https://trex.example.test/auth/v1/callback"),
+      "https://trex.example.test/auth/v1/callback",
+    );
 
-  let threwOnEmpty = false;
-  try {
-    federationRedirectUri("");
-  } catch {
-    threwOnEmpty = true;
+    Deno.env.delete("TREX_FEDERATION_REDIRECT_URI");
+    let threw = false;
+    try {
+      federationRedirectUri();
+    } catch (error) {
+      threw = true;
+      assertEquals((error as Error).message.includes("TREX_FEDERATION_REDIRECT_URI"), true);
+    }
+    assertEquals(threw, true, "a deployment that states no redirect_uri must not boot federating");
+
+    // And the default parameter really is the environment, which is the whole
+    // reason the shape above is necessary: a test that reached the throw by
+    // some other route would not notice this wiring being cut.
+    Deno.env.set("TREX_FEDERATION_REDIRECT_URI", "https://from-env.test/cb");
+    assertEquals(federationRedirectUri(), "https://from-env.test/cb");
+
+    let threwOnEmpty = false;
+    try {
+      federationRedirectUri("");
+    } catch {
+      threwOnEmpty = true;
+    }
+    assertEquals(threwOnEmpty, true);
+  } finally {
+    if (prior === undefined) Deno.env.delete("TREX_FEDERATION_REDIRECT_URI");
+    else Deno.env.set("TREX_FEDERATION_REDIRECT_URI", prior);
   }
-  assertEquals(threwOnEmpty, true);
 });

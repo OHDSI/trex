@@ -102,6 +102,8 @@ interface Loaded {
   claims: { value: Record<string, unknown> };
   // deno-lint-ignore no-explicit-any
   server: any;
+  /** What the environment held before boot(), so the process can be handed back. */
+  priorEnv: Record<string, string | undefined>;
 }
 
 async function boot(): Promise<Loaded> {
@@ -116,13 +118,25 @@ async function boot(): Promise<Loaded> {
   const { port } = server.address() as { port: number };
   const base = `http://127.0.0.1:${port}`;
 
-  Deno.env.set("TREX_ROOT_KEY", VALID_ROOT);
-  Deno.env.set("TREX_FEDERATION_ENABLED", "true");
-  Deno.env.set("TREX_FEDERATION_REDIRECT_URI", `${base}/trex/auth/v1/callback`);
+  // Deno loads every file of a directory run into ONE process, and these four
+  // have to stay set for as long as this file's tests run: router.ts reads
+  // TREX_FEDERATION_REDIRECT_URI per request, not at import. So they are saved
+  // here and put back by the teardown at the bottom of the file, before any
+  // later file's tests start. Leaving them set is how this suite made
+  // sso-config.test.ts's redirect-URI test pass file-by-file and fail on a
+  // directory run.
+  const priorEnv: Record<string, string | undefined> = {};
+  const setEnv = (name: string, value: string) => {
+    priorEnv[name] = Deno.env.get(name);
+    Deno.env.set(name, value);
+  };
+  setEnv("TREX_ROOT_KEY", VALID_ROOT);
+  setEnv("TREX_FEDERATION_ENABLED", "true");
+  setEnv("TREX_FEDERATION_REDIRECT_URI", `${base}/trex/auth/v1/callback`);
   // The requirement, stated. `trusted.origin` is here and `untrusted.origin`
   // is not, and that single difference is what the discovery cases below turn
   // on.
-  Deno.env.set("BETTER_AUTH_TRUSTED_ORIGINS", trusted.origin);
+  setEnv("BETTER_AUTH_TRUSTED_ORIGINS", trusted.origin);
 
   const { pool } = await import("../../db.ts");
   const { auth } = await import("../better-auth.ts");
@@ -146,6 +160,7 @@ async function boot(): Promise<Loaded> {
     untrusted,
     claims,
     server,
+    priorEnv,
   };
 }
 
@@ -717,4 +732,23 @@ Deno.test("the audit says nothing when every issuer origin is trusted", async ()
   const { auditTrustedIssuerOrigins } = await import("./router.ts");
   await auditTrustedIssuerOrigins(pool, (m: string) => said.push(m), () => true);
   assertEquals(said, []);
+});
+
+// ── Teardown ────────────────────────────────────────────────────────────────
+
+dbTest("the process is handed back as it was found", async (l) => {
+  // Last in the file, because Deno runs a file's tests in declaration order and
+  // every case above needs the environment boot() set. Two things are given
+  // back: the four variables, which otherwise decide a later file's test, and
+  // the three listening sockets, which otherwise outlive the run.
+  for (const [name, value] of Object.entries(l.priorEnv)) {
+    if (value === undefined) Deno.env.delete(name);
+    else Deno.env.set(name, value);
+  }
+  for (const [name, value] of Object.entries(l.priorEnv)) {
+    assertEquals(Deno.env.get(name), value, `${name} must be back to what it was`);
+  }
+  await new Promise<void>((r) => l.server.close(() => r()));
+  await l.trusted.close();
+  await l.untrusted.close();
 });
