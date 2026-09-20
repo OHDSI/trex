@@ -609,3 +609,48 @@ Note this is a **different** failure from the earlier `JOSEAlgNotAllowed` line
 in the same log, which came from an HS256 `sb-access-token` presented to the
 same middleware; the RS256 provider token never gets as far as an algorithm
 check, because the key set cannot be fetched.
+
+### 13a. The fix, verified
+
+`docker-compose.yml`'s own comment at `TREX_OIDC_ISSUER` already names the
+problem and the cure:
+
+> The public origin: `iss` must name where the discovery document is served, and
+> a deployment's FQDN resolves inside the network too. Where it does not —
+> **local and CI**, whose FQDN is `localhost` and therefore points back at this
+> container — **docker-compose-ci.yml** sets `TREX_OIDC_INTERNAL_BASE` so
+> server-side fetches take a reachable route while `iss` stays put.
+
+`docker-compose-ci.yml:10` does set it. **`docker-compose-local.yml` did not** —
+so the comment names local and the code covers only CI.
+
+Setting `TREX_OIDC_INTERNAL_BASE: "http://${PROJECT_NAME:-d2e}-trex:33001"` in
+`docker-compose-local.yml` and recreating only the `trex` service turns every
+failure above into a success, with nothing else changed:
+
+```
+POST /d2e/oauth/token  (the portal's own proxy)  -> 200, 3-segment RS256 access token,
+                                                    roles ["ALP_SYSTEM_ADMIN"],
+                                                    aud [issuer, issuer/oauth2/userinfo]
+GET  /d2e/usermgmt/api/user                      -> 200  [{"username":"admin","idpUserId":"cAsuqJZDGzw9aBykaSOFSHHnFeUPp2rG",…}]
+GET  /d2e/system-portal/dataset/list             -> 200  []
+GET  /d2e/gateway/api/db                         -> 403  {"error":"Forbidden: no authorization policy for route"}
+```
+
+The last one is an authorization answer, not a token answer — the token verified.
+
+**This is the one change this rehearsal made to the d2e tree**, on
+`p-hoffmann/logto-federation-migration`. It does not affect `iss`, the discovery
+document, or anything a browser sees. It does **not** fix §8: `verifyLogoutHint`
+reads the *jwt plugin's* JWKS configuration in `better-auth.ts`, not
+`d2e-compat`'s, so the logout hint still 401s.
+
+Two things this establishes about the deployed environments as well:
+
+- Any installation whose gateway FQDN is not resolvable from inside the
+  container network needs `TREX_OIDC_INTERNAL_BASE`, and Task 12's checklist
+  currently tells the operator to **remove** it.
+- `TREX_OIDC_CLIENT_SECRET` is visible in the container environment as the same
+  value as `SECURITY_AUTH_OIDC_APISECRET`; the portal proxy logs
+  `secret_present=true len=30` on every exchange, which is fine, but the
+  retry loop logs it once per attempt during an outage.
