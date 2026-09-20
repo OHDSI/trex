@@ -163,6 +163,24 @@ export const resolveSsoUser = async (
   // the provider's policy.
   const claims = input.verifiedIdTokenClaims;
   const rawEmail = claims.email;
+  // claim_map.email_verified, honoured. applyClaimMap (config.ts:57) reads the
+  // verification flag through this key today, so dropping it at the cutover
+  // would be a behaviour change and not merely a feature not carried over: a
+  // provider that names its own claim would silently start reporting every
+  // address unverified and would stop linking anybody under `verified_email`.
+  //
+  // Unlike claim_map.email, V20 did not re-purpose this key. It copies it into
+  // `mapping.emailVerified`, which the plugin reads only when the deprecated
+  // trustEmailVerified is on (@better-auth/sso dist/index.mjs:3921, :3932) and
+  // it is not — so the column's original meaning is still its only live meaning
+  // and honouring it here contradicts nothing in the serialized oidcConfig.
+  const claimMap = typeof row.claim_map === "object" && row.claim_map !== null
+    ? row.claim_map as Record<string, unknown>
+    : {};
+  const verifiedClaim = typeof claimMap.email_verified === "string" &&
+      claimMap.email_verified.length > 0
+    ? claimMap.email_verified
+    : "email_verified";
   const identity: UpstreamIdentity = {
     sub: input.accountKey.accountId,
     // Deliberately the id_token's own `email` claim, not providerUser.email:
@@ -186,7 +204,7 @@ export const resolveSsoUser = async (
     // the stronger source anyway. Absent means unverified, never defaulted
     // true: the whole link policy rests on it, and so does `=== true` rather
     // than a truthiness test, which would accept the string "true".
-    emailVerified: claims.email_verified === true,
+    emailVerified: claims[verifiedClaim] === true,
   };
 
   const candidate = identity.email === null

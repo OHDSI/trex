@@ -290,6 +290,85 @@ Deno.test("an email_verified claim that is not exactly true is unverified", asyn
   }
 });
 
+Deno.test("claim_map.email_verified names the claim the link policy reads", async () => {
+  // The whole point of the column: Entra and friends do not all call it
+  // `email_verified`. applyClaimMap honours this key today, so a resolver that
+  // ignored it would change behaviour at the cutover — the provider below would
+  // report every address unverified and link nobody under `verified_email`.
+  //
+  // The canonical name is present and FALSE in the same id_token, so a resolver
+  // reading the hard-coded name cannot pass by accident.
+  const db = fakeDb({
+    ssoProvider: [{ ...PROVIDER, claim_map: { email_verified: "upn_verified" } }],
+    user: [{ id: "u9", email: "alice@allowed.test", role: "user" }],
+  });
+  assertEquals(
+    await resolve(
+      input({
+        verifiedIdTokenClaims: {
+          sub: "sub-1",
+          email: "alice@allowed.test",
+          email_verified: false,
+          upn_verified: true,
+        },
+      }),
+      db,
+    ),
+    { action: "link", userId: "u9", profile: "preserve" },
+  );
+});
+
+Deno.test("a mapped verification claim is the ONLY one read", async () => {
+  // The other direction, and the one that matters for the guard: once a
+  // provider names its own claim, the standard one stops being authoritative.
+  // Otherwise an upstream could assert the canonical claim and be believed
+  // through a mapping that was configured precisely because the canonical claim
+  // is not the one this provider means.
+  const db = fakeDb({
+    ssoProvider: [{ ...PROVIDER, claim_map: { email_verified: "upn_verified" } }],
+    user: [{ id: "u9", email: "alice@allowed.test", role: "user" }],
+  });
+  assertEquals(
+    await resolve(
+      input({
+        verifiedIdTokenClaims: {
+          sub: "sub-1",
+          email: "alice@allowed.test",
+          email_verified: true,
+        },
+      }),
+      db,
+    ),
+    { action: "reject", code: "upstream_email_unverified" },
+  );
+});
+
+Deno.test("an absent or unusable claim_map falls back to email_verified", async () => {
+  // Every live row is one of these — the audit for task 8 found no provider
+  // anywhere mapping this key — so the fallback is the path production takes
+  // and a regression in it would be invisible in the mapped cases above.
+  for (const map of [undefined, null, {}, { email: "username" }, { email_verified: "" }]) {
+    const db = fakeDb({
+      ssoProvider: [{ ...PROVIDER, claim_map: map }],
+      user: [{ id: "u9", email: "alice@allowed.test", role: "user" }],
+    });
+    assertEquals(
+      await resolve(
+        input({
+          verifiedIdTokenClaims: {
+            sub: "sub-1",
+            email: "alice@allowed.test",
+            email_verified: true,
+          },
+        }),
+        db,
+      ),
+      { action: "link", userId: "u9", profile: "preserve" },
+      `claim_map=${JSON.stringify(map)} must still read email_verified`,
+    );
+  }
+});
+
 Deno.test("the mapped profile address is never treated as an address", async () => {
   // mapping.email names whatever claim satisfies dist/index.mjs:3938, which on
   // a username-only upstream is a username or the subject. Treating it as an
