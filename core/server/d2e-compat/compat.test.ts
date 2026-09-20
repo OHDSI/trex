@@ -360,3 +360,45 @@ Deno.test("no secret configured adds neither a header nor a body parameter", () 
     assertEquals(params.has("client_secret"), false, method);
   }
 });
+
+// ---------------------------------------------------------------------------
+// /portal/env.js end_session_endpoint (routes.ts portalEndSessionUrl)
+// ---------------------------------------------------------------------------
+import { portalEndSessionUrl } from "./routes.ts";
+
+const ES_GATEWAY = "https://localhost/";
+const ES_TREX = { idp: "trex", endSessionPath: "trex/oidc/oauth2/end-session" } as const;
+const ES_LOGTO = { idp: "logto", endSessionPath: "oidc/session/end" } as const;
+
+Deno.test("trex: the end-session endpoint carries no query of its own", () => {
+  assertEquals(
+    portalEndSessionUrl(ES_GATEWAY, ES_TREX, "d2e-webapi"),
+    "https://localhost/trex/oidc/oauth2/end-session",
+  );
+});
+
+// The behaviour the value exists for, asserted the way the bug presented: the
+// endpoint looked plausible in the logs and parsed to the wrong thing. The
+// client appends with a hard-coded `?`, so anything already there swallows the
+// hint into the previous parameter's value.
+Deno.test("trex: the client's appended hint parses as its own parameter", () => {
+  const appended = `${portalEndSessionUrl(ES_GATEWAY, ES_TREX, "d2e-webapi")}?id_token_hint=a.b.c`;
+  assertEquals(new URL(appended).searchParams.get("id_token_hint"), "a.b.c");
+});
+
+// The regression this replaces, pinned so it cannot come back unnoticed.
+Deno.test("a query on the endpoint would hide the hint from the provider", () => {
+  const withQuery = "https://localhost/trex/oidc/oauth2/end-session" +
+    "?client_id=d2e-webapi&redirect=https://localhost/d2e/portal";
+  assertEquals(new URL(`${withQuery}?id_token_hint=a.b.c`).searchParams.get("id_token_hint"), null);
+});
+
+// Logto's confirm page auto-submits, so its path works with the query it has
+// always been given; changing it would risk a logout that works today.
+Deno.test("logto: the endpoint keeps the query it has always been handed", () => {
+  assertEquals(
+    portalEndSessionUrl(ES_GATEWAY, ES_LOGTO, "d2e-app"),
+    "https://localhost/oidc/session/end" +
+      "?client_id=d2e-app&redirect={window.location.origin}/d2e/portal",
+  );
+});

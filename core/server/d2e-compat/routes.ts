@@ -243,6 +243,41 @@ export function attachResponseStatus(results: AttachResult[], fatal: boolean): n
 // ---------------------------------------------------------------------------
 // mountD2eRoutes — extends the Express app with all d2e thin-shell routes.
 // ---------------------------------------------------------------------------
+/**
+ * The `end_session_endpoint` that /portal/env.js advertises to the browser.
+ *
+ * The OIDC client appends its own logout parameters — `id_token_hint` and
+ * `post_logout_redirect_uri` — with a hard-coded `?` (@axa-fr/react-oidc
+ * 6.10.9). A value that already carries a query string therefore grows a SECOND
+ * `?`, and everything the library adds lands inside the value of the last
+ * existing parameter rather than beside it. Measured on a CI stack:
+ *
+ *   /trex/oidc/oauth2/end-session?client_id=d2e-webapi
+ *     &redirect=https://localhost/d2e/portal?id_token_hint=eyJ...
+ *
+ * which parses as two parameters, neither of them the hint. The provider then
+ * sees a hintless logout and answers with its confirm-logout page, and the
+ * browser stops there — signed out only if the user presses a button, and never
+ * returned to the application.
+ *
+ * Logto's confirm page auto-submits, so this stayed invisible for as long as
+ * Logto was the IdP. Better Auth's does not.
+ *
+ * trex's provider needs neither parameter: the client sends the hint and the
+ * post-logout URI itself, and the seeded client's `postLogoutRedirectUris` is
+ * what authorizes the return. Logto keeps the query it has always been handed,
+ * so that path is bit-for-bit unchanged.
+ */
+export function portalEndSessionUrl(
+  gatewayBase: string,
+  idpCfg: Pick<IdpConfig, "idp" | "endSessionPath">,
+  clientId: string,
+): string {
+  const endpoint = `${gatewayBase}${idpCfg.endSessionPath}`;
+  if (idpCfg.idp === "trex") return endpoint;
+  return `${endpoint}?client_id=${clientId}&redirect={window.location.origin}/d2e/portal`;
+}
+
 export function mountD2eRoutes(app: Express): void {
   // ─────────────────────────────────────────────────────────────────────────
   // /WebAPI/* proxy — Task 1.3 route; unchanged.
@@ -493,8 +528,7 @@ export function mountD2eRoutes(app: Express): void {
     const scope = idpCfg.scope;
     const issuer = idpCfg.issuer;
     const authorizationUrl = `${gatewayBase}${idpCfg.authorizePath}`;
-    const endSessionUrl =
-      `${gatewayBase}${idpCfg.endSessionPath}?client_id=${clientId}&redirect={window.location.origin}/d2e/portal`;
+    const endSessionUrl = portalEndSessionUrl(gatewayBase, idpCfg, clientId);
 
     const clientEnv = {
       PUBLIC_URL: "/d2e/portal",
