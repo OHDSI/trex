@@ -325,8 +325,67 @@ each provider, settings come from one of two sources:
 2. **Environment variables** (`GOOGLE_CLIENT_ID`, etc.) — legacy fallback for
    bootstrap.
 
-Enabled providers appear in the login page. The actual OAuth dance is driven
-by the auth router's social provider plumbing.
+A row is advertised only when it is `enabled` **and** carries an `issuer`. A row
+with no issuer is configuration in progress, not a provider: it would put a
+button on the login page whose `/authorize` answers "Unknown provider". That is
+why the MCP `sso-save` tool cannot create a working provider — it writes five
+columns and `issuer` is not one of them — and why it says so when it has just
+produced such a row. Use `PUT /admin/federation/providers/:id`.
+
+The OIDC dance itself is `@better-auth/sso`'s. trex keeps `/auth/v1/authorize`
+and `/auth/v1/callback` at the paths every upstream has registered and forwards
+them to the plugin, and keeps the policy the plugin has none of: the
+per-provider enable switch, per-provider auto-provision, the domain allowlist,
+the elevated-account guard, group resolution and the placeholder-address rule
+below.
+
+### What the cutover to `@better-auth/sso` gave up
+
+Recorded here because none of it is visible from a diff, and each one is a
+capability a deployment could be relying on today.
+
+- **`claim_map.sub` no longer does anything.** `oidcConfig.mapping` can remap
+  `email`, `emailVerified`, `name` and `extraFields`; it cannot remap the
+  subject. An upstream that calls the subject something other than `sub` —
+  Entra's `oid` is the case this was written for — is no longer supportable
+  through configuration. For a provider whose `claim_map` maps `sub`, every
+  already-linked user would present a different `accountId` than its stored row
+  holds and would fall through to the email path. No row on any reachable
+  installation maps it, and the admin API cannot write one (`ProviderUpsert` has
+  no `claim_map` field), so the repair is a migration rewriting
+  `trexdb.account."accountId"` for that provider — not a code change.
+- **The OIDC `nonce` is gone.** The plugin sends none and checks none. PKCE S256
+  is on per provider and the `state` is single-use, database-backed and bound to
+  a signed browser cookie, which is what `nonce` defends in the
+  authorization-code flow (where OIDC Core makes it OPTIONAL).
+- **The id_token's signing algorithm is no longer pinned to what the provider
+  advertises.** A downgrade to `none` or to an HMAC is still unavailable — there
+  is no symmetric key in a JWKS to resolve to — but a discovery document
+  advertising only `RS256` no longer stops an `ES256`-signed token from an EC key
+  in the same JWKS.
+- **`TREX_FEDERATION_REDIRECT_URI` is now required when federating.** The plugin
+  takes one fixed `redirect_uri` at construction; trex used to derive it from the
+  request when the variable was unset. A federating deployment that leaves it
+  unset fails at the upstream with an unregistered `redirect_uri`.
+- **Every upstream's issuer origin must be in `BETTER_AUTH_TRUSTED_ORIGINS`**, as
+  must its token, UserInfo and JWKS origins. Boot audits the ones the provider
+  row can name and says which are missing.
+- **A stored address in mixed case is no longer matched** by the first-time link
+  lookup. trex's own SQL asked `lower(email) = lower($1)`; Better Auth's adapter
+  cannot express that, so the incoming address is lower-cased and compared
+  exactly — the same lookup the engine itself makes next. It is fail-closed: a
+  miss refuses or provisions, never links to the wrong row, and V16's unique
+  index on `lower(email)` plus V17's backfill mean such a row can only predate
+  them.
+- **Auto-provision now requires `claim_map.email` to name a real address claim.**
+  The engine writes `mapping.email`'s value into `user.email`, which on a
+  username-only upstream is a username. Rather than let an unaddressable row be
+  created, a first-time identity is refused unless the value the engine will
+  store is the address the policy just judged. Pre-linked identities never reach
+  this branch, so no migrated user is affected.
+
+What did **not** change: a refusal with no `TREX_OIDC_LOGIN_URL` configured is
+still the JSON `403`, not a redirect to somewhere nothing is served.
 
 ### Placeholder Addresses
 
@@ -348,9 +407,11 @@ asserted it and nothing resolves it. Two rules follow:
   (`TLS__INTERNAL__DOMAIN`), chosen here because it is what d2e's migration
   mints, not because it is reserved. Mail sent there goes somewhere.
 - **Federated sign-in never matches a candidate user on one.** Enforced in
-  `core/server/auth/federation/providers.ts`: an upstream asserting
-  `<someone else's subject>@d2e.local` as a verified address would otherwise be
-  handed that person's account.
+  `core/server/auth/federation/resolve-user.ts`'s `findCandidate`: an upstream
+  asserting `<someone else's subject>@d2e.local` as a verified address would
+  otherwise be handed that person's account. The predicate is on the row's
+  `is_placeholder_email` column, not on the domain, so `PUT /user` clearing the
+  flag makes the account linkable again.
 
 **Two ways a row becomes a placeholder, and they must look identical.**
 

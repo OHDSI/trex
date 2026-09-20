@@ -84,12 +84,50 @@ service-role key or a trex admin's access token (`app_metadata.trex_role ===
 `sso_provider.authorization_endpoint` is the URL a browser can actually reach
 for the authorize redirect — set it when the provider's OIDC discovery
 document advertises an endpoint that isn't reachable from outside the
-deployment (e.g. an internal-only issuer host).
+deployment (e.g. an internal-only issuer host). A blank value means "use the
+discovery document's".
 
 When a federated sign-in is refused (unknown account, disabled user, etc.) and
 `TREX_OIDC_LOGIN_URL` is set, trex redirects the browser back to that login
 page with `error` (one of trex's fixed refusal codes) and `return_to` query
-params instead of returning a bare JSON error.
+params instead of returning a bare JSON error. With no login URL configured the
+refusal is still a JSON `403`, as it has always been; only the refusals meaning
+"this callback did not start in this browser" answer `401` with a body whatever
+the configuration says, because the login page is the one place a victim would
+be inclined to re-enter credentials.
+
+### Things a `PUT /providers/:id` does that are not obvious
+
+- **It rewrites `oidcConfig`, and that aborts sign-ins already in flight.**
+  `@better-auth/sso` fingerprints the provider's authentication configuration
+  when a flow starts and re-checks it at the callback, so a flow started against
+  the old configuration will not complete against the new one. That is the
+  wanted outcome — an administrator who has just rotated a client secret does
+  not want the flows still using the old one to finish — but it is a real effect
+  on concurrent users.
+- **It rewrites `domain`, derived from the issuer's host (port included,
+  lower-cased), and `domain` feeds the same fingerprint.** So the FIRST edit of a
+  provider that predates the fingerprint changes it once and aborts in-flight
+  sign-ins even when the edit changed nothing a person can see. Subsequent edits
+  that leave the issuer alone do not.
+- **A hand-set `domain` does not survive an edit.** The plugin documents a
+  multi-value form (`company.test,subsidiary.test`); this route derives the
+  column from the issuer and overwrites it on every PUT, including one that
+  changes nothing else, and no route can put it back — trex seals the plugin's
+  own provider-mutation endpoints. SQL is the only way to set it and SQL is the
+  only way to restore it. Inert today: `domain` is consulted only behind a
+  `domainVerified` field trex's model does not carry.
+- **Three columns are NOT written and cannot be reached through this API at
+  all:** `email_domain_allowlist`, `allow_elevated_auto_link` and `link_policy`.
+  `ProviderUpsert` has no field for any of them, they are deliberately left
+  alone by the upsert (a test pins that), and SQL is the only way to set them.
+  `claim_map` is in the same position and is read back off the row when
+  `oidcConfig` is rebuilt, so an edit cannot reset it.
+- **The MCP `sso-save` tool is not an alternative to this route.** It calls
+  `trexdb.save_sso_provider`, which writes five columns and `issuer` is not one
+  of them, so it can update an existing provider's name, client id, secret and
+  enabled flag but can never produce a provider anyone can sign in through. It
+  says so when the row it just wrote has no issuer.
 
 ## OIDC Provider
 
