@@ -392,6 +392,52 @@ dbTest("a successful callback sets sb-access-token and redirects to the return p
   }
 });
 
+dbTest("an off-site redirect_to cannot leave the origin, on either path", async (l) => {
+  // safeRedirectTo is the open-redirect guard, and the cutover moved both of
+  // its consumers: the return path is now baked into callbackURL and into
+  // errorCallbackURL at /authorize, and the plugin redirects to whichever of
+  // them applies without ever re-checking it. So the check has to hold at the
+  // point it is written, for both, and `//host` is absolute despite looking
+  // relative.
+  const id = slug();
+  const sub = `${id}-subject`;
+  l.claims.value = { sub, username: "alice" };
+  const priorLogin = Deno.env.get("TREX_OIDC_LOGIN_URL");
+  Deno.env.set("TREX_OIDC_LOGIN_URL", `${l.base}/login?tenant=d2e`);
+  try {
+    await seedProvider(l, id, l.trusted.origin);
+    await seedLinkedUser(l, id, sub);
+
+    // Success: the browser lands back on trex, not on the attacker's host.
+    const ok = await signIn(l, id, "//evil.test/steal");
+    await ok.done!.body?.cancel();
+    assertEquals(ok.done!.status, 302);
+    const landed = new URL(ok.done!.headers.get("location")!);
+    assertEquals(landed.origin, l.base);
+    assertEquals(landed.pathname, "/");
+
+    // Refusal: the login page is handed a return path it can safely use, so
+    // the open redirect is not merely moved one hop further on.
+    const started = await authorize(l, id, "/\\evil.test");
+    await started.body?.cancel();
+    await l.pool.query(`UPDATE trexdb.sso_provider SET enabled = false WHERE id = $1`, [id]);
+    const state = new URL(started.headers.get("location")!).searchParams.get("state")!;
+    const done = await fetch(
+      `${l.base}/trex/auth/v1/callback?code=stub-code&state=${encodeURIComponent(state)}`,
+      { headers: { cookie: cookieHeader(started) }, redirect: "manual" },
+    );
+    await done.body?.cancel();
+    const refused = new URL(done.headers.get("location")!);
+    assertEquals(refused.origin, l.base);
+    assertEquals(refused.pathname, "/login");
+    assertEquals(refused.searchParams.get("return_to"), "/");
+  } finally {
+    if (priorLogin === undefined) Deno.env.delete("TREX_OIDC_LOGIN_URL");
+    else Deno.env.set("TREX_OIDC_LOGIN_URL", priorLogin);
+    await cleanUp(l, id, sub);
+  }
+});
+
 dbTest("a refused sign-in lands on the login page with the code and the return path", async (l) => {
   // refusalRedirect's contract, now produced by the plugin's own errorCallbackURL:
   // ?error=<code>&return_to=<safe path>, with the login URL's own query
@@ -471,6 +517,62 @@ dbTest("with no login page configured a refusal is still the JSON 403", async (l
     });
   } finally {
     if (priorLogin !== undefined) Deno.env.set("TREX_OIDC_LOGIN_URL", priorLogin);
+    await cleanUp(l, id, sub);
+  }
+});
+
+dbTest("an upstream's own error text never reaches the browser", async (l) => {
+  // The upstream picks `error` and `error_description` when it is the one
+  // declining, and the plugin appends both verbatim to whatever URL /authorize
+  // handed it. The pre-cutover route ran safeErrorCode over the code and never
+  // forwarded a description; this asserts both halves, on the redirect path and
+  // on the body path, because a provider's text landing in a page trex renders
+  // is the reason that function exists.
+  const id = slug();
+  const sub = `${id}-subject`;
+  l.claims.value = { sub, username: "alice" };
+  const hostile = "<img src=x onerror=alert(1)>";
+  const priorLogin = Deno.env.get("TREX_OIDC_LOGIN_URL");
+  try {
+    await seedProvider(l, id, l.trusted.origin);
+    await seedLinkedUser(l, id, sub);
+
+    Deno.env.set("TREX_OIDC_LOGIN_URL", `${l.base}/login?tenant=d2e`);
+    const started = await authorize(l, id);
+    await started.body?.cancel();
+    const state = new URL(started.headers.get("location")!).searchParams.get("state")!;
+    const declined = await fetch(
+      `${l.base}/trex/auth/v1/callback?state=${encodeURIComponent(state)}&error=${
+        encodeURIComponent(hostile)
+      }&error_description=${encodeURIComponent(hostile)}`,
+      { headers: { cookie: cookieHeader(started) }, redirect: "manual" },
+    );
+    await declined.body?.cancel();
+    assertEquals(declined.status, 302);
+    const landing = new URL(declined.headers.get("location")!);
+    assertEquals(landing.searchParams.get("error"), "upstream_error");
+    assertEquals(landing.searchParams.get("error_description"), null);
+    assertEquals(declined.headers.get("location")!.includes("onerror"), false);
+
+    // And the same through the body path, where there is no login page.
+    Deno.env.delete("TREX_OIDC_LOGIN_URL");
+    const started2 = await authorize(l, id);
+    await started2.body?.cancel();
+    const state2 = new URL(started2.headers.get("location")!).searchParams.get("state")!;
+    const body = await fetch(
+      `${l.base}/trex/auth/v1/callback?state=${encodeURIComponent(state2)}&error=${
+        encodeURIComponent(hostile)
+      }`,
+      { headers: { cookie: cookieHeader(started2) }, redirect: "manual" },
+    );
+    assertEquals(body.status, 403);
+    assertEquals(await body.json(), {
+      error: "access_denied",
+      error_description: "upstream_error",
+    });
+  } finally {
+    if (priorLogin === undefined) Deno.env.delete("TREX_OIDC_LOGIN_URL");
+    else Deno.env.set("TREX_OIDC_LOGIN_URL", priorLogin);
     await cleanUp(l, id, sub);
   }
 });

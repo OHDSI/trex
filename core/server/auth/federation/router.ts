@@ -251,7 +251,15 @@ export function registerFederationRoutes(
           });
           return;
         }
-        res.redirect(302, location);
+        // The upstream chooses the text of `error` and `error_description` when
+        // it is the upstream that declined (dist/index.mjs:3807), and the
+        // plugin appends both verbatim. Neither is trex's to put on its own
+        // login page: refusalRedirect set a bounded `error` and no description
+        // at all, and that is what is rebuilt here. A trex or plugin code is a
+        // bounded token already and passes through unchanged.
+        landing.searchParams.set("error", safeErrorCode(refusal));
+        landing.searchParams.delete("error_description");
+        res.redirect(302, landing.toString());
         return;
       }
 
