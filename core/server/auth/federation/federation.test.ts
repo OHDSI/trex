@@ -4,19 +4,17 @@ import { federationEnabled, nativePasswordLoginEnabled } from "./flags.ts";
 import { decideLink, emailDomain, emailDomainAllowed, isElevatedRole } from "./link.ts";
 import { resolveGroups } from "./groups.ts";
 import {
-  findLinkCandidateByEmail,
   findLinkedUser,
-  loadProviders,
   PLACEHOLDER_EMAIL_DOMAIN,
   placeholderLocalPart,
   provisionUser,
   readAccountTokens,
-  resolveFederatedUser,
   upsertAccount,
 } from "./providers.ts";
 import { safeRedirectTo } from "./request.ts";
-import type { ExistingUser } from "./link.ts";
-import type { ProviderConfig, UpstreamIdentity } from "./types.ts";
+import type { ExistingUser, LinkPolicy } from "./link.ts";
+import type { GroupsConfig } from "./groups.ts";
+import type { UpstreamIdentity } from "./types.ts";
 
 Deno.test("federationEnabled is off unless explicitly enabled", () => {
   assertEquals(federationEnabled(undefined), false);
@@ -38,13 +36,18 @@ Deno.test("nativePasswordLoginEnabled is on unless explicitly turned off", () =>
   assertEquals(nativePasswordLoginEnabled("no"), true);
 });
 
-const provider = (over: Partial<ProviderConfig> = {}): ProviderConfig => ({
-  id: "logto", displayName: "Logto", clientId: "c", clientSecret: "s",
-  issuer: "https://logto.test/oidc", discoveryUrl: "https://logto.test/d",
-  authorizationEndpoint: null,
-  scopes: "openid profile email", claimMap: {}, groupsSource: "none",
-  groupsClaim: null, linkPolicy: "verified_email", autoProvision: false,
-  emailDomainAllowlist: null, allowElevatedAutoLink: false, ...over,
+// Exactly the fields decideLink and resolveGroups declare, because those are
+// the only fields either reads. There is no wider provider type to Partial<>
+// any more, and inventing one here would put a shape in the tests that no
+// caller builds.
+type TestProvider = LinkPolicy & GroupsConfig;
+const provider = (over: Partial<TestProvider> = {}): TestProvider => ({
+  groupsSource: "none",
+  groupsClaim: null,
+  autoProvision: false,
+  emailDomainAllowlist: null,
+  allowElevatedAutoLink: false,
+  ...over,
 });
 const identity = (verified: boolean): UpstreamIdentity => ({
   sub: "s-1", email: "jo@example.test", emailVerified: verified,
@@ -140,40 +143,6 @@ Deno.test("an identity with no address still provisions, since its placeholder i
     decideLink({ sub: "s-1", email: null, emailVerified: false }, provider({ autoProvision: true }), null),
     { action: "provision" },
   );
-});
-
-// The guards are only as good as the configuration reaching them, and the
-// column→field mapping is the one part of that with no type to catch it.
-Deno.test("the link guards are loaded off sso_provider onto ProviderConfig", async () => {
-  const row = (over: Record<string, unknown>) => ({
-    id: "logto", displayName: "Logto", clientId: "c", clientSecret: "s",
-    issuer: "https://logto.test/oidc", discovery_url: null,
-    scopes: "openid profile email", claim_map: {}, groups_source: "none",
-    groups_claim: null, link_policy: "verified_email", auto_provision: false, ...over,
-  });
-  const load = async (over: Record<string, unknown>) =>
-    (await loadProviders({ query: () => Promise.resolve({ rows: [row(over)] }) })).get("logto")!;
-
-  const configured = await load({
-    // As an operator would plausibly write them: mixed case, padding, and the
-    // '@' they think of as part of a domain.
-    email_domain_allowlist: [" Corp.TEST ", "@example.test"],
-    allow_elevated_auto_link: true,
-  });
-  assertEquals(configured.emailDomainAllowlist, ["corp.test", "example.test"]);
-  assertEquals(configured.allowElevatedAutoLink, true);
-
-  // Unset, and an empty list, both mean "no restriction" — an existing row is
-  // exactly as unrestricted as it was before these columns existed.
-  for (const allowlist of [null, undefined, []]) {
-    const p = await load({ email_domain_allowlist: allowlist });
-    assertEquals(p.emailDomainAllowlist, null);
-    assertEquals(p.allowElevatedAutoLink, false);
-  }
-  // Anything short of boolean true leaves the elevated guard on.
-  for (const raw of [undefined, null, "true", 1]) {
-    assertEquals((await load({ allow_elevated_auto_link: raw })).allowElevatedAutoLink, false);
-  }
 });
 
 // ── Link guards: domain allowlist and elevated accounts (link.ts) ──────────
@@ -374,196 +343,42 @@ Deno.test("'none' and (for now) 'graph' resolve to no groups", () => {
   assertEquals(resolveGroups(claims, provider({ groupsSource: "graph", groupsClaim: "groups" })), []);
 });
 
-// ── Identity resolution (providers.ts) ──────────────────────────────────────
+// ── The link lookup the federation ADMIN api still uses (providers.ts) ──────
+//
+// resolveFederatedUser and findLinkCandidateByEmail are gone: the sign-in path
+// makes those decisions in resolve-user.ts, through Better Auth's adapter, and
+// resolve-user.test.ts pins them. findLinkedUser survived because linkIdentity
+// still calls it, so it is still tested — for what linkIdentity actually reads.
 
-/**
- * A pg client stubbed by which statement it is asked to run. Enough to drive
- * resolveFederatedUser, which is the only place the two lookups are ordered
- * against each other, without a database.
- */
-function stubClient(rows: { linked?: unknown[]; byEmail?: unknown[] }) {
+/** A pg client stubbed by which statement it is asked to run. */
+function stubClient(rows: unknown[]) {
   const seen: string[] = [];
   return {
     seen,
     // deno-lint-ignore no-explicit-any
-    query(sql: string, _params: unknown[]): Promise<any> {
-      // The link lookup joins user, so it must be recognised first.
-      if (sql.includes("FROM trexdb.account a")) {
-        seen.push("link");
-        return Promise.resolve({ rows: rows.linked ?? [] });
-      }
-      if (sql.includes('FROM trexdb."user"')) {
-        seen.push("email");
-        return Promise.resolve({ rows: rows.byEmail ?? [] });
-      }
+    query(sql: string, params: unknown[]): Promise<any> {
+      seen.push(sql.replace(/\s+/g, " ").trim());
+      if (sql.includes("FROM trexdb.account a")) return Promise.resolve({ rows });
       throw new Error(`unexpected query: ${sql}`);
     },
   };
 }
 
-Deno.test("an existing link is found and reports whether its user is disabled", async () => {
-  const live = await findLinkedUser(
-    stubClient({ linked: [{ userId: "u-1", disabled: false }] }),
-    "logto",
-    "s-1",
-  );
-  assertEquals(live, { userId: "u-1", disabled: false });
-
-  const banned = await findLinkedUser(
-    stubClient({ linked: [{ userId: "u-1", disabled: true }] }),
-    "logto",
-    "s-1",
-  );
-  assertEquals(banned, { userId: "u-1", disabled: true });
-
-  assertEquals(await findLinkedUser(stubClient({}), "logto", "s-1"), null);
+Deno.test("an existing link is found by (providerId, accountId), and only the id is read", async () => {
+  const client = stubClient([{ userId: "u-1" }]);
+  assertEquals(await findLinkedUser(client, "logto", "s-1"), { userId: "u-1" });
+  // Keyed on BOTH columns: UNIQUE("providerId","accountId") is the identity, and
+  // a lookup on accountId alone would hand one upstream's subject the account
+  // another upstream owns.
+  assertEquals(client.seen.length, 1);
+  assertStringIncludes(client.seen[0], 'a."providerId" = $1 AND a."accountId" = $2');
+  // The JOIN is load-bearing rather than decoration: a link whose user row has
+  // gone must read as NO link, not as a link to a missing id.
+  assertStringIncludes(client.seen[0], 'JOIN trexdb."user" u ON u.id = a."userId"');
 });
 
-// The upstream changed the address. The link is the identity, so the sign-in
-// lands on the linked user and never looks at whoever now holds that email.
-Deno.test("an existing link wins over a different email", async () => {
-  const client = stubClient({
-    linked: [{ userId: "u-linked", disabled: false }],
-    byEmail: [{ id: "u-someone-else" }],
-  });
-  assertEquals(
-    await resolveFederatedUser(client, provider(), {
-      sub: "s-1",
-      email: "changed@example.test",
-      emailVerified: true,
-    }),
-    { action: "link", userId: "u-linked" },
-  );
-  // Not merely outranked: the email question is never asked.
-  assertEquals(client.seen, ["link"]);
-});
-
-// An unverified upstream email would refuse a *new* link; it is irrelevant to
-// one that already exists, because no linking decision is being made.
-Deno.test("an existing link does not re-ask the verified-email question", async () => {
-  const client = stubClient({ linked: [{ userId: "u-linked", disabled: false }] });
-  assertEquals(
-    await resolveFederatedUser(client, provider(), {
-      sub: "s-1",
-      email: "jo@example.test",
-      emailVerified: false,
-    }),
-    { action: "link", userId: "u-linked" },
-  );
-  assertEquals(client.seen, ["link"]);
-});
-
-// The case this whole change exists for. d2e's migration pre-links every Logto
-// user by subject before anyone signs in, and most of those accounts have no
-// address, so the established link has to carry the sign-in on its own.
-Deno.test("an established link signs in with no email whatsoever", async () => {
-  const client = stubClient({ linked: [{ userId: "u-linked", disabled: false }] });
-  assertEquals(
-    await resolveFederatedUser(client, provider(), noEmail),
-    { action: "link", userId: "u-linked" },
-  );
-  assertEquals(client.seen, ["link"]);
-});
-
-// Nothing to look one up by. The query is skipped rather than run with null and
-// left to match whatever `lower(NULL)` would.
-Deno.test("with no link and no email, no candidate is looked up", async () => {
-  const client = stubClient({ byEmail: [{ id: "u-2" }] });
-  assertEquals(
-    await resolveFederatedUser(client, provider({ autoProvision: true }), noEmail),
-    { action: "provision" },
-  );
-  assertEquals(client.seen, ["link"]);
-});
-
-Deno.test("an existing link to a disabled user is refused", async () => {
-  const client = stubClient({
-    linked: [{ userId: "u-banned", disabled: true }],
-    // Would be email-linkable if the flow ever fell through to it.
-    byEmail: [{ id: "u-someone-else" }],
-  });
-  const decision = await resolveFederatedUser(client, provider(), identity(true));
-  assertEquals(decision, { action: "refuse", reason: "account_disabled" });
-  // And it stops there rather than falling through to provision or re-link.
-  assertEquals(client.seen, ["link"]);
-});
-
-Deno.test("with no link, a verified email links as before", async () => {
-  const client = stubClient({ byEmail: [{ id: "u-2" }] });
-  assertEquals(
-    await resolveFederatedUser(client, provider(), identity(true)),
-    { action: "link", userId: "u-2" },
-  );
-  assertEquals(client.seen, ["link", "email"]);
-});
-
-Deno.test("with no link and no matching user, the provider's policy decides", async () => {
-  assertEquals(
-    await resolveFederatedUser(stubClient({}), provider(), identity(true)),
-    { action: "refuse", reason: "no_account" },
-  );
-  assertEquals(
-    await resolveFederatedUser(stubClient({}), provider({ autoProvision: true }), identity(true)),
-    { action: "provision" },
-  );
-  // An unverified upstream email still links to nothing.
-  assertEquals(
-    (await resolveFederatedUser(
-      stubClient({ byEmail: [{ id: "u-2" }] }),
-      provider(),
-      identity(false),
-    )).action,
-    "refuse",
-  );
-});
-
-Deno.test("the email lookup carries the role the elevated guard needs", async () => {
-  const found = await findLinkCandidateByEmail(
-    stubClient({ byEmail: [{ id: "u-1", role: "admin" }] }),
-    "jo@example.test",
-  );
-  assertEquals(found, { id: "u-1", role: "admin" });
-
-  // NULL role (the column is nullable, defaulting to 'user') is reported as
-  // null, not dropped, so isElevatedRole decides rather than `undefined`.
-  assertEquals(
-    await findLinkCandidateByEmail(stubClient({ byEmail: [{ id: "u-1" }] }), "jo@example.test"),
-    { id: "u-1", role: null },
-  );
-  assertEquals(await findLinkCandidateByEmail(stubClient({}), "jo@example.test"), null);
-});
-
-Deno.test("a first-time identity matching an admin's address is refused", async () => {
-  const client = stubClient({ byEmail: [{ id: "u-admin", role: "admin" }] });
-  assertEquals(
-    await resolveFederatedUser(client, provider(), identity(true)),
-    { action: "refuse", reason: "elevated_account_link_refused" },
-  );
-  assertEquals(client.seen, ["link", "email"]);
-});
-
-// The whole point of the additive guards: they gate the *first* link only.
-Deno.test("an existing link to an elevated user still signs in", async () => {
-  const client = stubClient({ linked: [{ userId: "u-admin", disabled: false }] });
-  assertEquals(
-    // Restrictive on both counts, and neither is consulted: this identity was
-    // linked already, so no linking decision is being made.
-    await resolveFederatedUser(
-      client,
-      provider({ emailDomainAllowlist: ["corp.test"] }),
-      { sub: "s-1", email: "jo@example.test", emailVerified: true },
-    ),
-    { action: "link", userId: "u-admin" },
-  );
-  assertEquals(client.seen, ["link"]);
-});
-
-Deno.test("a first-time identity outside the allowlist is refused before any link", async () => {
-  const client = stubClient({ byEmail: [{ id: "u-2", role: "user" }] });
-  assertEquals(
-    await resolveFederatedUser(client, provider({ emailDomainAllowlist: ["corp.test"] }), identity(true)),
-    { action: "refuse", reason: "email_domain_not_allowed" },
-  );
+Deno.test("no link, or a link the JOIN drops, is reported as no link at all", async () => {
+  assertEquals(await findLinkedUser(stubClient([]), "logto", "s-1"), null);
 });
 
 // ── Upstream tokens at rest (providers.ts) ─────────────────────────────────
@@ -760,21 +575,6 @@ Deno.test("redirect_to rejects backslash and control-character smuggling", () =>
   assertEquals(safeRedirectTo("/\n/evil.test"), "/");
 });
 
-Deno.test("loadProviders maps authorization_endpoint, absent meaning null", async () => {
-  const row = (over: Record<string, unknown>) => ({
-    id: "logto", displayName: "Logto", clientId: "c", clientSecret: "s",
-    issuer: "https://logto.test/oidc", discovery_url: null,
-    scopes: "openid profile email", claim_map: {}, groups_source: "none",
-    groups_claim: null, link_policy: "verified_email", auto_provision: false, ...over,
-  });
-  const load = async (over: Record<string, unknown>) =>
-    (await loadProviders({ query: () => Promise.resolve({ rows: [row(over)] }) })).get("logto")!;
-
-  assertEquals((await load({ authorization_endpoint: "https://d2e.test/oidc/auth" })).authorizationEndpoint,
-    "https://d2e.test/oidc/auth");
-  assertEquals((await load({})).authorizationEndpoint, null);
-});
-
 // ── Placeholder addresses (providers.ts) ─────────────────────────────────────
 //
 // V17 restored user.email NOT NULL, so the branch decideLink routes an
@@ -818,7 +618,8 @@ Deno.test("an identity asserting no address is provisioned with a flagged placeh
   const c = provisionClient();
   assertEquals(await provisionUser(c, anonymous("Alice.Example"), { id: "u-1" }), "u-1");
   // Unverified and flagged. The flag is what every mail path tells a
-  // synthesised address by, and what findLinkCandidateByEmail excludes on;
+  // synthesised address by, and what resolve-user.ts's findCandidate excludes
+  // on;
   // `"emailVerified"` false is a true statement about a row nobody asserted and
   // protects nothing on its own, since decideLink reads the incoming identity.
   assertEquals(c.inserts, [[
@@ -880,8 +681,8 @@ Deno.test("an identity that asserts an address is provisioned with it, verified 
 // parseLinkRequest requires an '@' — so a migration with no address to give
 // sends `<username>@<its configured domain>`, which at d2e's default is this
 // exact string. 66 of 69 rehearsed users landed here, unflagged, verified and
-// confirmed: candidates for findLinkCandidateByEmail again, and a lie to any
-// mail path that reads the flag.
+// confirmed: link candidates again, and a lie to any mail path that reads the
+// flag.
 Deno.test("an asserted address in the placeholder domain is flagged like a synthesised one", async () => {
   const c = provisionClient();
   await provisionUser(
@@ -952,99 +753,12 @@ Deno.test({
   },
 });
 
-// A synthesised address is an internal identifier, not a claim to an identity.
-// Before this, an upstream asserting `<another user's subject>@d2e.local` as
-// verified would link onto that user's account, because the candidate query
-// never distinguished a placeholder from an address its owner proved. Against
-// a real database rather than a stub: the exclusion is a SQL predicate, so a
-// stub that answers by matching substrings could not tell it from its absence.
-Deno.test({
-  name: "[db] an upstream cannot claim an account through its placeholder address",
-  ignore: !provisionDbUrl,
-  fn: async () => {
-    const { Client } = await import("npm:pg");
-    const db = new Client({ connectionString: provisionDbUrl });
-    await db.connect();
-    const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
-    const placeholder = `sub-${run}@${PLACEHOLDER_EMAIL_DOMAIN}`;
-    // The shape the rehearsal found: an address in the placeholder domain that
-    // a caller SUPPLIED rather than one this module synthesised. 66 of 69
-    // migrated users look like this, and until provisionUser flagged them by
-    // domain they were candidates here — which is the takeover, end to end.
-    const supplied = `mig-${run}@${PLACEHOLDER_EMAIL_DOMAIN}`;
-    const real = `jo-${run}@example.test`;
-    try {
-      await provisionUser(db, anonymous(`Sub ${run}`), { id: `p${run}a` });
-      await provisionUser(
-        db,
-        { sub: `s-${run}`, email: real, emailVerified: true },
-        { id: `p${run}b` },
-      );
-      await provisionUser(
-        db,
-        { sub: `s2-${run}`, email: supplied, emailVerified: true },
-        { id: `p${run}c` },
-      );
-
-      assertEquals(await findLinkCandidateByEmail(db, placeholder), null);
-      // Synthesised and supplied must be indistinguishable here, or the
-      // exclusion protects only the rows that never needed a migration.
-      assertEquals(await findLinkCandidateByEmail(db, supplied), null);
-      // Case is no way around it either: the predicate is on the row, not on
-      // the spelling of the address.
-      assertEquals(await findLinkCandidateByEmail(db, placeholder.toUpperCase()), null);
-      // An address its owner actually proved still resolves exactly as before,
-      // so this narrows the placeholder path and nothing else.
-      assertEquals(await findLinkCandidateByEmail(db, real), { id: `p${run}b`, role: "user" });
-    } finally {
-      await db.query(`DELETE FROM trexdb."user" WHERE id LIKE $1`, [`p${run}%`]);
-      await db.end();
-    }
-  },
-});
-
-// The migrated users V17 backfilled are the population this exclusion could
-// plausibly break, so prove the ordering that spares them rather than assert
-// it: resolveFederatedUser answers from the (providerId, accountId) account
-// row and never reaches the email query.
-Deno.test({
-  name: "[db] a migrated user with a placeholder address still signs in through its link",
-  ignore: !provisionDbUrl,
-  fn: async () => {
-    const { Client } = await import("npm:pg");
-    const db = new Client({ connectionString: provisionDbUrl });
-    await db.connect();
-    const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
-    _setDekForTests(new Uint8Array(32));
-    const decoyEmail = `decoy-${run}@example.test`;
-    try {
-      const id = await provisionUser(db, anonymous(`Sub ${run}`), { id: `p${run}a` });
-      await upsertAccount(db, { userId: id, providerId: "logto", accountId: `Sub ${run}` });
-      // The address the email path would resolve to, held by somebody else. An
-      // identity asserting no address at all would take decideLink's no-address
-      // branch and never reach the email query, so it could not tell "consulted
-      // first" from "consulted at all"; this can.
-      await provisionUser(
-        db,
-        { sub: `decoy-${run}`, email: decoyEmail, emailVerified: true },
-        { id: `p${run}b` },
-      );
-
-      assertEquals(
-        await resolveFederatedUser(db, provider(), {
-          sub: `Sub ${run}`,
-          email: decoyEmail,
-          emailVerified: true,
-        }),
-        { action: "link", userId: id },
-      );
-    } finally {
-      await db.query(`DELETE FROM trexdb."user" WHERE id LIKE $1`, [`p${run}%`]);
-      await db.end();
-      _resetDekCache();
-    }
-  },
-});
+// The two db cases that used to sit here — "an upstream cannot claim an account
+// through its placeholder address" and "a migrated user with a placeholder
+// address still signs in through its link" — drove findLinkCandidateByEmail and
+// resolveFederatedUser, which are gone. Both moved to resolve-user.test.ts, with
+// their rows and their decoy intact, where they run against the real adapter
+// that actually makes the decision now.
 
 // The exclusion is only correct while the address is still synthesised. V17's
 // column comment defines the flag as "the address is synthesised, not a contact
@@ -1103,17 +817,13 @@ Deno.test({
       );
       assertEquals(rows, [{ email: chosen, is_placeholder_email: false }]);
 
-      // The point of the clear: the candidate query finds them again, and a
-      // provider asserting the address they chose links rather than refusing.
-      assertEquals(await findLinkCandidateByEmail(db, chosen), { id, role: "user" });
-      assertEquals(
-        await resolveFederatedUser(db, provider(), {
-          sub: `other-${run}`,
-          email: chosen,
-          emailVerified: true,
-        }),
-        { action: "link", userId: id },
-      );
+      // The other half of the clear — that a provider asserting the address they
+      // chose now links rather than refusing — is pinned where the decision is
+      // made, in resolve-user.test.ts's "[db] a placeholder-addressed user is
+      // not a candidate through the real adapter", which flips this same flag
+      // and signs the identity in. Asserting it here would mean rebuilding
+      // Better Auth's adapter beside a raw pg client to reach a resolver that
+      // needs one.
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
       await db.query(`DELETE FROM trexdb."user" WHERE id LIKE $1`, [`p${run}%`]);

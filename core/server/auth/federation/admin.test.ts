@@ -547,7 +547,8 @@ dbTest("a pre-linked user with a 12-character id signs in end to end", async (db
   // auth-router.ts does not type-check on its own (untyped express handlers),
   // and that must not fail this whole file.
   const runtimeImport = (spec: string) => import(spec.startsWith(".") ? new URL(spec, import.meta.url).href : spec);
-  const { resolveFederatedUser } = await import("./providers.ts");
+  const { resolveSsoUser } = await import("./resolve-user.ts");
+  const { auth } = await import("../better-auth.ts");
   const { createTokenResponse, authRouter } = await runtimeImport("../auth-router.ts");
   const express = (await runtimeImport("express")).default;
   const { verifyAccessToken } = await import("../jwt.ts");
@@ -556,13 +557,36 @@ dbTest("a pre-linked user with a 12-character id signs in end to end", async (db
   assertEquals(/^[a-z0-9]{12}$/.test(id), true);
   assertEquals(await linkIdentity(db, req(ctx, 11, { accountId: "logto-sub-11" })), { userId: id, outcome: "created" });
 
-  // First sign-in at /callback resolves through the link to the same id.
-  const decision = await resolveFederatedUser(
-    db,
-    { id: ctx.providerId, linkPolicy: "none", autoProvision: false } as unknown as Parameters<typeof resolveFederatedUser>[1],
-    { sub: "logto-sub-11", email: ctx.email(11), emailVerified: true },
+  // First sign-in resolves through the link to the same id. Through
+  // resolveSsoUser and the engine's own adapter, because that is what makes the
+  // decision now — resolveFederatedUser was deleted with the rest of the
+  // hand-written relying party. This is the join between the two halves of the
+  // migration and it is why the case is here rather than in
+  // resolve-user.test.ts: the id linkIdentity chose has to be the id the
+  // resolver answers with AND the `sub` the session below carries.
+  const ctxAuth = await auth.$context;
+  assertEquals(
+    await resolveSsoUser!(
+      // deno-lint-ignore no-explicit-any
+      {
+        protocol: "oidc",
+        providerId: ctx.providerId,
+        accountKey: { issuer: "https://logto.test/oidc", accountId: "logto-sub-11" },
+        providerUser: { email: ctx.email(11), emailVerified: false, name: "" },
+        providerReference: {
+          providerId: ctx.providerId,
+          source: { type: "persisted", recordId: ctx.providerId },
+          authenticationConfigurationFingerprint: "fp",
+        },
+        providerClaims: {},
+        verifiedIdTokenClaims: { sub: "logto-sub-11", email: ctx.email(11), email_verified: true },
+        // deno-lint-ignore no-explicit-any
+      } as any,
+      // deno-lint-ignore no-explicit-any
+      { database: ctxAuth.adapter as any },
+    ),
+    { action: "link", userId: id, profile: "preserve" },
   );
-  assertEquals(decision, { action: "link", userId: id });
 
   // The session /callback issues: access token `sub` and the refresh token row.
   const { rows: [row] } = await db.query(

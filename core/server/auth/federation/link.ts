@@ -26,7 +26,7 @@
 // — so an IdP asserting `alice@localhost` with auto_provision on would
 // otherwise create exactly the row V17 refuses to migrate, after V17 has run.
 // See isEngineAddressable for the other five routes that ask the same rule.
-import type { ProviderConfig, UpstreamIdentity } from "./types.ts";
+import type { UpstreamIdentity } from "./types.ts";
 import { emailDomain, isEngineAddressable } from "../engine-address.ts";
 // Re-exported: emailDomain's rule is an address rule and now lives beside the
 // other two, but federation is where its callers and its tests look for it.
@@ -99,12 +99,12 @@ export function isElevatedRole(role: string | null | undefined): boolean {
  * tolerated; anything empty is dropped, and a list left with nothing in it
  * becomes `null`, i.e. "no restriction" — the same as an unset column.
  *
- * Moved here from providers.ts, unchanged, because it is now read twice: once
- * by loadProviders, which normalises a whole ProviderConfig, and once by
- * resolve-user.ts, which is handed one raw column off an adapter read and has
- * no ProviderConfig to build. Both have to reach the same answer from the same
- * column or an allowlist would mean one thing on trex's own router and another
- * inside the plugin.
+ * Moved here from providers.ts, unchanged, because it was read twice while both
+ * readers existed: loadProviders, which normalised a whole provider row, and
+ * resolve-user.ts, which is handed one raw column off an adapter read. Only the
+ * second is left, but the function stays here rather than folding back into it:
+ * the rule is what a trailing blank, a leading '@' and an empty list MEAN, and
+ * that belongs beside the guard that applies it.
  */
 export function normaliseDomains(raw: unknown): string[] | null {
   if (!Array.isArray(raw)) return null;
@@ -119,16 +119,25 @@ export function normaliseDomains(raw: unknown): string[] | null {
  * The part of a provider's configuration that decides linking, and nothing
  * else.
  *
- * Narrower than ProviderConfig on purpose: resolve-user.ts is handed a raw
- * adapter row rather than a loaded ProviderConfig and can honestly produce
- * exactly these three fields, where widening the row to a ProviderConfig would
- * mean inventing values for ten columns this decision never reads. A
- * ProviderConfig still satisfies it, so loadProviders' callers are unchanged.
+ * Declared field by field rather than Picked out of a wider provider type, and
+ * that is the point rather than a consequence of one being deleted:
+ * resolve-user.ts is handed a raw adapter row and can honestly produce exactly
+ * these three, where widening it to a whole provider would mean inventing
+ * values for ten columns this decision never reads.
  */
-export type LinkPolicy = Pick<
-  ProviderConfig,
-  "autoProvision" | "emailDomainAllowlist" | "allowElevatedAutoLink"
->;
+export interface LinkPolicy {
+  autoProvision: boolean;
+  /**
+   * `null` (and an empty list, which normaliseDomains reduces to `null`) means
+   * no restriction. Entries are bare domains, lower-cased.
+   */
+  emailDomainAllowlist: string[] | null;
+  /**
+   * Whether a first-time upstream identity may be auto-linked to an existing
+   * trex user whose role is elevated. Off by default; see decideLink.
+   */
+  allowElevatedAutoLink: boolean;
+}
 
 export function decideLink(
   identity: UpstreamIdentity,

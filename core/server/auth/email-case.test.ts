@@ -6,86 +6,19 @@
 // `victim@corp.com`, and the victim's next federated sign-in lower-matches onto
 // the attacker's row and links their verified upstream identity to it.
 //
-// These tests cover that attack from both ends: the lookup that used to miss
-// the variant, and the index (V16) that now stops the second row existing.
+// These tests cover that attack from the ends that are still here: the index
+// (V16) that stops the second row existing, and the placeholder scheme that
+// cannot mint a case variant of an address it already holds.
+//
+// The lookup half moved. It pinned findLinkCandidateByEmail, which the cutover
+// deleted; resolve-user.test.ts pins the same rule against resolveSsoUser and
+// the real adapter — "the upstream address is matched case-insensitively", "a
+// STORED address in mixed case is not matched, and that is fail-closed", "two
+// live users on one address resolve to nobody", and the real-adapter
+// "an upstream address in another case still resolves through the real
+// adapter".
 import { assertEquals, assertRejects, assertStringIncludes } from "jsr:@std/assert";
-import { findLinkCandidateByEmail, provisionUser, resolveFederatedUser } from "./federation/providers.ts";
-import type { ProviderConfig } from "./federation/types.ts";
-
-// deno-lint-ignore no-explicit-any
-type AnyClient = any;
-
-/** Records the SQL it is asked to run and answers the two lookups by shape. */
-function stubClient(rows: { linked?: unknown[]; byEmail?: unknown[] }) {
-  const ran: string[] = [];
-  return {
-    ran,
-    // deno-lint-ignore no-explicit-any
-    query(sql: string, _params: unknown[]): Promise<any> {
-      ran.push(sql);
-      if (sql.includes("FROM trexdb.account a")) return Promise.resolve({ rows: rows.linked ?? [] });
-      if (sql.includes('FROM trexdb."user"')) return Promise.resolve({ rows: rows.byEmail ?? [] });
-      throw new Error(`unexpected query: ${sql}`);
-    },
-  };
-}
-
-const provider = (): ProviderConfig =>
-  ({
-    id: "logto",
-    autoProvision: true,
-    emailDomainAllowlist: null,
-    allowElevatedAutoLink: false,
-  }) as unknown as ProviderConfig;
-
-Deno.test("the link candidate lookup asks case-insensitively", async () => {
-  const client = stubClient({ byEmail: [{ id: "u-1", role: "user" }] });
-  await findLinkCandidateByEmail(client as AnyClient, "Victim@corp.com");
-  assertStringIncludes(client.ran[0], "lower(email) = lower($1)");
-});
-
-// The state the takeover produced, on a database without V16's index: two live
-// accounts answering to one address. Neither may be handed the identity.
-Deno.test("two accounts holding one address refuse to resolve to either", async () => {
-  const err = await assertRejects(
-    () =>
-      findLinkCandidateByEmail(
-        stubClient({ byEmail: [{ id: "u-victim", role: "user" }, { id: "u-attacker", role: "user" }] }) as AnyClient,
-        "victim@corp.com",
-      ),
-    Error,
-  );
-  // Names the address, because an operator has to find the pair to fix it.
-  assertStringIncludes(err.message, "victim@corp.com");
-});
-
-Deno.test("an ambiguous address fails the federated sign-in instead of linking", async () => {
-  await assertRejects(
-    () =>
-      resolveFederatedUser(
-        stubClient({
-          linked: [],
-          byEmail: [{ id: "u-victim", role: "user" }, { id: "u-attacker", role: "user" }],
-        }) as AnyClient,
-        provider(),
-        { sub: "upstream-sub", email: "victim@corp.com", emailVerified: true },
-      ),
-    Error,
-  );
-});
-
-// A single match is still a link — the guard must not have made the ordinary
-// case refuse.
-Deno.test("one account holding the address still links", async () => {
-  assertEquals(
-    await resolveFederatedUser(
-      stubClient({ linked: [], byEmail: [{ id: "u-victim", role: "user" }] }) as AnyClient,
-      provider(),
-      { sub: "upstream-sub", email: "VICTIM@corp.com", emailVerified: true },
-    ),
-    { action: "link", userId: "u-victim" },
-  );
-});
+import { provisionUser } from "./federation/providers.ts";
 
 // ── Against a real database ──────────────────────────────────────────────────
 // Gated on DATABASE_URL like federation/admin.test.ts: a database with the core
@@ -212,16 +145,12 @@ dbTest("placeholder-addressed users coexist, and the slug scheme cannot mint a c
   assertEquals(folded[0].n, 2);
 });
 
-dbTest("the upstream address resolves to the one account holding it, in whatever case", async (db, ctx) => {
-  await insertUser(db, `${ctx.run}21`, ctx.email("victim"));
-  // What the identity provider asserts, spelled differently from what trex
-  // stored. The legitimate link: same mailbox, same person, same account.
-  assertEquals(
-    await findLinkCandidateByEmail(db, ctx.email("victim").toUpperCase()),
-    { id: `${ctx.run}21`, role: "user" },
-  );
-  assertEquals(await findLinkCandidateByEmail(db, ctx.email("nobody")), null);
-});
+// The real-database lookup case that used to sit here — an upstream asserting
+// the victim's address in another case resolving to the one account holding it
+// — moved with findLinkCandidateByEmail to resolve-user.test.ts's "[db] an
+// upstream address in another case still resolves through the real adapter",
+// where it runs against the adapter that emits the query now. `=` on a text
+// column is what that adapter sends, so the case has to stay a database case.
 
 // One test rather than several for the HTTP surface: it ends by closing the
 // shared pg pool that auth-router's `pool` holds, which no later test could

@@ -212,7 +212,20 @@ export const resolveSsoUser = async (
   const candidate = identity.email === null
     ? null
     : await findCandidate(context.database, identity.email);
-  if (candidate === AMBIGUOUS) return reject("ambiguous_account");
+  if (candidate === AMBIGUOUS) {
+    // Logged, and the address is in the log line rather than only in the
+    // refusal. trex's own findLinkCandidateByEmail threw an Error naming the
+    // address for exactly this reason — an operator has to find the pair of
+    // rows to fix it, and "ambiguous_account" alone names neither the address
+    // nor the provider. It stays a server-side log: the refusal code is what
+    // reaches a browser, and the address must not.
+    console.error(
+      `[federation] provider ${input.providerId} asserted ${identity.email}, which more than ` +
+        "one live trex user holds; refusing to guess which one this identity is. " +
+        "V16's unique index on lower(email) forbids this, so the database is missing it.",
+    );
+    return reject("ambiguous_account");
+  }
 
   const decision = decideLink(identity, {
     // `=== true` throughout, for the reason loadProviders gives on

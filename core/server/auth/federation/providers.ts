@@ -1,133 +1,58 @@
-// The only module in federation/ that talks to the database.
+// The federation writes that are still trex's own, rather than the plugin's.
+//
+// Three readers left here at the cutover and none of them is replaced in this
+// file: loadProviders built a whole ProviderConfig of which one caller used the
+// keys (settings-providers.ts, now on enabledProviderIds below) and the rest is
+// read off the raw row by resolve-user.ts; findLinkCandidateByEmail and
+// resolveFederatedUser are resolve-user.ts's findCandidate and resolveSsoUser,
+// which make the same decisions in the same order through Better Auth's
+// adapter. What stays is what still has a live caller: provisionUser and
+// upsertAccount for the federation ADMIN link (admin-store.ts), findLinkedUser
+// for the same, and readAccountTokens, which is the only sanctioned reader of
+// the three ciphertext token columns.
 import { decryptWithDek, encryptWithDek } from "../dek.ts";
-import { decideLink, type ExistingUser, type LinkDecision, normaliseDomains } from "./link.ts";
 import { isPlaceholderAddress, PLACEHOLDER_EMAIL_DOMAIN } from "../engine-address.ts";
 // Re-exported: the domain and the predicate moved beside the engine-address
 // rule they belong to, but V17's twin comment, the slug parity test and the
 // federation tests all name this module as where they live.
 export { isPlaceholderAddress, PLACEHOLDER_EMAIL_DOMAIN };
-import type { ProviderConfig, UpstreamIdentity } from "./types.ts";
+import type { UpstreamIdentity } from "./types.ts";
 
 // deno-lint-ignore no-explicit-any
 type PgClient = any;
 
 /**
- * Enabled providers that are actually federatable. A row with no issuer is
- * configuration in progress, not a provider — returning it would produce a
- * sign-in button that 500s.
+ * The ids of the providers a sign-in button may be offered for.
+ *
+ * The same predicate loadProviders selected on, and it is two conditions for
+ * two different reasons: `enabled = true` is the switch an operator throws
+ * during an incident, and `issuer IS NOT NULL` excludes a row that is
+ * configuration in progress rather than a provider — V11 left the column
+ * nullable so a pre-federation row (trexdb.save_sso_provider writes five
+ * columns and issuer is not one of them) keeps existing without being
+ * federatable. Returning one would put a button on the login page whose
+ * /authorize answers "Unknown provider", which is the same predicate
+ * federation/router.ts re-asks per request.
+ *
+ * Ids only, because ids are all the one caller ever read. The rest of what
+ * loadProviders normalised — claim_map, groups_source, link_policy,
+ * auto_provision, email_domain_allowlist, allow_elevated_auto_link — is read
+ * off the raw sso_provider row by resolve-user.ts and provision.ts now, so
+ * building a second, differently-normalised copy of it here could only drift
+ * from the one the sign-in actually obeys.
  */
-export async function loadProviders(client: PgClient): Promise<Map<string, ProviderConfig>> {
+export async function enabledProviderIds(client: PgClient): Promise<string[]> {
   const { rows } = await client.query(
-    `SELECT id, "displayName", "clientId", "clientSecret", issuer, discovery_url,
-            authorization_endpoint,
-            scopes, claim_map, groups_source, groups_claim, link_policy, auto_provision,
-            email_domain_allowlist, allow_elevated_auto_link
-       FROM trexdb.sso_provider
-      WHERE enabled = true AND issuer IS NOT NULL`,
+    `SELECT id FROM trexdb.sso_provider
+      WHERE enabled = true AND issuer IS NOT NULL
+      ORDER BY id`,
   );
-  const out = new Map<string, ProviderConfig>();
-  for (const r of rows) {
-    out.set(r.id, {
-      id: r.id,
-      displayName: r.displayName,
-      clientId: r.clientId,
-      clientSecret: r.clientSecret,
-      issuer: r.issuer,
-      // Most providers publish discovery at the standard well-known path; only
-      // the odd one out needs discovery_url set explicitly.
-      discoveryUrl: r.discovery_url ??
-        r.issuer.replace(/\/+$/, "") + "/.well-known/openid-configuration",
-      authorizationEndpoint: typeof r.authorization_endpoint === "string" && r.authorization_endpoint.trim()
-        ? r.authorization_endpoint.trim()
-        : null,
-      scopes: r.scopes,
-      claimMap: r.claim_map ?? {},
-      groupsSource: r.groups_source,
-      groupsClaim: r.groups_claim,
-      linkPolicy: r.link_policy,
-      autoProvision: r.auto_provision,
-      emailDomainAllowlist: normaliseDomains(r.email_domain_allowlist),
-      // `=== true` rather than a truthiness test: this decides whether an
-      // upstream may take over an administrator's account, and the one value
-      // that must enable it is the boolean true. Anything else — including a
-      // column an older database has not got — stays off.
-      allowElevatedAutoLink: r.allow_elevated_auto_link === true,
-    });
-  }
-  return out;
+  return rows.map((r: { id: string }) => r.id);
 }
 
-/**
- * The trex user a verified upstream address resolves to, if any — with the
- * role, because whether it may be auto-linked at all depends on it (see
- * decideLink's elevated-account guard).
- */
-export async function findLinkCandidateByEmail(
-  client: PgClient,
-  email: string,
-): Promise<ExistingUser | null> {
-  const { rows } = await client.query(
-    // A match here becomes a link decision: an upstream identity is handed
-    // the account it resolves to. Soft-deleted and banned users must never
-    // resolve, or a deactivated account is resurrected for whoever controls
-    // that address at the identity provider. Both columns are nullable with
-    // NULL meaning "not disabled", so `banned = false` alone would wrongly
-    // drop NULL rows; `IS NOT TRUE` treats NULL and false as not-banned.
-    //
-    // A placeholder address is trex's own invention for a user whose upstream
-    // asserted none (see provisionUser, and V17 for the rows it backfilled).
-    // Nobody asserted it and nobody can be reached at it, so it is an internal
-    // identifier rather than a claim to an identity: matching on it would hand
-    // an upstream that asserts <someone else's subject>@d2e.local as verified
-    // that person's account. Excluded here rather than in decideLink because
-    // decideLink's verified-email rule tests the *incoming* identity and never
-    // the stored row, so it has nothing to test this against.
-    //
-    // The two filters answer different questions and neither substitutes for
-    // the other: the placeholder clause decides which rows may be a candidate
-    // at all, and LIMIT 2 exists so the count of the rows that survive it can
-    // be checked below. Excluding placeholders cannot hide an ambiguity the
-    // check would have caught — a placeholder is minted only by provisionUser,
-    // under a domain nobody registers at, so it is never the row an attacker
-    // planted, and two of them matching would resolve to nothing rather than to
-    // a guess.
-    `SELECT id, role FROM trexdb."user"
-      WHERE lower(email) = lower($1)
-        AND "deletedAt" IS NULL
-        AND banned IS NOT TRUE
-        AND is_placeholder_email IS NOT TRUE
-      LIMIT 2`,
-    [email],
-  );
-  // Two rows mean two accounts hold one address, which V16's unique index on
-  // lower(email) forbids — so this is reachable only on a database missing that
-  // index (a migration not run, a dump restored without it) and is exactly the
-  // state the takeover needed: the victim's account and an attacker's case
-  // variant, both matching the address the upstream just verified.
-  //
-  // Deliberately not an ORDER BY. An ordering would only make the choice
-  // repeatable, and there is nothing to order by that distinguishes the victim
-  // from the attacker: the attacker registers whenever they like, so neither
-  // oldest-first nor id order is safe. The one correct answer to "which of
-  // these two accounts is this identity?" is that nobody can tell, so this
-  // refuses and takes the sign-in with it. The caller logs it and shows a
-  // generic failure, which is a sign-in an operator must fix rather than a
-  // silent link onto the wrong account.
-  if (rows.length > 1) {
-    throw new Error(
-      `more than one trex user holds ${email}; refusing to guess which one this identity is`,
-    );
-  }
-  const row = rows[0];
-  if (!row) return null;
-  return { id: row.id, role: row.role ?? null };
-}
-
-/** An existing (providerId, accountId) link, and whether its user may sign in. */
+/** An existing (providerId, accountId) link. */
 export interface LinkedAccount {
   userId: string;
-  /** Soft-deleted or banned. The link is real; the account may not be used. */
-  disabled: boolean;
 }
 
 /**
@@ -141,12 +66,20 @@ export interface LinkedAccount {
  * now holds that address in trex, and an administrator editing a federated
  * user's trex email orphans the link.
  *
- * The row is returned even when the user is disabled, with the fact reported
- * rather than filtered out. Dropping a disabled user here would make an
- * existing link indistinguishable from no link at all, and the flow would fall
- * through to the email path and try to provision the banned user's address
- * again — hitting user.email's UNIQUE constraint inside the transaction and
- * surfacing as an opaque failure instead of "this account is deactivated".
+ * Only the id, now that the federation admin link (admin-store.ts) is the one
+ * caller. It used to report `disabled` as well, because the sign-in path had to
+ * tell "linked to a banned user" from "not linked at all" — dropping a disabled
+ * user there would have fallen through to the email path and tried to provision
+ * their address again. That decision moved to resolve-user.ts, which reads
+ * deletedAt and banned off the user row itself and refuses with
+ * `account_disabled`; reporting a flag here that nothing reads would be a
+ * second, unenforced copy of the rule.
+ *
+ * The JOIN stays and is not decoration: it is what makes a link whose user row
+ * has gone read as NO link rather than as a link to a missing id. An inner join
+ * is also why a soft-deleted user's link is still found — the row is still
+ * there — which is the pre-existing behaviour linkIdentity's `already_linked`
+ * outcome depends on.
  */
 export async function findLinkedUser(
   client: PgClient,
@@ -154,8 +87,7 @@ export async function findLinkedUser(
   accountId: string,
 ): Promise<LinkedAccount | null> {
   const { rows } = await client.query(
-    `SELECT a."userId" AS "userId",
-            (u."deletedAt" IS NOT NULL OR u.banned IS TRUE) AS disabled
+    `SELECT a."userId" AS "userId"
        FROM trexdb.account a
        JOIN trexdb."user" u ON u.id = a."userId"
       WHERE a."providerId" = $1 AND a."accountId" = $2
@@ -164,47 +96,7 @@ export async function findLinkedUser(
   );
   const row = rows[0];
   if (!row) return null;
-  return { userId: row.userId, disabled: row.disabled === true };
-}
-
-/**
- * Which trex user this upstream identity signs in as, in the one order that is
- * safe: the existing link first, the email question only when there is none.
- *
- * Deliberately NOT done here: rewriting the trex user's email to whatever the
- * upstream now asserts. `user.email` is trex's own identifier — it is UNIQUE,
- * it is what the password grant authenticates against, and it is what an
- * administrator sees. An upstream that changes it would be able to move a trex
- * account onto an address it chose, collide with another user's address and
- * fail the whole sign-in inside the transaction, or quietly redirect a native
- * login. The link, not the address, carries the identity; a drifted address is
- * for an administrator to reconcile.
- */
-export async function resolveFederatedUser(
-  client: PgClient,
-  provider: ProviderConfig,
-  identity: UpstreamIdentity,
-): Promise<LinkDecision> {
-  const linked = await findLinkedUser(client, provider.id, identity.sub);
-  if (linked) {
-    // A ban has to stop this path too, or a banned user keeps signing in
-    // through the link they already have.
-    if (linked.disabled) return { action: "refuse", reason: "account_disabled" };
-    // The link IS the identity: whatever the upstream now says the address is,
-    // and whether or not it says it is verified, this is the user.
-    return { action: "link", userId: linked.userId };
-  }
-  // First sighting of this upstream identity. Only now does email decide
-  // anything, and only under the provider's link policy — and only here do the
-  // domain allowlist and the elevated-account guard apply. An identity with an
-  // account row above has already been through them and keeps signing in.
-  //
-  // With no address there is nothing to look a candidate up by, so the query is
-  // skipped rather than run with null and left to match whatever it would.
-  const candidate = identity.email === null
-    ? null
-    : await findLinkCandidateByEmail(client, identity.email);
-  return decideLink(identity, provider, candidate);
+  return { userId: row.userId };
 }
 
 /**
@@ -313,7 +205,8 @@ async function synthesisePlaceholderEmail(
  *
  * The third — that a synthesised address can be *matched* where an absent one
  * could not — is met on the link path rather than on the row, because that is
- * where it has to be met: findLinkCandidateByEmail excludes placeholders, so an
+ * where it has to be met: resolve-user.ts's findCandidate excludes placeholders
+ * (as findLinkCandidateByEmail did before it), so an
  * upstream asserting <someone else's subject>@d2e.local as verified resolves to
  * nothing. The flag on the row is what that query reads; writing it alone would
  * not have been enough, and the domain and emailDomainAllowlist are defence in
@@ -321,9 +214,9 @@ async function synthesisePlaceholderEmail(
  * everything when the list is unset, which is the default).
  *
  * The exclusion costs a migrated user nothing while their address is still
- * synthesised: resolveFederatedUser answers from the (providerId, accountId)
- * account row first and only asks about email for an upstream identity it has
- * never seen. It would cost them everything once they replace it, so the flag
+ * synthesised: resolveSsoUser answers from the (providerId, accountId) account
+ * row first and only asks about email for an upstream identity it has never
+ * seen. It would cost them everything once they replace it, so the flag
  * is not merely set: PUT /user (auth-router.ts) derives it from the address the
  * account holder supplies, which clears it for a real one. A flag that is never
  * cleared turns "unclaimable" into "unlinkable for good", which is why the two

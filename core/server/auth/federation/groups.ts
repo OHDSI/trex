@@ -4,7 +4,12 @@
 // nothing here interprets what it reads — the values are opaque identifiers as
 // the upstream states them (Entra group GUIDs, Logto role names), and any
 // meaning they carry belongs to the relying party.
-import type { ProviderConfig } from "./types.ts";
+
+/** The two sso_provider columns group resolution reads, and no others. */
+export interface GroupsConfig {
+  groupsSource: "claim" | "graph" | "none";
+  groupsClaim: string | null;
+}
 
 /**
  * The groups a validated id_token asserts, per the provider's groups_source.
@@ -30,7 +35,7 @@ import type { ProviderConfig } from "./types.ts";
  */
 export function resolveGroups(
   claims: Record<string, unknown>,
-  provider: Pick<ProviderConfig, "groupsSource" | "groupsClaim">,
+  provider: GroupsConfig,
 ): string[] {
   if (provider.groupsSource !== "claim") return [];
   const name = provider.groupsClaim;
