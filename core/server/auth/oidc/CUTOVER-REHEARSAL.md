@@ -49,3 +49,48 @@ branch's `core/` and re-bundled in-image with `trex bundle`, exactly as the trex
 `Dockerfile` prod stage does.
 
 (Progress log follows; appended as each check completed.)
+
+## 0b. How the rehearsal image was actually made
+
+```
+ghcr.io/ohdsi/trexsql:prod-sha-04ec21ad…      (pulled)
+  + rm -rf /usr/src/core
+  + core/server,core/event package.json + npm install --omit=dev
+  + COPY core/                                (this branch, 048cefb1)
+  + trex bundle core/server/index.ts core/server/index.eszip
+  + trex bundle core/event/index.ts  core/event/index.eszip
+  = ghcr.io/ohdsi/trexsql:phase2-local
+```
+
+then d2e's own layer, unchanged, on top of it:
+
+```
+docker compose -f docker-compose.yml --profile demodb -f docker-compose-local.yml \
+  --env-file .env.local build trex     # with TREXSQL_REF=phase2-local
+  = d2e-trex:phase2-local              # named by TREX_IMAGE
+```
+
+Both new keys go in `.env.local` only; **nothing in the d2e tree was changed to
+make this work**, which is itself the evidence for the release-engineering gap
+in §0: the only two ways to get this branch into a d2e stack are to publish a
+trexsql image or to override `TREXSQL_REF` by hand.
+
+`trex bundle` re-bundled cleanly in-image against the pinned base (core/server
+and core/event eszips both produced, the latter 307MB), so the 95-commit core
+overlay is self-consistent with that base's extensions and binary.
+
+**Two build facts worth keeping:**
+
+1. `WITH_R` is passed as a build arg by `docker-compose-local.yml` with a comment
+   saying it "must also bake R or it silently reverts to an R-less image", but
+   `services/trex/Dockerfile.v2` **never declares or reads `WITH_R`** (`grep
+   WITH_R` over its 164 lines returns nothing). The comment describes a
+   Dockerfile that no longer exists; the arg is dead.
+2. The `PLUGINS_FROM_REGISTRY` step is the build's whole cost and it is fragile:
+   `@data2evidence/d2e-ui` alone is a **273.8 MB** npm tarball (600.7 MB
+   unpacked, 12 769 files) and `npm pack` of it inside the build retried and
+   failed repeatedly while the host was otherwise busy — `fetch-external-plugins.sh`
+   runs under `set -eu`, so after 5 attempts it takes the whole image build with
+   it. This rehearsal trimmed `PLUGINS_FROM_REGISTRY` to `@data2evidence/d2e-ui`;
+   the flow/fhir/sibyl plugins are not needed to exercise sign-in and are
+   recorded here as deliberately absent.
