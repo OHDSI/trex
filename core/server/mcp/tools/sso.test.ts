@@ -107,23 +107,66 @@ dbTest("sso-save keeps the plugin's copy of a rotated secret in step", async (db
   });
 });
 
-dbTest("sso-save leaves a provider with no issuer without a configuration", async (db, id) => {
-  // Every row this tool can create: save_sso_provider writes five columns and
+dbTest("sso-save says so when it has produced a provider that cannot federate", async (db, id) => {
+  // Every row this tool can CREATE: save_sso_provider writes five columns and
   // issuer is not one of them, so the result is configuration in progress
   // rather than a provider. Inventing a configuration around a NULL issuer
   // would produce a row the plugin resolves and then fails on.
+  //
+  // The silent half is what this pins. `enabled: true` is accepted, the write
+  // succeeds, and sso-list then reports the provider ENABLED — while
+  // enabledProviderIds and /authorize both exclude it on `issuer IS NOT NULL`,
+  // so no button ever appears and no error is raised anywhere. An operator
+  // reaching that state with nothing to read is the failure; the tool now says
+  // it in the same breath as "saved", and names the route that can fix it.
   const save = await ssoTool("sso-save");
   const result = await save({
     id,
     displayName: "Half configured",
     clientId: "cid",
     clientSecret: "sec",
-    enabled: false,
+    enabled: true,
   });
   assertEquals(result.isError, undefined);
   const row = await providerRow(db, id);
   assertEquals(row.oidcConfig, null);
   assertEquals(row.clientId, "cid");
+  assertStringIncludes(result.content[0].text, "CANNOT");
+  assertStringIncludes(result.content[0].text, "no issuer");
+  assertStringIncludes(result.content[0].text, `/admin/federation/providers/${id}`);
+
+  // The row really is enabled and really is excluded, so the warning is about
+  // this database and not about a rule stated only in a comment.
+  const { enabledProviderIds } = await import("../../auth/federation/providers.ts");
+  const { rows } = await db.query(`SELECT enabled FROM trexdb.sso_provider WHERE id = $1`, [id]);
+  assertEquals(rows[0].enabled, true);
+  assertEquals((await enabledProviderIds(db)).includes(id), false);
+});
+
+dbTest("a provider that CAN federate is saved without the warning", async (db, id) => {
+  // The control. Without it the assertion above would also pass for a tool that
+  // printed the warning unconditionally, which would train an operator to skip
+  // the one line that matters.
+  const { upsertProvider } = await import("../../auth/federation/admin-store.ts");
+  const { parseProviderUpsert } = await import("../../auth/federation/admin-policy.ts");
+  await upsertProvider(
+    db,
+    parseProviderUpsert(id, {
+      displayName: "Logto",
+      clientId: "cid",
+      clientSecret: "sec",
+      issuer: "https://logto.internal:3001/oidc",
+    })!,
+  );
+  const result = await (await ssoTool("sso-save"))({
+    id,
+    displayName: "Logto",
+    clientId: "cid",
+    clientSecret: "sec",
+    enabled: true,
+  });
+  assertEquals(result.isError, undefined);
+  assertEquals(result.content[0].text, `SSO provider '${id}' saved`);
 });
 
 dbTest("a save whose configuration write fails changes nothing", async (db, id) => {
