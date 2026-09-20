@@ -68,6 +68,30 @@ type Res = any;
  */
 const REFUSAL_SENTINEL_PATH = "/__trex_federation_refused";
 
+/**
+ * The refusals that mean "this callback did not start in this browser", which
+ * the pre-cutover route answered with a 401 body rather than by sending the
+ * browser anywhere.
+ *
+ * All four come out of parseState/handleOIDCCallback rather than out of trex's
+ * policy, and between them they cover every successor to the binding cookie and
+ * the replay map: a missing or mismatched signed state cookie and a rotated
+ * provider are `state_mismatch`/`invalid_state`, a redeemed or expired state is
+ * `state_mismatch` (its verification row is gone), an absent one is
+ * `state_not_found` and an undecryptable one is `state_invalid`.
+ *
+ * Kept as a body and not a redirect deliberately. These are the codes an
+ * attacker can cause on a victim's browser, and the login page is the one place
+ * that victim would be inclined to re-enter credentials; the pre-cutover route
+ * never sent them there and neither does this.
+ */
+const STATE_REFUSAL_CODES = new Set([
+  "state_mismatch",
+  "state_not_found",
+  "state_invalid",
+  "invalid_state",
+]);
+
 /** The plugin's own shared callback, in this process rather than over HTTP. */
 function pluginCallbackUrl(baseURL: string): URL {
   // better-call routes on `new URL(ctx.baseURL).pathname`, so the path is built
@@ -198,6 +222,13 @@ export function registerFederationRoutes(
         // A refusal already carries ?error= on the URL /authorize supplied, so
         // it is passed through untouched rather than re-derived — except for
         // the two landings no browser should be sent to.
+        if (STATE_REFUSAL_CODES.has(refusal)) {
+          res.status(401).json({
+            error: "invalid_request",
+            error_description: "This sign-in did not start in this browser",
+          });
+          return;
+        }
         if (landing.pathname === REFUSAL_SENTINEL_PATH) {
           // No login page is configured, so there is nothing to redirect to
           // that could explain this. Same envelope the pre-cutover route used
@@ -210,12 +241,13 @@ export function registerFederationRoutes(
         }
         if (landing.pathname === new URL(`${ctx.baseURL.replace(/\/+$/, "")}/error`).pathname) {
           // The engine's default error page, which oidc/mount.ts 404s. It is
-          // reached only when the state could not be parsed at all — no flow,
-          // so no per-flow errorURL — which is precisely the callback that did
-          // not start in this browser. 401, as before.
+          // reached only when the failure happened before any per-flow errorURL
+          // was recovered, so there is no login page to send anyone to that was
+          // chosen by this flow. Generic body, same as any other failed
+          // exchange.
           res.status(401).json({
             error: "invalid_request",
-            error_description: "This sign-in did not start in this browser",
+            error_description: "Federated sign-in failed",
           });
           return;
         }
