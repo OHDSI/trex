@@ -20,6 +20,7 @@ import { hashPassword, verifyPassword } from "./password.ts";
 import { nativePasswordLoginEnabled } from "./federation/config.ts";
 import { configuredFederationRedirectUri, ssoProviderSchema } from "./federation/sso-config.ts";
 import { resolveSsoUser } from "./federation/resolve-user.ts";
+import { accountTokenHooks } from "./federation/account-tokens.ts";
 
 /**
  * Where the engine answers. Every endpoint URL in the discovery document is
@@ -237,9 +238,17 @@ export const auth = betterAuth({
     // it leaves idToken in the clear, and every existing trexdb.account row
     // holds DEK ciphertext that its isLikelyEncrypted test would hand back as
     // plaintext. Stated rather than left to the default, because the default
-    // is the thing that would change under us. Task 6 seals these columns in
-    // database hooks instead.
+    // is the thing that would change under us. databaseHooks.account below
+    // seals these columns under trex's DEK instead.
     encryptOAuthTokens: false,
+  },
+  // The DEK envelope on accessToken, refreshToken and idToken. It lives here
+  // rather than in the option above for the reasons that option's comment
+  // gives; account-tokens.ts carries the rest of the argument. Both create and
+  // update, because a first sign-in creates the row and every later one
+  // updates it.
+  databaseHooks: {
+    account: accountTokenHooks,
   },
   // The provider plugin has no option for either of these and a Better Auth
   // plugin cannot reach them; oidc/hooks.ts carries the measurement for each.

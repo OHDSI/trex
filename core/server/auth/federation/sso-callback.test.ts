@@ -21,6 +21,7 @@ import { exportJWK, generateKeyPair, SignJWT } from "npm:jose";
 import { betterAuth } from "better-auth";
 import { resolveSsoUser } from "./resolve-user.ts";
 import { _resetRootKeyCache } from "../keys.ts";
+import { _setDekForTests, decryptWithDek } from "../dek.ts";
 
 const DATABASE_URL = Deno.env.get("DATABASE_URL");
 const VALID_ROOT = btoa(String.fromCharCode(...new Uint8Array(32).map((_, i) => i)));
@@ -42,6 +43,13 @@ async function loadModules() {
 }
 
 const loaded = DATABASE_URL ? await loadModules() : null;
+
+// Every sign-in below now writes through account-tokens.ts, which encrypts under
+// the DEK. initDek() is normally what fills it, at boot, from
+// trexdb.kek_wrapped_dek; this suite boots no server, so the cache is primed
+// here. Without it the callback fails rather than storing anything — which is
+// the intended behaviour and is pinned as a unit test, not here.
+_setDekForTests(new Uint8Array(32));
 
 function dbTest(name: string, fn: (l: NonNullable<typeof loaded>) => Promise<void>) {
   Deno.test({
@@ -424,6 +432,140 @@ dbTest("auto-provision still works where the mapped claim IS the address", async
   } finally {
     await cleanUp(l.pool, id);
     await l.pool.query(`DELETE FROM trexdb."user" WHERE email = $1`, [address]);
+    await up.close();
+  }
+});
+
+// ── The DEK envelope, on the row the callback actually wrote ───────────
+
+/** The three token columns exactly as Postgres holds them. */
+async function storedTokens(pool: Pg, providerId: string) {
+  const { rows } = await pool.query(
+    `SELECT "userId", "accountId", "providerId",
+            "accessToken", "refreshToken", "idToken"
+       FROM trexdb.account WHERE "providerId" = $1`,
+    [providerId],
+  );
+  return rows;
+}
+
+dbTest("a sign-in through an existing link stores the upstream tokens sealed", async (l) => {
+  // Measured before the hooks existed: accessToken held 'stub-access-token'
+  // verbatim and idToken a raw eyJ... JWT, both in clear text, because
+  // account.encryptOAuthTokens is false and nothing else stood in the way. The
+  // assertions are on the columns and on the round trip through trex's own
+  // decryptWithDek, not on the values the hook returned and not on whether the
+  // stored value merely *looks* encrypted — that last would be satisfied by any
+  // transformation at all, a wrong one included.
+  const id = slug();
+  const sub = `${id}-subject`;
+  const up = await startUpstream(() => ({ sub, username: "alice" }));
+  try {
+    await seedProvider(l, id, up.origin);
+    await l.pool.query(
+      `INSERT INTO trexdb."user" (id, name, email, "emailVerified", role, is_placeholder_email)
+       VALUES ($1,'Alice',$2,false,'user',true)`,
+      [sub, `${sub}@d2e.local`],
+    );
+    await l.pool.query(
+      `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId")
+       VALUES ($1,$2,$3,$4)`,
+      [crypto.randomUUID(), sub, sub, id],
+    );
+
+    const out = await signIn(engineTrusting(l.auth, up.origin), l.auth.options.baseURL, id);
+    assertEquals({ status: out.status, error: out.error }, { status: 302, error: null });
+
+    const rows = await storedTokens(l.pool, id);
+    assertEquals(rows.length, 1);
+    const row = rows[0];
+    // The binding is untouched. Had the hook returned any of these three,
+    // requireExactAccountBinding would have failed the sign-in above with
+    // account_hook_binding_conflict instead.
+    assertEquals(
+      { userId: row.userId, accountId: row.accountId, providerId: row.providerId },
+      { userId: sub, accountId: sub, providerId: id },
+    );
+    assertNotEquals(row.accessToken, "stub-access-token");
+    assertEquals(await decryptWithDek(row.accessToken), "stub-access-token");
+    assertNotEquals(row.idToken, null);
+    assertEquals((row.idToken as string).startsWith("eyJ"), false);
+    const idToken = await decryptWithDek(row.idToken);
+    assertEquals(idToken.split(".").length, 3);
+    assertEquals(JSON.parse(atob(idToken.split(".")[1])).sub, sub);
+    // The upstream issued no refresh token, and a sealed empty string would be
+    // a perfectly good ciphertext. NULL is what "there is no token" has to look
+    // like, because null-ness is the only thing any reader tests.
+    assertEquals(row.refreshToken, null);
+  } finally {
+    await cleanUp(l.pool, id);
+    await l.pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [sub]);
+    await up.close();
+  }
+});
+
+dbTest("a provisioned account's tokens are sealed on the create path too", async (l) => {
+  // The other of the two writes: an existing link goes through
+  // updateWithHooks, a first sign-in through createWithHooks, and a hook
+  // registered on only one of them would leave half the rows in the clear.
+  const id = slug();
+  const sub = `${id}-subject`;
+  const address = `${id}@allowed.test`;
+  const up = await startUpstream(() => ({ sub, email: address, email_verified: true }));
+  try {
+    await seedProvider(l, id, up.origin, {
+      auto_provision: true,
+      claim_map: { email: "email" },
+      email_domain_allowlist: ["allowed.test"],
+    });
+    const out = await signIn(engineTrusting(l.auth, up.origin), l.auth.options.baseURL, id);
+    assertEquals({ status: out.status, error: out.error }, { status: 302, error: null });
+
+    const rows = await storedTokens(l.pool, id);
+    assertEquals(rows.length, 1);
+    assertEquals(rows[0].accountId, sub);
+    assertNotEquals(rows[0].accessToken, "stub-access-token");
+    assertEquals(await decryptWithDek(rows[0].accessToken), "stub-access-token");
+    assertEquals(JSON.parse(atob((await decryptWithDek(rows[0].idToken)).split(".")[1])).sub, sub);
+  } finally {
+    await cleanUp(l.pool, id);
+    await l.pool.query(`DELETE FROM trexdb."user" WHERE email = $1`, [address]);
+    await up.close();
+  }
+});
+
+dbTest("what the callback stored comes back through the sanctioned reader", async (l) => {
+  // readAccountTokens is the only path allowed to touch these columns, and
+  // until now it only ever read rows upsertAccount had written. This is the
+  // seam the cutover moved: Better Auth writes, providers.ts reads.
+  const { readAccountTokens } = await import("./providers.ts");
+  const id = slug();
+  const sub = `${id}-subject`;
+  const up = await startUpstream(() => ({ sub, username: "alice" }));
+  try {
+    await seedProvider(l, id, up.origin);
+    await l.pool.query(
+      `INSERT INTO trexdb."user" (id, name, email, "emailVerified", role)
+       VALUES ($1,'Alice',$2,false,'user')`,
+      [sub, `${sub}@d2e.local`],
+    );
+    await l.pool.query(
+      `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId")
+       VALUES ($1,$2,$3,$4)`,
+      [crypto.randomUUID(), sub, sub, id],
+    );
+    const out = await signIn(engineTrusting(l.auth, up.origin), l.auth.options.baseURL, id);
+    assertEquals(out.error, null);
+
+    const tokens = await readAccountTokens(l.pool, id, sub);
+    assertNotEquals(tokens, null);
+    assertEquals(tokens!.userId, sub);
+    assertEquals(tokens!.accessToken, "stub-access-token");
+    assertEquals(tokens!.refreshToken, null);
+    assertEquals(JSON.parse(atob(tokens!.idToken!.split(".")[1])).sub, sub);
+  } finally {
+    await cleanUp(l.pool, id);
+    await l.pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [sub]);
     await up.close();
   }
 });
