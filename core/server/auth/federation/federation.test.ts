@@ -14,7 +14,7 @@ import {
   resolveFederatedUser,
   upsertAccount,
 } from "./providers.ts";
-import { callbackUri, refusalRedirect, safeRedirectTo } from "./request.ts";
+import { safeRedirectTo } from "./request.ts";
 import type { ExistingUser } from "./link.ts";
 import type { ProviderConfig, UpstreamIdentity } from "./types.ts";
 
@@ -730,7 +730,7 @@ Deno.test("an undecryptable stored token is surfaced, not silently reported abse
   }
 });
 
-// ── Federation RP routes (router.ts) ────────────────────────────────────────
+// ── Request shaping for the RP routes (request.ts) ──────────────────────────
 
 Deno.test("redirect_to accepts same-origin paths", () => {
   assertEquals(safeRedirectTo("/atlas/"), "/atlas/");
@@ -760,47 +760,6 @@ Deno.test("redirect_to rejects backslash and control-character smuggling", () =>
   assertEquals(safeRedirectTo("/\n/evil.test"), "/");
 });
 
-Deno.test("callback URI prefers explicit configuration over request headers", () => {
-  const req = { headers: { "x-forwarded-proto": "http", host: "internal:33001" } };
-  assertEquals(
-    callbackUri(req, "/trex", "https://trex.example/trex/auth/v1/callback"),
-    "https://trex.example/trex/auth/v1/callback",
-  );
-});
-
-Deno.test("callback URI falls back to the forwarded origin", () => {
-  assertEquals(
-    callbackUri(
-      { headers: { "x-forwarded-proto": "https, http", "x-forwarded-host": "trex.test" } },
-      "/trex",
-      // Explicit rather than omitted: the parameter default reads
-      // TREX_FEDERATION_REDIRECT_URI, so leaving it out makes this test pass or
-      // fail depending on the developer's environment.
-      "",
-    ),
-    "https://trex.test/trex/auth/v1/callback",
-  );
-  assertEquals(
-    callbackUri({ headers: { host: "trex.test" } }, "", ""),
-    "https://trex.test/auth/v1/callback",
-  );
-  // A plain-HTTP deployment with no proxy header must not claim https: the
-  // provider would reject a redirect_uri it never registered.
-  assertEquals(
-    callbackUri({ protocol: "http", headers: { host: "localhost:33001" } }, "/trex", ""),
-    "http://localhost:33001/trex/auth/v1/callback",
-  );
-  // A proxy header still wins over the connection's own protocol.
-  assertEquals(
-    callbackUri(
-      { protocol: "http", headers: { "x-forwarded-proto": "https", host: "trex.test" } },
-      "/trex",
-      "",
-    ),
-    "https://trex.test/trex/auth/v1/callback",
-  );
-});
-
 Deno.test("loadProviders maps authorization_endpoint, absent meaning null", async () => {
   const row = (over: Record<string, unknown>) => ({
     id: "logto", displayName: "Logto", clientId: "c", clientSecret: "s",
@@ -814,28 +773,6 @@ Deno.test("loadProviders maps authorization_endpoint, absent meaning null", asyn
   assertEquals((await load({ authorization_endpoint: "https://d2e.test/oidc/auth" })).authorizationEndpoint,
     "https://d2e.test/oidc/auth");
   assertEquals((await load({})).authorizationEndpoint, null);
-});
-
-Deno.test("refusalRedirect sends the browser to the login page with the code and return path", () => {
-  const url = new URL(refusalRedirect("https://d2e.test/d2e-login/", "no_account", "/trex/oidc/authorize?x=1")!);
-  assertEquals(url.origin + url.pathname, "https://d2e.test/d2e-login/");
-  assertEquals(url.searchParams.get("error"), "no_account");
-  assertEquals(url.searchParams.get("return_to"), "/trex/oidc/authorize?x=1");
-});
-
-Deno.test("refusalRedirect keeps a login URL's own query parameters", () => {
-  const url = new URL(refusalRedirect("https://d2e.test/login?theme=dark", "account_disabled", "/")!);
-  assertEquals(url.searchParams.get("theme"), "dark");
-  assertEquals(url.searchParams.get("error"), "account_disabled");
-});
-
-Deno.test("refusalRedirect never forwards an off-site return path", () => {
-  const url = new URL(refusalRedirect("https://d2e.test/d2e-login/", "no_account", "//evil.test/")!);
-  assertEquals(url.searchParams.get("return_to"), "/");
-});
-
-Deno.test("refusalRedirect is null without a login URL, so callers keep the JSON response", () => {
-  assertEquals(refusalRedirect(null, "no_account", "/"), null);
 });
 
 // ── Placeholder addresses (providers.ts) ─────────────────────────────────────

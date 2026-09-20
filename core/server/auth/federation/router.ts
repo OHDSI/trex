@@ -43,11 +43,11 @@ import { createTokenResponse } from "../auth-router.ts";
 import { loginUrl } from "../oidc/config.ts";
 import { federationEnabled } from "./flags.ts";
 import { federationRedirectUri } from "./sso-config.ts";
-import { callbackUri, refusalRedirect, safeErrorCode, safeRedirectTo } from "./request.ts";
+import { safeErrorCode, safeRedirectTo } from "./request.ts";
 
 // Re-exported so these read as one unit from outside; request.ts exists only to
 // keep express out of the unit tests' module graph.
-export { callbackUri, refusalRedirect, safeErrorCode, safeRedirectTo };
+export { safeErrorCode, safeRedirectTo };
 
 // deno-lint-ignore no-explicit-any
 type Req = any;
@@ -59,7 +59,7 @@ type Res = any;
  * login page, and the one thing /callback needs in order to tell a refusal it
  * must render as JSON from one it must redirect.
  *
- * refusalRedirect answers `null` without a login URL, and the pre-cutover
+ * The pre-cutover refusalRedirect answered `null` without a login URL, and the
  * callback then replied with a JSON body rather than redirecting. The plugin
  * has no such mode — it always appends `?error=` to a URL and redirects — so
  * the JSON refusal is reproduced by pointing it at a path that is mounted
@@ -180,8 +180,9 @@ export function registerFederationRoutes(
       // The plugin appends ?error=<code> (and error_description) to
       // errorCallbackURL on every refusal (@better-auth/sso
       // dist/index.mjs:3804-3810), so the return path is put on it here. That
-      // reproduces refusalRedirect's output — the login URL, its own query
-      // parameters kept, plus error and return_to — without a second redirect.
+      // reproduces the deleted refusalRedirect's output — the login URL, its
+      // own query parameters kept, plus error and return_to — without a second
+      // redirect.
       const login = loginUrl();
       const errorCallbackURL = new URL(login ?? `${origin}${REFUSAL_SENTINEL_PATH}`);
       errorCallbackURL.searchParams.set("return_to", returnTo);
@@ -268,7 +269,7 @@ export function registerFederationRoutes(
         if (landing.pathname === REFUSAL_SENTINEL_PATH) {
           // No login page is configured, so there is nothing to redirect to
           // that could explain this. Same envelope the pre-cutover route used
-          // when refusalRedirect returned null.
+          // when refusalRedirect returned null (request.ts, deleted in Task 10).
           res.status(403).json({
             error: "access_denied",
             error_description: safeErrorCode(refusal),
@@ -291,7 +292,7 @@ export function registerFederationRoutes(
         // it is the upstream that declined (dist/index.mjs:3807), and the
         // plugin appends both verbatim. Neither is trex's to put on its own
         // login page: refusalRedirect set a bounded `error` and no description
-        // at all, and that is what is rebuilt here. A trex or plugin code is a
+        // at all, and that is what is rebuilt here now that it is gone. A trex or plugin code is a
         // bounded token already and passes through unchanged.
         landing.searchParams.set("error", safeErrorCode(refusal));
         landing.searchParams.delete("error_description");

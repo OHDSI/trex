@@ -1,15 +1,28 @@
 // Request-shaping helpers for the relying-party routes: where a browser may be
-// sent back to, what redirect_uri the upstream sees, and how a refusal reaches
-// the login page.
+// sent back to, and what an upstream's own error code is allowed to say.
 //
 // The state helpers that used to live here are gone with state.ts: single use,
 // expiry and the browser binding are @better-auth/sso's now (see router.ts).
+//
+// Two more went at the cutover:
+//
+//  - callbackUri derived the redirect_uri from the request when
+//    TREX_FEDERATION_REDIRECT_URI was unset. The plugin takes one fixed value
+//    at construction and has no request to derive anything from, so the
+//    configured half is sso-config.ts's federationRedirectUri and the header
+//    fallback is gone: a federating deployment must now state the variable.
+//    environment.md says so and federationRedirectUri throws naming it.
+//  - refusalRedirect built the login-page URL a refusal landed on. router.ts
+//    builds the same URL one hop earlier as the plugin's errorCallbackURL —
+//    same login URL, same kept query, same safeRedirectTo'd return_to — and
+//    reproduces the null-login-URL JSON body through REFUSAL_SENTINEL_PATH.
+//    router.test.ts drives all four cases over HTTP.
 //
 // Separate from router.ts, which imports express, because express drags in
 // @types/node and this deployment's node_modules does not declare it — a test
 // that imported router.ts would fail to type-check before running a single
 // assertion. These are pure functions of their input either way, which is how
-// the rest of federation/ is organised (see config.ts).
+// the rest of federation/ is organised (see flags.ts).
 
 /**
  * Only same-origin paths are honoured: an absolute URL here would turn the
@@ -34,59 +47,10 @@ export function safeRedirectTo(raw: string | undefined): string {
 }
 
 /**
- * The redirect_uri the upstream sees, which must be byte-identical in the
- * authorization request and in the token exchange or the provider rejects the
- * code.
- *
- * Configuration wins over the request, for the same reason the OIDC provider
- * derives its issuer from `TREX_OIDC_ISSUER` rather than from Host: a proxied
- * or spoofed `X-Forwarded-Host` would otherwise vary the value per caller. The
- * header fallback keeps a single-host deployment working with no extra
- * configuration; anything behind a proxy it does not control should set
- * `TREX_FEDERATION_REDIRECT_URI` to the URI registered at the provider.
- */
-export function callbackUri(
-  // deno-lint-ignore no-explicit-any
-  req: any,
-  basePath: string,
-  configured: string | undefined = Deno.env.get("TREX_FEDERATION_REDIRECT_URI"),
-): string {
-  if (configured && configured.length > 0) return configured;
-  // Either header can arrive repeated or as a list ("https, http"); the first
-  // entry is what the outermost proxy saw, i.e. what the browser used.
-  const first = (v: unknown): string | undefined => {
-    const s = Array.isArray(v) ? v[0] : v;
-    return typeof s === "string" ? s.split(",")[0].trim() : undefined;
-  };
-  // req.protocol before the "https" default: on a plain-HTTP deployment with no
-  // proxy header, defaulting to https produces a redirect_uri the provider has
-  // not registered and the sign-in fails with nothing to point at. Express
-  // derives req.protocol from the connection, and from X-Forwarded-Proto itself
-  // once `trust proxy` is set.
-  const proto = first(req.headers["x-forwarded-proto"]) ?? first(req.protocol) ?? "https";
-  const host = first(req.headers["x-forwarded-host"]) ?? first(req.headers.host);
-  return `${proto}://${host}${basePath}/auth/v1/callback`;
-}
-
-/**
  * An upstream error code, echoed back only when it is a bounded token. The
  * provider chooses this text, and it lands in a JSON body a browser renders.
  */
 export function safeErrorCode(raw: unknown): string {
   const s = Array.isArray(raw) ? raw[0] : raw;
   return typeof s === "string" && /^[a-z_]{1,64}$/.test(s) ? s : "upstream_error";
-}
-
-/**
- * Where a refused federated sign-in sends the browser: back to the deployment's
- * login page, which can explain the refusal, instead of a bare JSON body. The
- * code is one of trex's fixed refusal strings; the return path goes through
- * safeRedirectTo so the login page cannot be used to leave the origin.
- */
-export function refusalRedirect(login: string | null, code: string, redirectTo: string): string | null {
-  if (!login) return null;
-  const url = new URL(login);
-  url.searchParams.set("error", code);
-  url.searchParams.set("return_to", safeRedirectTo(redirectTo));
-  return url.toString();
 }
