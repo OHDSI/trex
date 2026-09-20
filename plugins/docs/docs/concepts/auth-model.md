@@ -37,8 +37,9 @@ through the engine now, and the JWT the caller receives is still minted by
 
 The practical consequence for an operator: the session cookie Better Auth sets
 alongside the JWT is not decoration. It is what the OIDC provider
-(`/trex/auth/v1/oauth2/authorize`) authenticates against, and it is signed with
-the `trex.better-auth.engine.v1` subkey rather than the JWT signing key.
+(`/trex/oidc/oauth2/authorize`, see [The OIDC Provider](#the-oidc-provider))
+authenticates against, and it is signed with the `trex.better-auth.engine.v1`
+subkey rather than the JWT signing key.
 
 ## Two Identity Surfaces
 
@@ -157,6 +158,163 @@ Refresh tokens themselves are opaque random strings, hashed at rest. Rotation
 is mandatory — using a refresh token marks it `revoked = true` and issues a new
 one in the same session.
 
+## The OIDC Provider
+
+Trex is also an OpenID Connect provider. Everything above is how *trex* knows
+who you are; this is how trex tells *another application* who you are — D2E's
+WebAPI and Atlas3, and D2E's own portal, all sign in against it.
+
+The provider is **`@better-auth/oauth-provider`**, a Better Auth plugin mounted
+on the same engine instance as everything else (`core/server/auth/oidc/`).
+There is no hand-rolled authorization server any more.
+
+### Endpoints
+
+| path | what it is |
+|---|---|
+| `/trex/oidc/.well-known/openid-configuration` | discovery document — **unmoved** |
+| `/trex/oidc/.well-known/jwks.json` | signing keys — **unmoved** |
+| `/trex/oidc/oauth2/authorize` | authorization endpoint |
+| `/trex/oidc/oauth2/token` | token endpoint |
+| `/trex/oidc/oauth2/userinfo` | UserInfo |
+| `/trex/oidc/oauth2/end-session` | RP-initiated logout |
+| `/trex/oidc/oauth2/introspect`, `/trex/oidc/oauth2/revoke` | served; trex ships no consumer for either |
+
+Anything outside `/oauth2/` and `/.well-known/` under this mount is `404` — the
+engine's own `/sign-in/email`, `/get-session` and the plugin's
+`/admin/oauth2/*` client administration included. Credentials and sessions
+belong to `/trex/auth/v1`, which has trex's error codes and trex's `requireAdmin`
+in front of them.
+
+**The four protocol endpoints moved, and they were not aliased back.** The
+plugin hard-codes its own route paths and builds the discovery document from
+them; neither is an option you can set. Serving the old paths would therefore
+mean hand-writing a discovery document that disagreed with the routes the plugin
+actually answers on — which is exactly the custom code the plugin was adopted to
+delete. So the relying parties were reconfigured instead, and **anything still
+calling `/trex/oidc/authorize`, `/trex/oidc/token` or `/trex/oidc/session/end`
+gets a 404 the moment this version starts.** The issuer, the two `.well-known`
+paths, `RS256` and the `roles` claim name are all unchanged, so a relying party
+that reads its configuration from discovery needs no change at all.
+
+D2E pins the served document byte-for-byte in CI
+(`tests/golden/trex-oidc-discovery.json`), because endpoint or issuer drift
+breaks WebAPI at startup and Atlas3 at sign-in with nothing in either log that
+names the cause.
+
+### Three fail-closed defaults
+
+Each of these is silence rather than an error message, so they are worth
+knowing before you meet one:
+
+- **No refresh token unless `offline_access` was granted.** The plugin issues
+  one only when that scope is in the granted set; trex's previous provider
+  issued one unconditionally. A client whose `scopes` column omits it loses
+  silent renewal, and nothing says so. `TREX_OIDC_CLIENT_SCOPES` therefore adds
+  `openid` and `offline_access` to whatever you configure.
+- **No `client_credentials` unless the client row has `clientCredentialsScopes`.**
+  An empty list is how the plugin spells "this client may not use the grant",
+  and the refusal names the scopes, not the grant.
+- **No `/oauth2/end-session` unless the client row has `enable_end_session`.**
+  A row written without it gets `invalid_client`, "The client is not allowed to
+  initiate logout". The seeder sets it; a client registered by hand must too.
+
+### One client row, one token-endpoint auth method
+
+The seeded client (`TREX_OIDC_CLIENT_*`) is registered
+**`client_secret_basic`** with **`requirePKCE: false`**. Both values are
+forced by the same relying party: Spring Security — WebAPI's OIDC client, and
+therefore Atlas3's, since Atlas3 reaches the provider only *through* WebAPI —
+sends no `code_challenge` at all and presents its secret in an `Authorization`
+header. Against a row demanding PKCE every WebAPI sign-in is refused at
+`/authorize`; against a `client_secret_post` row the exchange is a bare `401`.
+
+`requirePKCE: false` restores trex's posture from before the cutover, where a
+challenge was demanded of public clients only. **It does not stop a supplied
+challenge being checked.** `/authorize` still rejects a malformed or non-S256
+challenge and still binds a well-formed one to the code, and `/oauth2/token`
+still refuses the exchange when a challenge was used and the verifier is wrong
+(`401`, "code verification failed") or missing. The column decides only whether
+a challenge is *demanded*. So D2E's portal, which does send PKCE, keeps its
+stolen-code protection in full, and public clients
+(`tokenEndpointAuthMethod: "none"`) are still held to PKCE regardless of the
+column.
+
+**The consequence to plan around: one row can answer for exactly one
+token-endpoint authentication method.** A request that presents its credentials
+the other way is refused outright — "client registered for client_secret_basic
+cannot use client_secret_post". A future relying party that can only do
+`client_secret_post` needs a **second client row**, not a change to this one.
+
+### Rate limits
+
+Two independent budgets sit in front of the provider.
+
+1. **Better Auth's own limiter**, `TREX_OIDC_RATE_LIMIT_MAX` (default 600 per
+   900 s), applied per path to `/oauth2/{token,authorize,userinfo,introspect,revoke}`.
+   The plugin's own defaults — 20/60 s on `/token`, 30/60 s on `/authorize` —
+   are deliberately replaced; they would cap a whole deployment at roughly
+   twenty sign-ins a minute.
+2. **A failure-keyed budget in front of `/oauth2/userinfo`**,
+   `TREX_OIDC_USERINFO_FAILURE_MAX` (default 60 per 900 s), charged only when
+   the endpoint *refuses* a caller. It exists because `/oauth2/userinfo` is on
+   the critical path of every WebAPI sign-in, and Better Auth's limiter keys on
+   `<ip>|<path>` with no hook to change the key — so without it, a flood of
+   rejected requests and a real sign-in share one counter and the flood denies
+   sign-in to everybody. A refusal never reaches Better Auth's counter, and a
+   successful call is never charged. `5xx` is not charged either: nobody is
+   locked out for trex's own outage.
+
+**These are per client IP only because trex normalises `X-Forwarded-For` on the
+way in.** Better Auth resolves the client address from headers alone, and its
+`isValidIP` rejects a `host:port` token — which is exactly what Caddy's
+`{remote}` placeholder produces. Every caller then lands in one bucket. Trex
+strips the port in `oidc/mount.ts` before the engine reads the header (`[v6]:port`
+and a `v4:port` with exactly one colon; a bare IPv6 address is left alone,
+because `2001:db8::1` and `2001:db8::1:443` cannot be told apart), and D2E's
+gateway now sends `{remote_host}`. Set `TREX_TRUSTED_PROXIES` if your own
+gateway appends to a multi-token header.
+
+Where no client address can be resolved at all, the budgets are shared — which
+is why the *failure* budget exists: the shared bucket an attacker can exhaust is
+then the one no legitimate sign-in draws on.
+
+### What the provider does not give you
+
+- **`/oauth2/userinfo` emits no `roles`.** It returns exactly
+  `{sub, name, email, email_verified, trex_role}`. The id_token and the access
+  token both carry `roles` (and `app_metadata`); the UserInfo document does not,
+  and did not before the cutover either. Anything resolving roles from UserInfo
+  alone sees none. WebAPI is fine because Spring merges the id_token's claims
+  with UserInfo's into one `OidcUser`.
+- **`backchannel_logout_supported: true` is advertised and cannot be delivered.**
+  The plugin implements Back-Channel Logout properly — it signs a Logout Token
+  per affected client on session deletion and POSTs it to that client's
+  registered `backchannel_logout_uri` — but only for a client that *has* one,
+  and no trex client can: the seeder writes no such URI and reads no environment
+  variable for one, dynamic client registration is off, and client
+  administration over HTTP is refused. The flag cannot be turned off either: the
+  plugin derives it from `!disableJwtPlugin`, and disabling the JWT plugin would
+  drop `jwks_uri` and move signing off `RS256`. **Treat the flag as false, and
+  do not build a relying party that waits for a Logout Token.**
+- **RP-initiated logout with an `id_token_hint` does not complete on a
+  `localhost` stack.** The cause is a bug in the plugin: `verifyLogoutHint`
+  fetches its own JWKS over HTTP from the *public* issuer
+  (`dist/authorize-riRRCSbC.mjs:547`), where its two sibling call sites pass a
+  local function and never leave the process. On a stack whose public name is
+  `localhost`, that request cannot leave the container — glibc special-cases the
+  name (RFC 6761), so no `extra_hosts` entry can point it at the gateway — and
+  the hint is judged invalid. The failure is made **visible** rather than
+  silent: trex re-verifies the hint against its own key set and, when the hint
+  is genuine, adds an `X-Trex-Logout-Hint: rejected; local-verification=…`
+  header and a banner to the confirmation page. On a **real FQDN** the name
+  resolves and the only remaining risk is certificate trust, which
+  `TLS__EXTRA__CA_CRTS` fixes by carrying the gateway's root into the trex
+  image's trust store. Do **not** try to fix this with the jwt plugin's
+  `jwks.remoteUrl`: setting it publishes that internal address as `jwks_uri` to
+  every relying party *and* makes trex's own JWKS route answer `404`, breaking
+  sign-in to fix logout.
+
 ## SSO
 
 The `/auth/v1/settings` endpoint reports which SSO providers are enabled. For
@@ -235,6 +393,16 @@ rows, leaving every one of them claimable by another upstream asserting its
 address.
 
 `PUT /user` clears the flag when a real address is set.
+
+**What a placeholder costs at the OIDC provider: nothing, measured.** Such a row
+carries `emailVerified = false`, and the `email_verified` claim tracks that
+column faithfully in the id_token, the access token and `/oauth2/userinfo`
+alike. The migration rehearsal that produced the 66-of-69 figure above left that
+open as a risk to the relying parties; the cutover rehearsal closed it. Every
+sign-in in it ran with `emailVerified = false` — WebAPI authenticated, Atlas3
+loaded and redeemed its token, the portal's own API calls answered 200 — so
+**neither WebAPI nor Atlas3 reads the claim.** That is a measurement of these
+relying parties, not a guarantee about one that was not in the stack.
 
 ## API Keys for MCP & CLI
 

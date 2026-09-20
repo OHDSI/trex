@@ -144,10 +144,31 @@ under `/oauth2` (`authorize`, `token`, `userinfo`, `end-session`).
 exist** anywhere in the d2e checkout, either worktree, or the trex tree. The
 document was checked field-by-field against `discovery.test.ts` instead.
 
+> **Closed in Task 14**, and the path in the brief was wrong twice over:
+> `docs/superpowers/` is gitignored in d2e (`.gitignore:87`), so a golden file
+> there could never have been checked out by CI. The document this stack serves
+> is now pinned at `tests/golden/trex-oidc-discovery.json` with the gateway
+> origin normalised to `{{ISSUER_ORIGIN}}`, and diffed by
+> `.github/workflows/_test-http-duckdb.yml`.
+
 Two fields present that no task mentions and that a relying party may act on:
 `backchannel_logout_supported: true` and `backchannel_logout_session_supported: true`.
-Nothing in trex implements a back-channel logout; the provider advertises the
-capability because the plugin does.
+
+> **Corrected in Task 14, from the package.** The plugin does implement
+> Back-Channel Logout — a `session.delete` hook plans it, signs one Logout Token
+> per affected client and POSTs it to that client's `backchannel_logout_uri`
+> (`dist/authorize-riRRCSbC.mjs:231-360`, `:4418-4443`). What is missing is any
+> way for a trex client to *have* such a URI: `seed-client.ts` writes none and
+> reads no environment variable for one, dynamic client registration is off, and
+> `clientPrivileges: () => false` refuses every administration call. So the
+> capability is advertised and unreachable, and it cannot be un-advertised:
+> both flags come from `backchannelSupported = !overrides?.jwt_disabled`
+> (`:689`), `advertisedMetadata` accepts only `scopes_supported` and
+> `claims_supported` (`dist/oauth-1Ud-hvZY.d.mts:1738`), and an extension's
+> `metadata()` contribution is merged with `if (!(key in next))`
+> (`dist/utils-CWjOhEQb.mjs:197`) so it can add a key but never correct one.
+> Pinned as served, with the gap recorded in `tests/golden/README.md` and in
+> `plugins/docs/docs/concepts/auth-model.md`.
 
 **Step 3 (key imported, not minted) could not be exercised.**
 `trexdb.oidc_signing_key` has **0 rows** on a fresh install, so there was nothing
@@ -700,7 +721,7 @@ corrected.
 | step | disposition |
 |---|---|
 | **1 — bring up a local stack on the new image** | **Done**, but not by the brief's commands: `npm run build -- -s trex` builds no trex code at all (§0). The stack runs `d2e-trex:phase2-local`, built on a `trexsql:phase2-local` overlay of this branch's `core/`. |
-| **2 — diff the discovery document** | **Partly.** Served and checked field by field against `discovery.test.ts` (§2). The diff *as written* is impossible: `docs/superpowers/golden/trex-oidc-discovery.json` does not exist, and macOS `curl` cannot complete a TLS handshake with this gateway at all. |
+| **2 — diff the discovery document** | **Partly.** Served and checked field by field against `discovery.test.ts` (§2). The diff *as written* is impossible: `docs/superpowers/golden/trex-oidc-discovery.json` does not exist, and macOS `curl` cannot complete a TLS handshake with this gateway at all. **Completed in Task 14** at `tests/golden/trex-oidc-discovery.json`, captured from inside the container to get past the macOS TLS problem. |
 | **3 — signing key imported, not minted** | **NOT RUN.** `trexdb.oidc_signing_key` is empty on a fresh install, so there is nothing to import (§2). Needs a database that ran the old provider. |
 | **4 — sign in through WebAPI end to end** | **Done, and it fails.** Two independent blockers (§5), the client authentication method settled (`client_secret_basic`), the roles question settled (`/userinfo` is on the critical path and carries no `roles`, §6), and the logout question settled — and the brief's reading of the confirmation page is wrong (§8). |
 | **5 — sign in through the portal end to end** | **Done.** JWT access token, `roles` populated, silent renewal with refresh rotation and replay refusal — and every portal API call 401ing until `TREX_OIDC_INTERNAL_BASE` was set (§13, §13a). |
@@ -1006,3 +1027,65 @@ token. @better-auth/oauth-provider resolves the key set over HTTP from the publi
 §8's finding — "byte-identical to the no-hint page" — is closed. The Confirm
 button is left working, because taking it away to make the point would stop the
 user logging out at all.
+
+---
+
+# Releasing this phase — three artifacts, and an order
+
+§0 found this and no task wrote it down where a releaser would see it. It is not
+a finding about the rehearsal; it is the release procedure.
+
+## Three artifacts, not two
+
+1. **The d2e branch** (`p-hoffmann/logto-federation-migration`) — the relying
+   parties' configuration, the sign-in page, the Caddy header fix, the
+   discovery golden file.
+2. **A published `ghcr.io/ohdsi/trexsql` image built from this trex branch.**
+3. **A `TREXSQL_REF` bump in d2e, in *both* places that pin it:**
+   `services/trex/Dockerfile.v2` (the `ARG` default, lean/prod) **and**
+   `docker-compose-local.yml` (devx). Today they pin two *different* refs, both
+   ancestors of this branch.
+
+The third is the one that gets missed, because `npm run build -- -s trex` reads
+like it builds trex and does not. It builds d2e's own thin layer, which is
+`FROM ghcr.io/ohdsi/trexsql:${TREXSQL_REF}` and explicitly does not vendor the
+core:
+
+> NOTE: the core (main + event, with D2E_COMPAT) is NOT vendored — it is provided
+> by the base trexsql image at /usr/src/core (index.eszip already bundled there).
+
+So a d2e branch merged on its own changes no trex code at all, and a `trex`
+branch merged on its own reaches no d2e stack. Only the published image plus the
+bumped pin does.
+
+## The order: the trex image first, always
+
+**d2e must not deploy ahead of the trex image.** The sign-in page
+(`plugins/atlas/d2e-login/providers.js`) decides where to send the browser after
+sign-in by looking for the `sig` parameter of the provider's signed
+authorization request, and returns its `/atlas/` fallback when there is none.
+Pre-Phase-2 trex does not send one — it sends `return_to` — so a d2e-first
+deploy signs users in and then drops them on `/atlas/` with the authorization
+request thrown away. The reverse order is safe: a new trex against an old d2e
+keeps working, because the old page ignores the extra parameters.
+
+The same ordering is checked mechanically. d2e CI diffs the served discovery
+document against `tests/golden/trex-oidc-discovery.json`, and a pre-Phase-2 trex
+serves the old endpoints — so a d2e change that lands ahead of its trex image
+fails in CI rather than at a user's sign-in.
+
+## The rest of the checklist
+
+- The old paths `/trex/oidc/authorize`, `/trex/oidc/token` and
+  `/trex/oidc/session/end` return **404** from the moment the new image starts
+  (§15). Anything still calling them — including `scripts/lib/idp-login.cjs`,
+  fixed in this rehearsal's d2e commit — breaks at the cutover, not gradually.
+- `develop.d2e.sg`'s `ENV_YML` secret is a change to a shared deployed
+  environment and is **not** made by this work. It is still owed.
+- On a deployment whose gateway serves an internal certificate, put Caddy's root
+  into `TLS__EXTRA__CA_CRTS` so RP-initiated logout with an `id_token_hint`
+  completes (§21). On a `localhost` stack it cannot be made to work at all, and
+  the failure is now visible rather than silent.
+- Recovery is a database snapshot restore. `oidc_signing_key`, `oidc_client` and
+  `oidc_authorization_code` are deliberately left in place so rolling back to
+  the previous image stays a live option.
