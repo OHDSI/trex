@@ -385,3 +385,96 @@ installation (600 WebAPI sign-ins every 15 minutes) and **not comfortable at all
 as an availability property**, because the budget is not per client. Either set
 `TREX_TRUSTED_PROXIES` to the gateway's real range so the bucket is per client
 IP, or accept that any anonymous caller can deny sign-in to everyone.
+
+## 8. RP-initiated logout with an `id_token_hint` does NOT complete
+
+Ran with **`TLS__CADDY_DIRECTIVE=tls internal`** — which is what `d2e init`
+writes and the only value a local stack gets. A freshly minted `id_token`
+carrying a `sid` (`sid: UMlI8eAB4cfd2dtzF2IQ8oOUTLziQr0l`), presented as
+`id_token_hint` together with a registered `post_logout_redirect_uri`
+(`https://localhost:41100/atlas/`, which **is** in the client's
+`postLogoutRedirectUris`):
+
+| request style | result |
+|---|---|
+| browser navigation | **200, an HTML "Confirm logout" page**, no `Location` |
+| `Accept: application/json` | **401 `{"error":"invalid_token","error_description":"The id_token_hint is invalid"}`** |
+| **no hint at all**, browser | **the same HTML "Confirm logout" page** |
+
+So the prediction holds: on a local stack, logout-with-hint answers 401, and to
+a browser it is **indistinguishable from a genuine refusal** — byte-identical to
+the no-hint page.
+
+**The brief's Step 4 draws the wrong conclusion from that page.** It says "A
+confirmation page means the client's `id_token_hint` is not reaching the
+endpoint, and the fix is on the WebAPI side, not in trex." The JSON variant
+proves the hint *did* reach the endpoint and was *judged invalid*. The fix is
+not on the WebAPI side.
+
+### Why, and it is not the certificate first
+
+`verifyLogoutHint` fetches `<issuer>/.well-known/jwks.json` — here
+`https://localhost:41100/trex/oidc/.well-known/jwks.json` — **from inside the
+trex container**, and that request never gets as far as a certificate:
+
+```
+# inside d2e-trex
+curl https://localhost:41100/trex/oidc/.well-known/jwks.json
+*   Trying [::1]:41100...      connect to ::1 port 41100: Connection refused
+*   Trying 127.0.0.1:41100...  connect to 127.0.0.1 port 41100: Connection refused
+```
+
+**`extra_hosts: "${CADDY__D2E__PUBLIC_FQDN:-localhost}:host-gateway"` cannot
+work when the FQDN is `localhost`.** The entry is injected — `/etc/hosts` really
+does gain `192.168.65.254 localhost` — but `127.0.0.1 localhost` is already
+there above it, and even after rewriting `/etc/hosts` so that the gateway entry
+is the **only** `localhost` line, glibc still resolved it to `::1`/`127.0.0.1`:
+`localhost` is special-cased in `getaddrinfo` (RFC 6761) and cannot be pointed
+anywhere else. So on every default local install the host-gateway route is a
+no-op for the one name it exists to serve.
+
+## 9. Question 4, both halves, measured
+
+**(a) The trex image's OS trust store does carry the public root set.** Verified
+with full certificate validation from inside `d2e-trex`:
+`https://www.google.com` → 200, `https://community.letsencrypt.org` → 200 (a
+Let's Encrypt chain, which is the case that matters for the blank
+`TLS__CADDY_DIRECTIVE` deployment), `https://deno.land` → 301.
+`/etc/ssl/certs/ca-certificates.crt` is 3 715 lines, and
+`/usr/local/share/ca-certificates/` holds exactly one added file,
+`d2e-internal-ca.crt` — Caddy's local root is **not** there, as Task 12 said.
+
+**(b) The `extra_hosts` host-gateway route does reach Caddy on `CADDY_PORT` —
+by address, never by the name.** From inside `d2e-trex`:
+
+```
+curl --resolve localhost:41100:192.168.65.254 https://localhost:41100/trex/oidc/.well-known/jwks.json
+  before installing Caddy's root: 000  [SSL certificate problem: unable to get local issuer certificate]
+  after  installing Caddy's root: 200  []
+curl https://localhost:41100/trex/oidc/.well-known/jwks.json     (by name)
+  000  [Failed to connect … Connection refused]
+```
+
+That is both halves of the operational fix in one measurement:
+
+- **The CA half works.** Copying `/data/caddy/pki/authorities/local/root.crt`
+  out of `d2e-caddy` into `/usr/local/share/ca-certificates/` and running
+  `update-ca-certificates` turns "unable to get local issuer certificate" into a
+  200. So `TLS__EXTRA__CA_CRTS` is the right channel and it does what Task 12
+  says it does.
+- **The CA half is not sufficient on a local stack**, because the name never
+  resolves to the gateway. Re-running the logout test after installing the root
+  produced the identical 401 / confirmation page.
+
+Where the public FQDN is a real name (`develop.d2e.sg`), `extra_hosts` does
+apply and the certificate becomes the only question — so there the
+`TLS__EXTRA__CA_CRTS` fix is expected to be sufficient. That case was **not
+rehearsed**; only the local one was, and locally it is unfixable by configuration.
+
+**A trex-side fix exists and is not wired:** `better-auth.ts:165-169` sets
+`jwt({ jwks: { jwksPath: "/.well-known/jwks.json" } })` and no `jwks.remoteUrl`.
+The jwt plugin's `remoteUrl` is precisely what `verifyLogoutHint` prefers
+(`jwks.remoteUrl ?? ${baseURL}${jwksPath}`), so pointing it at the container-local
+address (`http://${PROJECT_NAME}-trex:33001/trex/oidc/.well-known/jwks.json`)
+would make the hint verifiable without any certificate or DNS at all. Worth
+checking whether it also rewrites the advertised `jwks_uri` before adopting it.
