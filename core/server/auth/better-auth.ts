@@ -21,6 +21,7 @@ import { nativePasswordLoginEnabled } from "./federation/config.ts";
 import { configuredFederationRedirectUri, ssoProviderSchema } from "./federation/sso-config.ts";
 import { resolveSsoUser } from "./federation/resolve-user.ts";
 import { accountTokenHooks } from "./federation/account-tokens.ts";
+import { provisionSsoUser } from "./federation/provision.ts";
 
 /**
  * Where the engine answers. Every endpoint URL in the discovery document is
@@ -231,6 +232,19 @@ export const auth = betterAuth({
       // the plugin offers over create, and without it a session holder could
       // insert a provider row trex's own id constraint would then reject.
       providersLimit: 0,
+      // The idp block and last_sign_in_at. The plugin has no hook that can
+      // write them from inside the sign-in transaction — resolveUser cannot
+      // write at all, and mounting it turns deferNonDatabaseWrites on — so
+      // this runs after the commit and before the session cookie is set.
+      // Without it groups_source and groups_claim are columns read by nothing
+      // and an installation that configured group mapping gets no groups and
+      // no error.
+      provisionUser: provisionSsoUser,
+      // The groups an upstream asserts change between sign-ins, and the idp
+      // block must describe the current one. Without this it would be written
+      // once, at registration, and then be wrong forever — and never written
+      // at all for the migrated users, who are all already registered.
+      provisionUserOnEveryLogin: true,
     }),
   ],
   account: {

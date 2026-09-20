@@ -20,6 +20,7 @@ import { assertEquals, assertNotEquals, assertStringIncludes } from "jsr:@std/as
 import { exportJWK, generateKeyPair, SignJWT } from "npm:jose";
 import { betterAuth } from "better-auth";
 import { resolveSsoUser } from "./resolve-user.ts";
+import { provisionSsoUser } from "./provision.ts";
 import { _resetRootKeyCache } from "../keys.ts";
 import { _setDekForTests, decryptWithDek } from "../dek.ts";
 
@@ -70,14 +71,24 @@ interface Upstream {
 
 /**
  * An OIDC provider with exactly the four fields REQUIRED_DISCOVERY_FIELDS names
- * and nothing more.
+ * and nothing more — unless `userinfo` is passed.
  *
- * No `userinfo_endpoint`, deliberately: with one, the plugin builds its profile
- * from UserInfo, and the branch that carries this whole phase is the id_token
- * one (dist/index.mjs:3926-3937). Leaving it out is what makes the id_token the
- * source, which is also what `verifiedIdTokenClaims` is.
+ * No `userinfo_endpoint` by default, deliberately: with one, the plugin builds
+ * its profile from UserInfo, and the branch that carries this whole phase is
+ * the id_token one (dist/index.mjs:3926-3937). Leaving it out is what makes the
+ * id_token the source, which is also what `verifiedIdTokenClaims` is.
+ *
+ * Passing `userinfo` advertises the endpoint in discovery, which is what a real
+ * upstream does: ensureRuntimeDiscovery hydrates `config.userInfoEndpoint` from
+ * the document at sign-in time, and :3909 is checked BEFORE :3926, so the
+ * profile then comes from UserInfo. Group resolution must not depend on which
+ * of the two the plugin happened to take, and that is measured rather than
+ * assumed.
  */
-async function startUpstream(claimsFor: () => Record<string, unknown>): Promise<Upstream> {
+async function startUpstream(
+  claimsFor: () => Record<string, unknown>,
+  userinfo?: () => Record<string, unknown>,
+): Promise<Upstream> {
   const { privateKey, publicKey } = await generateKeyPair("RS256");
   const jwk = await exportJWK(publicKey);
   jwk.kid = "stub-1";
@@ -95,9 +106,11 @@ async function startUpstream(claimsFor: () => Record<string, unknown>): Promise<
           authorization_endpoint: `${origin}/authorize`,
           token_endpoint: `${origin}/token`,
           jwks_uri: `${origin}/jwks`,
+          ...(userinfo ? { userinfo_endpoint: `${origin}/userinfo` } : {}),
         });
       }
       if (path === "/jwks") return Response.json({ keys: [jwk] });
+      if (path === "/userinfo" && userinfo) return Response.json(userinfo());
       if (path === "/token") {
         const idToken = await new SignJWT(claimsFor())
           .setProtectedHeader({ alg: "RS256", kid: "stub-1" })
@@ -195,9 +208,10 @@ async function seedProvider(
   await pool.query(
     `INSERT INTO trexdb.sso_provider
        (id, "displayName", "clientId", "clientSecret", enabled, issuer, scopes,
-        claim_map, auto_provision, email_domain_allowlist, allow_elevated_auto_link)
+        claim_map, auto_provision, email_domain_allowlist, allow_elevated_auto_link,
+        groups_source, groups_claim)
      VALUES ($1,$1,'stub-client','stub-secret',$2,$3,'openid profile',
-             $4::jsonb,$5,$6,false)`,
+             $4::jsonb,$5,$6,false,$7,$8)`,
     [
       id,
       over.enabled ?? true,
@@ -205,6 +219,10 @@ async function seedProvider(
       JSON.stringify(over.claim_map ?? { email: "username" }),
       over.auto_provision ?? false,
       over.email_domain_allowlist ?? null,
+      // The column's own default, so a provider that says nothing about groups
+      // is seeded as the majority of real rows are.
+      over.groups_source ?? "none",
+      over.groups_claim ?? null,
     ],
   );
   // The configuration the plugin reads is the one trex's own writer produces —
@@ -570,6 +588,182 @@ dbTest("what the callback stored comes back through the sanctioned reader", asyn
   }
 });
 
+// ── The idp block and the sign-in stamp, on the row the callback wrote ──────
+
+/** The two things provisionUser is responsible for, straight out of the table. */
+async function signInFacts(pool: Pg, userId: string) {
+  const { rows } = await pool.query(
+    `SELECT app_metadata, last_sign_in_at, user_metadata
+       FROM trexdb."user" WHERE id = $1`,
+    [userId],
+  );
+  return rows[0];
+}
+
+/** A pre-linked user whose app_metadata already carries a key that is not ours. */
+async function seedLinkedUser(pool: Pg, sub: string, providerId: string) {
+  await pool.query(
+    `INSERT INTO trexdb."user"
+       (id, name, email, "emailVerified", role, is_placeholder_email, app_metadata)
+     VALUES ($1,'Alice',$2,false,'user',true,'{"keep":"me"}'::jsonb)`,
+    [sub, `${sub}@d2e.local`],
+  );
+  await pool.query(
+    `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId")
+     VALUES ($1,$2,$3,$4)`,
+    [crypto.randomUUID(), sub, sub, providerId],
+  );
+}
+
+dbTest("the groups an upstream asserted are on the user row after the callback", async (l) => {
+  // The measurement this task exists for. Before it, groups_source and
+  // groups_claim were columns read by nothing: resolveUser cannot write, and
+  // mounting it turns deferNonDatabaseWrites on, so an installation that had
+  // configured group mapping got no groups and no error at all. The assertion
+  // is on app_metadata, not on a resolver's return value, because the row is
+  // what the OIDC provider's fetchUser() will later read.
+  const id = slug();
+  const sub = `${id}-subject`;
+  const up = await startUpstream(() => ({
+    sub,
+    username: "alice",
+    roles: ["alp-admins", "study-42"],
+  }));
+  try {
+    await seedProvider(l, id, up.origin, { groups_source: "claim", groups_claim: "roles" });
+    await seedLinkedUser(l.pool, sub, id);
+    // Nothing has stamped a sign-in yet, so the column below starts NULL.
+    assertEquals((await signInFacts(l.pool, sub)).last_sign_in_at, null);
+
+    const out = await signIn(engineTrusting(l.auth, up.origin), l.auth.options.baseURL, id);
+    assertEquals({ status: out.status, error: out.error }, { status: 302, error: null });
+
+    const after = await signInFacts(l.pool, sub);
+    assertEquals(after.app_metadata, {
+      // The other key survives: the write merges, it does not replace.
+      keep: "me",
+      idp: { provider: id, groups: ["alp-admins", "study-42"] },
+    });
+    assertNotEquals(after.last_sign_in_at, null);
+  } finally {
+    await cleanUp(l.pool, id);
+    await l.pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [sub]);
+    await up.close();
+  }
+});
+
+dbTest("the block is written from the id_token even when UserInfo fed the profile", async (l) => {
+  // The branch Task 1's spike never measured. A real upstream advertises a
+  // userinfo_endpoint, ensureRuntimeDiscovery hydrates it, and :3909 is
+  // checked before :3926 — so the profile comes from UserInfo, and `userInfo`
+  // is the MAPPED shape, which has no room for a groups claim. Here UserInfo
+  // deliberately omits `roles` and the id_token carries it: the groups still
+  // land, because the decode reads the verified id_token rather than the
+  // profile the plugin happened to build.
+  const id = slug();
+  const sub = `${id}-subject`;
+  const up = await startUpstream(
+    () => ({ sub, username: "alice", roles: ["from-id-token"] }),
+    () => ({ sub, username: "alice" }),
+  );
+  try {
+    await seedProvider(l, id, up.origin, { groups_source: "claim", groups_claim: "roles" });
+    await seedLinkedUser(l.pool, sub, id);
+
+    const out = await signIn(engineTrusting(l.auth, up.origin), l.auth.options.baseURL, id);
+    assertEquals({ status: out.status, error: out.error }, { status: 302, error: null });
+    assertEquals((await signInFacts(l.pool, sub)).app_metadata.idp, {
+      provider: id,
+      groups: ["from-id-token"],
+    });
+  } finally {
+    await cleanUp(l.pool, id);
+    await l.pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [sub]);
+    await up.close();
+  }
+});
+
+dbTest("a second sign-in replaces the block rather than keeping the first one", async (l) => {
+  // Why provisionUserOnEveryLogin is set. The groups an upstream asserts change
+  // between sign-ins — a user removed from a study group is the case that
+  // matters — and a block written once at registration would say otherwise
+  // forever. It would also never be written at all for the migrated users,
+  // every one of whom is already registered.
+  const id = slug();
+  const sub = `${id}-subject`;
+  let roles = ["study-42"];
+  const up = await startUpstream(() => ({ sub, username: "alice", roles }));
+  try {
+    await seedProvider(l, id, up.origin, { groups_source: "claim", groups_claim: "roles" });
+    await seedLinkedUser(l.pool, sub, id);
+    const engine = engineTrusting(l.auth, up.origin);
+
+    assertEquals((await signIn(engine, l.auth.options.baseURL, id)).error, null);
+    assertEquals((await signInFacts(l.pool, sub)).app_metadata.idp.groups, ["study-42"]);
+
+    roles = [];
+    assertEquals((await signIn(engine, l.auth.options.baseURL, id)).error, null);
+    // Not merged with the first list, and not left behind: the block describes
+    // the most recent sign-in.
+    assertEquals((await signInFacts(l.pool, sub)).app_metadata.idp.groups, []);
+  } finally {
+    await cleanUp(l.pool, id);
+    await l.pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [sub]);
+    await up.close();
+  }
+});
+
+dbTest("a provider that maps no groups still stamps the sign-in", async (l) => {
+  // groups_source 'none' is the column's default and what most rows carry.
+  // last_sign_in_at is parity with the native grants, which stamp it on every
+  // successful login; without it a federated user never records a sign-in.
+  const id = slug();
+  const sub = `${id}-subject`;
+  const up = await startUpstream(() => ({ sub, username: "alice", roles: ["ignored"] }));
+  try {
+    await seedProvider(l, id, up.origin);
+    await seedLinkedUser(l.pool, sub, id);
+
+    assertEquals((await signIn(engineTrusting(l.auth, up.origin), l.auth.options.baseURL, id)).error, null);
+    const after = await signInFacts(l.pool, sub);
+    assertEquals(after.app_metadata.idp, { provider: id, groups: [] });
+    assertNotEquals(after.last_sign_in_at, null);
+  } finally {
+    await cleanUp(l.pool, id);
+    await l.pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [sub]);
+    await up.close();
+  }
+});
+
+dbTest("a refused sign-in leaves no idp block behind", async (l) => {
+  // provisionUser runs after the commit, so it must not run at all on a path
+  // that never committed. A disabled provider that still stamped a sign-in and
+  // published its groups would be worse than one that merely failed.
+  const id = slug();
+  const sub = `${id}-subject`;
+  const up = await startUpstream(() => ({ sub, username: "alice", roles: ["alp-admins"] }));
+  try {
+    await seedProvider(l, id, up.origin, {
+      enabled: false,
+      groups_source: "claim",
+      groups_claim: "roles",
+    });
+    await seedLinkedUser(l.pool, sub, id);
+
+    assertEquals(
+      (await signIn(engineTrusting(l.auth, up.origin), l.auth.options.baseURL, id)).error,
+      "provider_disabled",
+    );
+    const after = await signInFacts(l.pool, sub);
+    assertEquals(after.app_metadata, { keep: "me" });
+    assertEquals(after.last_sign_in_at, null);
+  } finally {
+    await cleanUp(l.pool, id);
+    await l.pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [sub]);
+    await up.close();
+  }
+});
+
 // ── The wiring itself ───────────────────────────────────────────────────────
 
 dbTest("the exported engine carries trex's resolver and both mutation doors", async ({ auth }) => {
@@ -585,4 +779,7 @@ dbTest("the exported engine carries trex's resolver and both mutation doors", as
   assertEquals(plugin.options.providersLimit, 0);
   assertEquals(typeof plugin.options.guardProviderMutation, "function");
   assertEquals(plugin.options.schema.ssoProvider.modelName, "sso_provider");
+  assertEquals(plugin.options.provisionUser, provisionSsoUser);
+  // Not merely truthy: false is the default, and the default is the bug.
+  assertEquals(plugin.options.provisionUserOnEveryLogin, true);
 });
