@@ -250,3 +250,58 @@ The groups claim reached trex even though UserInfo fed the profile, because
 `provision.ts` decodes the id_token rather than reading `userInfo` — exactly
 what §9.1 says has to be true, now observed on the branch that matters.
 `last_sign_in_at` is stamped.
+
+## 6. Q3 — the gate depends on the **UserInfo** document, and that is a finding
+
+Two runs of the same provider row, the same claims, the same pre-linked user.
+Only the discovery document differs:
+
+| upstream | id_token | UserInfo | outcome |
+|---|---|---|---|
+| advertises `userinfo_endpoint` | `{sub, username}` | `{sub, name}` — **no `username`** | **REFUSED, `invalid_provider`** |
+| advertises **no** `userinfo_endpoint` | `{sub, username}` | — | **signs in, no error** |
+
+`mapping.email` was `"username"` in both. So:
+
+- the claim `mapping.email` names must be in the **UserInfo document**. Its
+  presence in the id_token buys nothing once the upstream publishes
+  `userinfo_endpoint`, and every real upstream does.
+- a pre-linked identity is refused in that case. **The link does not save it** —
+  `:3938`'s `!userInfo.email` fires before anything looks the account up.
+
+Task 5's review was right and `PHASE3-SPIKE-FINDINGS.md` §9.1 is right; §1's
+measurement of the id_token branch is not merely a line-number caveat, it
+measures a branch that decides nothing here.
+
+### What this means for d2e's Logto — **UNVERIFIED, and it is now the only thing left between this phase and a locked-out installation**
+
+`Global Constraints`' first `[UNVERIFIED]` marker says the gate rests on
+"Logto's custom JWT emitting `username` and `preferred_username`". **That
+premise is the wrong one.** d2e configures that customizer in
+`services/alp-logto/post-init/src/main.ts:549`:
+
+```ts
+await upsert("configs/jwt-customizer/access-token", headers, payload);
+```
+
+`configs/jwt-customizer/**access-token**`. It shapes the **access token**, which
+the plugin never reads for the mapping. It does not touch UserInfo and it does
+not touch the id_token. The comment above it says as much in its own terms —
+the claims exist so "OHDSI WebAPI, Atlas3 display the real login".
+
+So the gate rests instead on **Logto's stock UserInfo response for a
+`profile`-scoped request carrying `username`**, and on the provider row
+requesting the `profile` scope. Neither has been read from a running Logto —
+this machine runs no Logto container, and develop.d2e.sg is a deployed
+environment this rehearsal is not allowed to touch.
+
+**This is one `curl` from settled**, and it should be done before cutover:
+
+```
+curl -H "Authorization: Bearer <profile-scoped access token>" \
+     https://<logto>/oidc/me
+```
+
+If the body has no `username`, **every** federated sign-in on a username-only
+account is refused with `invalid_provider` — pre-linked or not. Section 8
+records the configuration change that fixes it without a code change.
