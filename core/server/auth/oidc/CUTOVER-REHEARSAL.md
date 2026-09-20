@@ -316,3 +316,72 @@ Whichever is chosen, **`requirePKCE` cannot stay true for the row WebAPI uses.**
 `cAsuqJZDGzw9aBykaSOFSHHnFeUPp2rG` in the token. Better Auth ids are
 case-sensitive and mixed-case by construction. Anything that joins WebAPI's
 recorded login to a trex user id, or to usermgmt, has to know that.
+
+## 6. WebAPI reads `/oauth2/userinfo`, and userinfo has no `roles`
+
+Settled by taking the endpoint away. With `/oauth2/userinfo`'s rate-limit bucket
+exhausted (§7) and nothing else changed, a WebAPI login that had just succeeded
+fails:
+
+```
+o.o.webapi.security.authc.OidcAuthConfig - OIDC: Authentication failed:
+  [invalid_user_info_response] An error occurred while attempting to retrieve
+  the UserInfo Resource: 429 Too Many Requests
+browser: https://localhost:41100/atlas/#/welcome?error=oidc_failed
+```
+
+So **`/oauth2/userinfo` is on the critical path of every WebAPI sign-in**, not
+an optional enrichment: one WebAPI login costs **three** provider requests —
+`/oauth2/authorize`, `/oauth2/token`, `/oauth2/userinfo` — and a failure at the
+third fails the login outright. This resolves the `[UNVERIFIED]` in Task 1 /
+facts C.3 on the side that costs something: `SECURITY_AUTH_OIDC_ROLESCLAIM=roles`
+(confirmed in the container's environment) is resolved against a claim set that
+userinfo does not contain. Spring merges id_token and userinfo claims into one
+`OidcUser`, so `roles` is still reachable — but **`customUserInfoClaims` should
+emit `roles` as well**, and until it does, anything that reads the userinfo
+document alone sees none.
+
+Measured alongside: after a successful OIDC login, `GET /WebAPI/user/me`
+(against the engine directly, with the OTC-redeemed WebAPI JWT) returns
+`{"user":{"id":1000,"login":"casuqjzdgzw9abykasofshhnfeupp2rg","name":"admin"},"authz":{"permissions":[],…}}`
+— a real WebAPI account, created from the trex subject, with the lower-cased
+login of §5d and no permissions (the trex role granted for this test,
+`ALP_SYSTEM_ADMIN`, is not a WebAPI role name).
+
+The sign-in path, for the record, is: `/WebAPI/user/login/openid` → provider →
+`/WebAPI/user/oauth/callback/openid` → `…/atlas/#/welcome?code=<uuid>` →
+`GET /WebAPI/user/login/otc?code=…` → `{login, jwt, roles, message:"OTC redeemed successfully."}`.
+Atlas3 then uses that `jwt` as its bearer. **Atlas3 does not talk to the OIDC
+provider at all** — it signs in *through* WebAPI, so §5's blockers are Atlas3's
+blockers too, and the Atlas3 SPA did load at `/atlas/#/welcome` once WebAPI
+could sign in.
+
+## 7. Rate limits: the ceiling holds, and one caller can take it from everyone
+
+Enforced, and measured rather than read off the config: hammering
+`/oauth2/userinfo` from one host with an invalid bearer, the **594th** request
+in the window answered
+`429 {"message":"Too many requests. Please try again later."}` — 600 minus the
+~6 the earlier sign-ins had already spent. So `TREX_OIDC_RATE_LIMIT_MAX`'s
+default of 600 per 900 s is real and per-path.
+
+**It took 2.4 seconds.** That is the finding. With `TREX_TRUSTED_PROXIES` empty
+the bucket is shared by everyone behind the gateway, so a single client — no
+credentials needed, the requests 401 — can close `/oauth2/userinfo` for the
+whole installation for up to fifteen minutes, and §6 makes that a **total
+WebAPI sign-in outage**, not a slowdown. That is not a theoretical widening: the
+WebAPI login quoted in §6 is exactly this happening.
+
+Cost of one sign-in, counted:
+
+| flow | `/oauth2/authorize` | `/oauth2/token` | `/oauth2/userinfo` |
+|---|---|---|---|
+| WebAPI / Atlas3 | 1 | 1 | 1 |
+| portal (authorization code) | 1 | 1 | 0 observed |
+| portal, per silent renewal | 0 | 1 | 0 |
+
+600/900 s is therefore comfortable for **sign-in volume** on any plausible
+installation (600 WebAPI sign-ins every 15 minutes) and **not comfortable at all
+as an availability property**, because the budget is not per client. Either set
+`TREX_TRUSTED_PROXIES` to the gateway's real range so the bucket is per client
+IP, or accept that any anonymous caller can deny sign-in to everyone.
