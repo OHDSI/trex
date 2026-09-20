@@ -305,3 +305,147 @@ curl -H "Authorization: Bearer <profile-scoped access token>" \
 If the body has no `username`, **every** federated sign-in on a username-only
 account is refused with `invalid_provider` — pre-linked or not. Section 8
 records the configuration change that fixes it without a code change.
+
+## 7. The mitigation, measured — `mapping.email = "sub"`, no code change
+
+If Logto's UserInfo turns out not to carry `username`, the fix is a column, not
+a migration. Setting the provider's `claim_map` to `{}` makes V20 and
+`oidcConfigFor` write `mapping.email = "sub"`, and `sub` is the one claim every
+UserInfo document must carry.
+
+Driven against a UserInfo document containing **nothing but `sub`**, over all
+69 pre-linked users:
+
+```
+Q3-MITIGATION refused=0 []
+Q3-MITIGATION addresses unchanged = true
+```
+
+69 of 69 in, no address rewritten, no placeholder flag cleared. **No V22 is
+needed for this and no code change is needed for it.**
+
+## 8. Q5 — the trusted-origins audit, on the migrated rows
+
+Run against the five rows exactly as V20 left them:
+
+```
+[federation] MISCONFIGURED: BETTER_AUTH_TRUSTED_ORIGINS does not contain the issuer
+origin of 4 enabled provider(s) — logto (https://logto.d2e.local),
+withport (https://idp.example.org:8443), trailing (https://idp2.example.org),
+mixedcase (https://idp3.example.org). … Add these origins to
+BETTER_AUTH_TRUSTED_ORIGINS (comma-separated):
+https://logto.d2e.local,https://idp.example.org:8443,https://idp2.example.org,https://idp3.example.org
+```
+
+Correct on every count against real-shaped rows: four of five named, the
+`noissuer` row correctly excluded (it is `enabled = false` **and** has no
+issuer), the port kept on `withport`, and the mixed-case issuer folded. Trusting
+only `https://logto.d2e.local` narrows the message to the other three, so the
+audit is per row and not all-or-nothing.
+
+### The configuration side of it — nothing in d2e sets the variable
+
+`grep -rn 'BETTER_AUTH_TRUSTED_ORIGINS|TREX_FEDERATION_ENABLED|TREX_FEDERATION_REDIRECT_URI'`
+over the whole of `/Users/ph/code/d2e` returns **zero hits**, and the running
+`d2e-trex` container's environment has none of the three. So on the day
+federation is switched on:
+
+- the audit will fire for every provider, because the variable does not exist;
+- `federationRedirectUri()` throws, which is the fifth documented reduction,
+  reached rather than theoretical.
+
+Both are d2e-side configuration, which the plan puts in PR #3358's scope. This
+records that as of today it is genuinely absent, not merely unread.
+
+## 9. Q6 — the documented reductions, against measurement
+
+`auth-model.md`'s list has **eight** bullets, not seven; Task 10's last commit
+("name the fourth capability the cutover took") added one after the count was
+written. Each, with what was watched:
+
+| # | reduction | disposition |
+|---|---|---|
+| 1 | `claim_map.sub` does nothing | **CONFIRMED, and inert**: no row anywhere maps `sub` (§1), so nothing is affected today |
+| 2 | `claim_map.email` no longer selects the address claim; a first-time identity is refused | **CONFIRMED by measurement**: `Q6a FIRST-TIME: status=302 error=no_account created=0` — the exact code the doc names, and no row created |
+| 3 | no OIDC `nonce` | **CONFIRMED**: `router.test.ts`'s "the authorization URL carries no nonce, which is a known accepted loss" passes against this database |
+| 4 | signing algorithm no longer pinned to what discovery advertises | **NOT RE-MEASURED.** Carried from §10.2's reading of the plugin; this rehearsal did not build a second-algorithm JWKS |
+| 5 | `TREX_FEDERATION_REDIRECT_URI` now required | **CONFIRMED**: `federationRedirectUri()` throws when unset, and d2e sets it nowhere (§8) |
+| 6 | every issuer origin must be in `BETTER_AUTH_TRUSTED_ORIGINS` | **CONFIRMED by the audit's own output** (§8) |
+| 7 | a stored mixed-case address no longer matches | **CONFIRMED by measurement**, see below |
+| 8 | auto-provision requires `claim_map.email` to name a real address claim | **CONFIRMED**: `sso-callback.test.ts`'s "auto-provision cannot write a mapped username into the address column" passes |
+
+### Reduction 7, the pair that shows it is the case and not the code
+
+Same upstream, same verified `email` claim `mixed.case@example.org`, same
+provider, same policy. Only the stored row's case differs:
+
+```
+Q6a-bis EXACT-CASE: status=302 error=null      linked=1
+Q6b   MIXED-CASE:   status=302 error=no_account linked=0
+Q6b rows now: [{"id":"q6b-existing","email":"Mixed.Case@Example.ORG"}]
+```
+
+It is fail-closed exactly as documented: the mixed-case row is not linked, and
+it is also **not duplicated** — no second user row was created and the stored
+address was not rewritten.
+
+## 10. The refusal vocabulary a login page actually receives
+
+Measured at the callback, and read out of the plugin. `router.ts:297-298` sets
+`error` to `safeErrorCode(refusal)` and **deletes `error_description`**. The
+plugin's `redirectOIDCError(code, description)` puts its *first* argument in
+`error`, and it has only three:
+
+```
+invalid_state      x2 distinct descriptions
+invalid_provider   x11 distinct descriptions
+discovery_failed   x1
+```
+
+So **eleven distinct plugin failure modes arrive at the login page as the single
+token `invalid_provider`** — including `missing_user_info` (§6's blocker),
+`jwks_endpoint_not_found`, `token_not_verified` and
+`id_token_userinfo_subject_mismatch`. `discovery_failed` never reaches a login
+page at all on trex's own route: `/authorize` turns a non-404 throw into a 500
+`server_error` (`router.ts:222`), and a discovery failure at the callback is
+caught as an exception. And the description is **not logged either** — the only
+`console.error`s in the file are on the two exception paths (`:207`, `:335`), so
+a redirecting refusal leaves no server-side record of its reason.
+
+Codes trex itself emits and that do pass through: `no_account`,
+`email_domain_not_allowed` (both watched above), plus whatever the upstream
+sent, bounded to `^[a-z_]{1,64}$` by `safeErrorCode`.
+
+**Nothing was found that renders any of them.** `d2e-login` — the path
+`TREX_OIDC_LOGIN_URL` names on the running installation
+(`https://localhost:41100/d2e-login/`) — appears nowhere in the d2e repository,
+and the stack's Caddy is running the image's stock Caddyfile with no such route.
+So "does the vocabulary render sensibly" could not be answered: there is no page
+in reach that maps these codes to text.
+
+## 11. The unauthenticated callback DoS fix, under proxy chains
+
+`router.test.ts`'s two flood cases run with `chain(edge, spoof)` —
+`"<caller-chosen>, <proxy-appended>"` — under `app.set("trust proxy", 1)`, which
+is the shape that separates forwarding `req.ip` from forwarding the raw header.
+Both pass against this database:
+
+```
+a flood at /callback cannot lock out a sign-in from another address ... ok (1s)
+a busy shared address does not lock itself out of /callback ... ok (344ms)
+```
+
+700 junk callbacks over seven addresses, then the victim's whole journey
+completes with a session row. Watched, not inferred.
+
+## 12. Disposition of every step in the brief
+
+| step | disposition |
+|---|---|
+| 1 — restore a dump into a scratch database | **SUBSTITUTED.** No dump exists (§0). Replaced with a schema-only dump of the running installation plus a reconstructed population (§2) |
+| 2 — record the before state | **DONE** on the rehearsal database (§3). The brief's expected numbers are not reproducible: V14's "69 users, 64 without an address" describes an installation not present here, and the installation that *is* present has 2 users, 0 with a NULL address (V17 made the column NOT NULL), 0 federated accounts and 0 provider rows |
+| 3 — apply the migration and boot trex | **PARTIAL.** V20 and V21 applied twice (§3); the exported engine was driven in-process and `router.test.ts` drives the express routes over HTTP — but no `core/server` process was started as a service against the copy. The step's expected `backfillJwksEndpoints` **does not exist**, and neither does a `jwks_endpoint` column: V20:26 records the decision that superseded it |
+| 4 — assert the invariants | **DONE** (§3) — all six, by whole-table md5 |
+| 5 — sign every user in | **DONE** (§5) — 69 of 69, on the UserInfo branch, plus the `app_metadata.idp` block and `last_sign_in_at`. Not done through `GET ${BASE_PATH}/auth/v1/user`: roles were read from `trexdb.user_role` instead, and usermgmt was not exercised |
+| 6 — d2e's `test_logto_federation` CI job | **NOT RUN.** It exists — `.github/workflows/docker-build-push.yaml:1256` on `p-hoffmann/logto-federation-migration`, confirming the brief's controller note. It needs a GHCR login, five upstream image builds and a 15 GB swapfile, and it pins `LOGTO_ERA_TAG 0.18.12` with its own `TREXSQL_REF`, so it would not exercise this worktree's V20/V21 without changing those pins |
+| 7 — write down the result and commit | **DONE** — this file, committed as it was measured |
