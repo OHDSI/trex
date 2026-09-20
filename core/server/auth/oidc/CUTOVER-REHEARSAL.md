@@ -806,3 +806,203 @@ The proxy's own log line shows the secret has left the body:
 ```
 [d2e-compat] /oauth/token: auth=client_secret_basic secret_present=true len=30 keys=grant_type,client_id,redirect_uri,code,code_verifier,resource
 ```
+
+## 20. The rate limit: what Caddy actually sends, and what it cost
+
+§7 said the bucket was shared and named `TREX_TRUSTED_PROXIES` as the lever.
+Measured now, that lever could never have worked, and the reason is a spelling.
+
+**What Caddy sends.** `d2e-caddy`'s Caddyfile has
+`header_up X-Forwarded-For {remote}` in both `proxy_headers_default` and
+`proxy_headers_codespaces`, and Caddy's `{remote}` is the peer's **`host:port`**,
+not its host. Read off `trexdb.session."ipAddress"` on the running stack:
+
+```
+ ipAddress          | count
+--------------------+-------
+ 192.168.65.1:57097 |     2
+```
+
+**What the container makes of it.** Better Auth resolves the client IP from
+headers only — there is no peer-address path in `getIP` at all. Run against the
+pinned package:
+
+```
+isValidIP("192.168.65.1:57097")                  -> false
+getIPFromHeader("192.168.65.1:57097")            -> null
+getIP({x-forwarded-for: "192.168.65.1:57097"})   -> 127.0.0.1   (NODE_ENV=development)
+                                                 -> null         (otherwise)
+getIP({x-forwarded-for: "192.168.65.1"})         -> 192.168.65.1
+getIP(no header at all)                          -> 127.0.0.1 / null
+```
+
+and `d2e-trex`'s environment carries **`NODE_ENV=development`**, so the fallback
+is `127.0.0.1` here and `no-trusted-ip` on a deployment that sets it properly.
+Either way `createRateLimitKey(ip, path)` gives every caller the same key.
+
+**`TREX_TRUSTED_PROXIES` cannot fix it.** The trusted-proxy branch of
+`getIPFromHeader` parses the same malformed token with the same `ipToBytes` and
+gives up on the same value. §7's advice — "set `TREX_TRUSTED_PROXIES` to the
+gateway's real range" — would have changed nothing, and the refusal to guess a
+CIDR was right for a second reason nobody had yet.
+
+**Fixed by normalising the header in trex's mount**, which is the last place
+trex holds the request before Better Auth reads it. `[v6]:port` and a `v4:port`
+with exactly one colon are stripped; a bare IPv6 address is left alone, because
+`2001:db8::1` and `2001:db8::1:443` cannot be told apart. It adds no spoofing
+surface: a single-token header from an untrusted peer was already honoured, and
+a multi-token one still resolves to null without `TREX_TRUSTED_PROXIES`.
+
+**And the failure mode is now safe even where no IP can be resolved**, which is
+the case §7 actually demonstrated. Better Auth's limiter keys on `<ip>|<path>`
+with no hook to change the key, so a tighter `customRules` entry for
+`/oauth2/userinfo` would still share ONE counter with the authenticated
+requests — the attacker fills it and the sign-in reads it as full. So the mount
+keeps a second, independent budget **in front of** Better Auth, and a request it
+refuses never reaches Better Auth's counter at all.
+
+Keyed on **failure**, not on whether a credential was presented: §7's flood
+carried an invalid bearer, so "does it present a token" is a test an attacker
+passes by typing one more word. A `/oauth2/userinfo` request answered 401 has no
+legitimate volume; the call a real sign-in makes answers 200 and is never
+counted. 5xx is not charged either — charging a caller for trex's own outage
+would lock everyone out on top of it.
+`TREX_OIDC_USERINFO_FAILURE_MAX`, default 60.
+
+### Measured on the stack, after the fix
+
+```
+request #1  : 401 {"error_description":"Invalid access token","error":"invalid_token"}
+request #60 : 401 …
+request #61 : 429 retry-after=900 {"error":"invalid_request","error_description":"Too many failed userinfo requests from this client. Retry later."}
+first 429 at request #61, 0.5s
+```
+
+and then, **seconds later, with that budget still spent**:
+
+```
+/WebAPI/user/login/openid → … → /atlas/#/welcome?code=…
+GET /WebAPI/user/login/otc  200 {"login":"casuqjzdgzw9abykasofshhnfeupp2rg","message":"OTC redeemed successfully."}
+WebAPI log: OIDC: Authenticated user … / LoginService: onSuccess
+```
+
+That is the whole difference: in §7 this same flood produced
+`[invalid_user_info_response] … 429` and a failed login.
+
+Buckets, checked from inside the container with the header under control:
+
+| request | answer |
+|---|---|
+| the flooder's peer in Caddy's `host:PORT` spelling (`192.168.65.1:41999`) | **429** |
+| the flooder's peer in its bare spelling (`192.168.65.1`) | **429** — the same bucket, which is only possible because the port was stripped |
+| a different peer (`203.0.113.5:33333`) | **401**, the provider's own answer |
+| no `X-Forwarded-For` at all — the route WebAPI's own userinfo call takes | **401** |
+
+The second row is the proof that the normalisation is live: without it the
+flood would have been counted under `127.0.0.1` and a bare `192.168.65.1` would
+have been a fresh bucket.
+
+**The trade-off, stated.** The budget is per client address, so a caller behind
+the same NAT as an attacker shares its fate once 60 failures have accrued. In
+d2e that address is a gateway peer and the endpoint's real consumer — WebAPI —
+calls it server-side over `TREX_OIDC_INTERNAL_BASE` with no `X-Forwarded-For` at
+all, so it is in a bucket of its own. A deployment that fronts trex with
+something that does not forward a usable client address gets one shared FAILURE
+bucket, which is still strictly better than one shared bucket for everything.
+
+## 21. Logout with an `id_token_hint`: the cause is a bug in the plugin
+
+§8 established that the hint arrives and is judged invalid, and that the
+`localhost` name is why the JWKS fetch fails. What it did not say is why there
+is a fetch at all.
+
+`verifyLogoutHint` resolves the key set over HTTP from the provider's own public
+issuer:
+
+```js
+jwksFetch: jwtPluginOptions?.jwks?.remoteUrl
+  ?? `${ctx.context.baseURL}${jwtPluginOptions?.jwks?.jwksPath ?? "/jwks"}`
+   // dist/authorize-riRRCSbC.mjs:547
+```
+
+while the two sibling call sites needing the same key set — the JWT access-token
+validator (`:2245`) and `revokeJwtAccessToken` (`:3436`) — pass a **function**
+that reads it locally (`jwtPlugin.endpoints.getJwks(ctx)`) and never leaves the
+process. `:547` is the odd one out. The round trip it makes is the whole
+failure; on a `localhost` issuer it cannot succeed, and it should not exist.
+
+### §9's proposed fix is a trap, and this is what it costs
+
+§9 suggested setting `jwks.remoteUrl` and flagged "worth checking whether it
+also rewrites the advertised `jwks_uri`". It does, and it does something worse
+as well. Built both ways against the pinned packages:
+
+```
+remoteUrl=(unset)
+  discovery jwks_uri         : https://issuer.test/trex/oidc/.well-known/jwks.json
+  GET /.well-known/jwks.json : HTTP 200
+remoteUrl=http://d2e-trex:33001/trex/oidc/.well-known/jwks.json
+  discovery jwks_uri         : http://d2e-trex:33001/trex/oidc/.well-known/jwks.json
+  GET /.well-known/jwks.json : HTTP 404
+```
+
+- `jwks_uri: opts?.jwks?.remoteUrl ?? …` (`dist/authorize-riRRCSbC.mjs:695`)
+  publishes the internal plaintext address to every relying party.
+- the jwt plugin's own JWKS route answers `NOT_FOUND` whenever `remoteUrl` is
+  set (`better-auth@1.7.5 dist/plugins/jwt/index.mjs:116`), so trex stops
+  serving its key set at all.
+
+That would break WebAPI's **sign-in** to fix its logout. **Do not set it.**
+
+### Does it affect a real FQDN deployment? No — only a `localhost` one
+
+Measured from inside `d2e-trex`, which is the measurement §9 could not complete:
+
+```
+getent hosts localhost          -> ::1, fdc4:f303:9324::254      (loopback FIRST)
+curl https://localhost:41100/…  -> curl exit 7   (connection refused — never connects)
+
+echo "192.168.65.254 develop.d2e.test" >> /etc/hosts
+getent hosts develop.d2e.test   -> 192.168.65.254                (the gateway)
+curl https://develop.d2e.test:41100/… -> curl exit 35  (TLS handshake — it CONNECTED)
+```
+
+Exit 35 against exit 7 is the whole answer. A name that is not `localhost` is
+redirected by `extra_hosts` normally and **reaches Caddy**; it then fails only on
+the certificate, which is the half §9b already measured turning into a `200`
+once the gateway's root is installed. So:
+
+- **a deployment on a real FQDN**: works today with a publicly-trusted
+  certificate, and works with an internal one once `TLS__EXTRA__CA_CRTS` carries
+  the gateway's root. Task 12's channel is the right one.
+- **every stack whose FQDN is `localhost`** — the default local install and CI —
+  cannot be fixed by any configuration, because glibc special-cases the name.
+
+### So the failure is made visible instead
+
+The mount verifies the hint against trex's **own** key set — the same token, the
+same keys, without the round trip — and when the provider refused a hint trex
+can prove is genuine, it says so. Measured on the stack with a freshly minted
+hint:
+
+```
+JSON caller         401  X-Trex-Logout-Hint: rejected; local-verification=signature-valid
+browser navigation  200  X-Trex-Logout-Hint: rejected; local-verification=signature-valid
+                         banner present: "The sign-out request from the application
+                         could not be completed automatically…"
+browser, NO hint    200  no header, no banner
+pages differ?            true
+```
+
+and in the log:
+
+```
+[oidc] end-session: id_token_hint rejected — the id_token_hint is genuine — trex verified it
+against its own key set — so the provider's refusal is its own JWKS fetch failing, not a bad
+token. @better-auth/oauth-provider resolves the key set over HTTP from the public issuer
+(dist/authorize-riRRCSbC.mjs:547) instead of reading it locally as its two sibling call sites do…
+```
+
+§8's finding — "byte-identical to the no-hint page" — is closed. The Confirm
+button is left working, because taking it away to make the point would stop the
+user logging out at all.
