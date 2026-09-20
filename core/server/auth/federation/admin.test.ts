@@ -1,6 +1,11 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals, assertRejects } from "jsr:@std/assert";
 import { type LinkRequest, parseLinkRequest, parseProviderUpsert } from "./admin-policy.ts";
-import { linkIdentity, setProviderEnabled, upsertProvider } from "./admin-store.ts";
+import {
+  linkIdentity,
+  refreshProviderOidcConfig,
+  setProviderEnabled,
+  upsertProvider,
+} from "./admin-store.ts";
 import { PLACEHOLDER_EMAIL_DOMAIN } from "./providers.ts";
 
 const validProvider = {
@@ -234,11 +239,46 @@ Deno.test("linkIdentity locks the matched email row so a concurrent link on the 
 });
 
 Deno.test("upsertProvider writes every federation column in one statement", async () => {
-  const c = fakeClient([]);
+  const c = fakeClient([["FROM trexdb.sso_provider WHERE id", [{
+    clientId: "cid", clientSecret: "sec", issuer: "https://logto.internal:3001/oidc",
+    discovery_url: null, authorization_endpoint: null, scopes: "openid profile",
+    claim_map: {},
+  }]], ["UPDATE trexdb.sso_provider", [{ id: "logto" }]]]);
   await upsertProvider(c, parseProviderUpsert("logto", validProvider)!);
-  assertEquals(c.ran.length, 1);
-  assertEquals(c.ran[0].includes("ON CONFLICT (id) DO UPDATE"), true);
-  assertEquals(c.ran[0].includes("authorization_endpoint"), true);
+  const insert = c.ran.find((s) => s.includes("INSERT INTO trexdb.sso_provider"))!;
+  assertEquals(insert.includes("ON CONFLICT (id) DO UPDATE"), true);
+  assertEquals(insert.includes("authorization_endpoint"), true);
+});
+
+Deno.test("upsertProvider writes the row and its oidcConfig in one transaction", async () => {
+  // A row written with a stale or absent oidcConfig is the state this exists to
+  // prevent: trex's own router would honour it and the plugin could not. So the
+  // two writes commit together or neither does.
+  const c = fakeClient([["FROM trexdb.sso_provider WHERE id", [{
+    clientId: "cid", clientSecret: "sec", issuer: "https://logto.internal:3001/oidc",
+    discovery_url: null, authorization_endpoint: null, scopes: "openid profile",
+    claim_map: {},
+  }]], ["UPDATE trexdb.sso_provider", [{ id: "logto" }]]]);
+  await upsertProvider(c, parseProviderUpsert("logto", validProvider)!);
+  assertEquals(c.ran[0], "BEGIN");
+  assertEquals(c.ran[c.ran.length - 1], "COMMIT");
+  assertEquals(c.ran.some((s) => s.includes('SET "oidcConfig"')), true);
+});
+
+Deno.test("upsertProvider rolls back when the oidcConfig write matches no row", async () => {
+  // Under a role trexdb.sso_provider's RLS policy applies to, an UPDATE returns
+  // zero rows and raises nothing. Committing the INSERT anyway would leave a
+  // provider the plugin cannot use and report success.
+  const c = fakeClient([["FROM trexdb.sso_provider WHERE id", [{
+    clientId: "cid", clientSecret: "sec", issuer: "https://x.test",
+    discovery_url: null, authorization_endpoint: null, scopes: "openid", claim_map: {},
+  }]]]);
+  await assertRejects(
+    () => upsertProvider(c, parseProviderUpsert("logto", validProvider)!),
+    Error,
+    "may not write this table",
+  );
+  assertEquals(c.ran[c.ran.length - 1], "ROLLBACK");
 });
 
 Deno.test("setProviderEnabled reports whether the provider exists", async () => {
@@ -641,4 +681,135 @@ dbTest("an ordinary address still creates an unflagged, verified row", async (db
     [ctx.id(9)],
   );
   assertEquals(rows, [{ emailVerified: true, is_placeholder_email: false }]);
+});
+
+
+// ── oidcConfig: the column V20 added and nothing wrote ──────────────────────
+//
+// @better-auth/sso reads its whole per-provider configuration out of
+// sso_provider."oidcConfig", while trex's own router reads the source columns.
+// V20 backfilled the column once and asserted a synchronisation property that
+// no code provided, so these pin the writer: a provider created through the
+// admin API must be usable by the plugin, and an edited one must not go stale.
+
+async function oidcConfigOf(db: PgTestClient, id: string) {
+  const { rows } = await db.query(
+    `SELECT "oidcConfig" FROM trexdb.sso_provider WHERE id = $1`,
+    [id],
+  );
+  const raw = rows[0]?.oidcConfig;
+  return raw == null ? null : JSON.parse(raw);
+}
+
+const upsertBody = (over: Record<string, unknown> = {}) => ({
+  displayName: "Logto",
+  clientId: "cid",
+  clientSecret: "sec",
+  issuer: "https://logto.internal:3001/oidc",
+  ...over,
+});
+
+dbTest("a provider created through the admin API is usable by the plugin", async (db, ctx) => {
+  // withDb seeds the row with no issuer, so this call is the create-through-
+  // -upsert the admin API actually makes.
+  await upsertProvider(db, parseProviderUpsert(ctx.providerId, upsertBody())!);
+  const config = await oidcConfigOf(db, ctx.providerId);
+  assertEquals(
+    {
+      issuer: config.issuer,
+      clientId: config.clientId,
+      clientSecret: config.clientSecret,
+      discoveryEndpoint: config.discoveryEndpoint,
+      mapping: config.mapping,
+    },
+    {
+      issuer: "https://logto.internal:3001/oidc",
+      clientId: "cid",
+      clientSecret: "sec",
+      discoveryEndpoint: "https://logto.internal:3001/oidc/.well-known/openid-configuration",
+      mapping: { email: "sub", emailVerified: "email_verified", name: "name" },
+    },
+  );
+});
+
+dbTest("an edited provider does not go stale in the plugin's copy", async (db, ctx) => {
+  // The worse of the two failures, because nothing looks broken: trex's router
+  // honours the rotated secret and the new authorize URL, and the plugin keeps
+  // authenticating with the old ones.
+  await upsertProvider(db, parseProviderUpsert(ctx.providerId, upsertBody())!);
+  await upsertProvider(
+    db,
+    parseProviderUpsert(ctx.providerId, upsertBody({
+      clientSecret: "rotated",
+      issuer: "https://logto.internal:3001/oidc2",
+      authorizationEndpoint: "https://d2e.test/oidc/auth",
+      scopes: "openid profile",
+    }))!,
+  );
+  const config = await oidcConfigOf(db, ctx.providerId);
+  assertEquals(
+    {
+      clientSecret: config.clientSecret,
+      issuer: config.issuer,
+      authorizationEndpoint: config.authorizationEndpoint,
+      scopes: config.scopes,
+    },
+    {
+      clientSecret: "rotated",
+      issuer: "https://logto.internal:3001/oidc2",
+      authorizationEndpoint: "https://d2e.test/oidc/auth",
+      scopes: ["openid", "profile"],
+    },
+  );
+});
+
+dbTest("the configuration is built from the stored row, not from the payload", async (db, ctx) => {
+  // claim_map is in no writer's payload — ProviderUpsert has no field for it —
+  // and it decides mapping.email, which is the only thing standing between a
+  // username-only upstream and the plugin's missing_user_info refusal. A
+  // configuration computed from the request body would silently reset it to
+  // "sub" on the next edit.
+  await db.query(
+    `UPDATE trexdb.sso_provider SET claim_map = '{"email":"username","name":"display_name"}'::jsonb
+      WHERE id = $1`,
+    [ctx.providerId],
+  );
+  await upsertProvider(db, parseProviderUpsert(ctx.providerId, upsertBody())!);
+  assertEquals((await oidcConfigOf(db, ctx.providerId)).mapping, {
+    email: "username",
+    emailVerified: "email_verified",
+    name: "display_name",
+  });
+});
+
+dbTest("a provider with no issuer is left without a configuration", async (db, ctx) => {
+  // V1's save_sso_provider writes five columns and issuer is not one of them,
+  // so the rows it creates are configuration in progress rather than
+  // providers — loadProviders already excludes them, and inventing a
+  // configuration around a NULL issuer would produce a row the plugin resolves
+  // and then fails on.
+  assertEquals(await refreshProviderOidcConfig(db, ctx.providerId), false);
+  assertEquals(await oidcConfigOf(db, ctx.providerId), null);
+});
+
+dbTest("save_sso_provider's own edits stay in step with the plugin", async (db, ctx) => {
+  // The MCP sso-save tool rotates clientId and clientSecret through this
+  // function, and both are read by the plugin out of the serialized
+  // configuration rather than out of the columns.
+  await upsertProvider(db, parseProviderUpsert(ctx.providerId, upsertBody())!);
+  await db.query(`SELECT trexdb.save_sso_provider($1, 'Logto', 'cid2', 'rotated', true)`, [
+    ctx.providerId,
+  ]);
+  assertEquals((await oidcConfigOf(db, ctx.providerId)).clientSecret, "sec");
+
+  assertEquals(await refreshProviderOidcConfig(db, ctx.providerId), true);
+  const config = await oidcConfigOf(db, ctx.providerId);
+  assertEquals({ clientId: config.clientId, clientSecret: config.clientSecret }, {
+    clientId: "cid2",
+    clientSecret: "rotated",
+  });
+});
+
+dbTest("an unknown provider is reported rather than written around", async (db) => {
+  assertEquals(await refreshProviderOidcConfig(db, "no_such_provider"), false);
 });

@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { pool } from "../../db.ts";
+import { refreshProviderOidcConfig } from "../../auth/federation/admin-store.ts";
 
 export function registerSsoTools(server: McpServer) {
   server.tool(
@@ -31,14 +32,33 @@ export function registerSsoTools(server: McpServer) {
     },
     async ({ id, displayName, clientId, clientSecret, enabled }) => {
       try {
-        await pool.query(
-          `SELECT trexdb.save_sso_provider($1, $2, $3, $4, $5)`,
-          [id, displayName, clientId, clientSecret, enabled ?? false],
-        );
+        const client = await pool.connect();
+        let queryErr: Error | undefined;
         try {
-          // SSO providers are loaded from DB on each request; no reload needed
-        } catch (_e) {
-          // Non-fatal
+          await client.query("BEGIN");
+          await client.query(
+            `SELECT trexdb.save_sso_provider($1, $2, $3, $4, $5)`,
+            [id, displayName, clientId, clientSecret, enabled ?? false],
+          );
+          // save_sso_provider writes clientId and clientSecret, both of which
+          // @better-auth/sso reads out of the serialized oidcConfig rather than
+          // out of the columns. Without this, rotating a secret here is
+          // honoured by trex's own router and silently ignored by the plugin —
+          // the provider keeps authenticating with the old credential until
+          // somebody re-saves it through /admin/federation. A no-op for a row
+          // with no issuer, which is every row this tool can create: the
+          // function writes five columns and issuer is not one of them.
+          await refreshProviderOidcConfig(client, id);
+          await client.query("COMMIT");
+        } catch (err) {
+          queryErr = err instanceof Error ? err : new Error(String(err));
+          await client.query("ROLLBACK").catch(() => {});
+          throw err;
+        } finally {
+          // Released WITH the error when the statement failed so pg discards
+          // the connection instead of handing a possibly-broken one back, the
+          // same rule federation/admin-api.ts follows.
+          client.release(queryErr);
         }
         return { content: [{ type: "text", text: `SSO provider '${id}' saved` }] };
       } catch (err: any) {

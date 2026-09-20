@@ -2,12 +2,96 @@
 // it; the router owns connection handling.
 import type { LinkRequest, ProviderUpsert } from "./admin-policy.ts";
 import { findLinkedUser, provisionUser, upsertAccount } from "./providers.ts";
+import { oidcConfigFor } from "./sso-config.ts";
 import { isEngineAddressable } from "../engine-address.ts";
 
 // deno-lint-ignore no-explicit-any
 type PgClient = any;
 
+/**
+ * Rebuild trexdb.sso_provider."oidcConfig" from the row's own columns.
+ *
+ * V20 gave the table the column and backfilled it, and asserted a
+ * synchronisation property that no code provided: `oidcConfig` had no writer at
+ * all. @better-auth/sso reads its whole per-provider configuration out of that
+ * one JSON column, while trex's own router reads the source columns — so
+ * without this a provider created through the admin API has `oidcConfig = NULL`
+ * and cannot authenticate anybody, and an *edited* one goes stale: a rotated
+ * secret, a changed issuer or a changed authorize URL is honoured by trex's
+ * router and silently ignored by the plugin, which is the worse of the two
+ * because nothing looks broken.
+ *
+ * Read back rather than computed from the caller's payload, because two of the
+ * columns the configuration is built from are not in any writer's payload:
+ * `claim_map` (which decides `mapping.email`, and so decides whether a
+ * username-only upstream can sign in at all) and, for V1's save_sso_provider,
+ * every federation column. The row after the write is the only place they agree.
+ *
+ * No discovery fetch, and so no network dependency on an administrator's write.
+ * `jwksEndpoint` is left out: ensureRuntimeDiscovery runs unconditionally on
+ * the callback, the sign-in path and the IdP bounce
+ * (@better-auth/sso/dist/index.mjs:3820, :3698, :4114) and fills it precisely
+ * because it is absent, and discoverOIDCConfig merges `existingConfig?.X ?? doc.X`
+ * so nothing stored here is overwritten. Persisting it would be an
+ * optimisation, not a repair, and it would make provider administration fail
+ * whenever the upstream happened to be unreachable.
+ *
+ * Returns false for a row that carries no issuer: V1's save_sso_provider can
+ * create one, it is configuration in progress rather than a provider, and
+ * `loadProviders` already excludes it. Building a configuration around a NULL
+ * issuer would produce a row the plugin resolves and then fails on.
+ *
+ * A rewrite does abort any sign-in already in flight against the old
+ * configuration (isCurrentSSOProviderReference, dist/index.mjs:3717). That is
+ * the wanted outcome for this caller and not a side effect to design around: an
+ * administrator who has just rotated a client secret does not want the flows
+ * still using the old one to complete.
+ */
+export async function refreshProviderOidcConfig(client: PgClient, id: string): Promise<boolean> {
+  const { rows } = await client.query(
+    `SELECT "clientId", "clientSecret", issuer, discovery_url, authorization_endpoint,
+            scopes, claim_map
+       FROM trexdb.sso_provider WHERE id = $1`,
+    [id],
+  );
+  const row = rows[0];
+  if (!row || row.issuer == null) return false;
+  const written = await client.query(
+    `UPDATE trexdb.sso_provider SET "oidcConfig" = $2 WHERE id = $1 RETURNING id`,
+    [id, oidcConfigFor({ ...row, claim_map: row.claim_map ?? {}, jwks_endpoint: null })],
+  );
+  if (written.rows.length === 0) {
+    // Under a role trexdb.sso_provider's admin_all_sso_providers policy applies
+    // to, an UPDATE returns zero rows and raises nothing — which is how a
+    // Phase 1 migration came to report success having changed nothing. The row
+    // was read one statement ago, so a write that matches nothing is that, not
+    // a deleted provider.
+    throw new Error(
+      `could not write oidcConfig for sso_provider ${id}: the UPDATE matched no row, ` +
+        `which under row-level security means the connection may not write this table`,
+    );
+  }
+  return true;
+}
+
 export async function upsertProvider(client: PgClient, p: ProviderUpsert): Promise<void> {
+  // One transaction, because a row written with a stale or absent oidcConfig is
+  // exactly the state this function exists to prevent: the admin API would
+  // answer 500 and leave a provider trex's router honours and the plugin
+  // cannot.
+  await client.query("BEGIN");
+  try {
+    await upsertProviderRow(client, p);
+    await refreshProviderOidcConfig(client, p.id);
+    await client.query("COMMIT");
+  } catch (err) {
+    // A rollback that itself fails must not replace the real error.
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  }
+}
+
+async function upsertProviderRow(client: PgClient, p: ProviderUpsert): Promise<void> {
   await client.query(
     `INSERT INTO trexdb.sso_provider
        (id, "displayName", "clientId", "clientSecret", enabled, issuer, discovery_url,
