@@ -574,3 +574,90 @@ dbTest("the pool Better Auth is handed bypasses the table's RLS policy", async (
   );
   assertEquals(identity.relforcerowsecurity, false);
 });
+
+
+// ── The plugin's own provider routes are closed ─────────────────────────────
+//
+// @better-auth/sso ships register, update and delete endpoints for provider
+// rows. trexdb.sso_provider is trex's table: its id is constrained to
+// '^[a-z][a-z0-9_]*$' (V1) and the adapter's insert carries a random id, so
+// those routes cannot write a valid row even when they are allowed to try —
+// and update has no business accepting a proposal trex's admin API did not
+// make. Three independent things close them, asserted here because each one
+// alone would leave a door: oidc/mount.ts 404s the paths over HTTP,
+// providersLimit 0 refuses registration in-process, and guardProviderMutation
+// refuses update and delete. The mount is not the whole answer, because
+// auth.api reaches every endpoint without going through it.
+
+async function sessionHeaders(auth: NonNullable<typeof loaded>["auth"]) {
+  const signedUp = await auth.api.signUpEmail({
+    body: {
+      email: `sso-routes-${crypto.randomUUID()}@example.test`,
+      password: "correct-horse-battery-staple",
+      name: "SSO route probe",
+    },
+    returnHeaders: true,
+  });
+  const cookies = signedUp.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
+  return new Headers({ cookie: cookies });
+}
+
+dbTest("registering a provider through the plugin is refused", async ({ auth }) => {
+  // providersLimit 0 is checked before the route does anything else
+  // (dist/index.mjs:3341). Without it, a session holder could reach an insert
+  // that dies on trex's own id constraint — a 500 where a refusal belongs.
+  const headers = await sessionHeaders(auth);
+  // deno-lint-ignore no-explicit-any
+  const api = auth.api as any;
+  const err = await api.registerSSOProvider({
+    body: {
+      providerId: `plugin_${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`,
+      issuer: "https://up.test/oidc",
+      domain: "up.test",
+      oidcConfig: { clientId: "cid", clientSecret: "sec" },
+    },
+    headers,
+  }).then(() => null, (e: unknown) => e);
+  assertNotEquals(err, null);
+  assertStringIncludes(String((err as { message?: string }).message ?? err), "disabled");
+});
+
+dbTest("updating and deleting a provider through the plugin is refused", async ({ auth, pool }) => {
+  // guardProviderMutation throws, which the plugin turns into a stable
+  // SSO_PROVIDER_MUTATION_REJECTED conflict (dist/index.mjs:2077-2082). The row
+  // is owned by the session so the route gets past its own access check and
+  // actually reaches the guard — otherwise this would pass on a 403 that says
+  // nothing about the guard being wired.
+  const headers = await sessionHeaders(auth);
+  const session = await auth.api.getSession({ headers });
+  const id = `guard_${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
+  await pool.query(
+    `INSERT INTO trexdb.sso_provider
+       (id, "displayName", "clientId", "clientSecret", enabled, issuer, "userId", "oidcConfig")
+     VALUES ($1,$1,'cid','sec',true,'https://up.test/oidc',$2,'{"clientId":"cid"}')`,
+    [id, session!.user.id],
+  );
+  try {
+    // deno-lint-ignore no-explicit-any
+    const api = auth.api as any;
+    for (const call of ["updateSSOProvider", "deleteSSOProvider"]) {
+      const body = call === "deleteSSOProvider"
+        ? { providerId: id }
+        : { providerId: id, issuer: "https://elsewhere.test/oidc" };
+      const err = await api[call]({ body, headers }).then(() => null, (e: unknown) => e);
+      assertNotEquals(err, null, `${call} must not succeed`);
+      assertStringIncludes(
+        String((err as { message?: string }).message ?? err),
+        "not allowed",
+      );
+    }
+    // And the row is untouched.
+    const { rows } = await pool.query(
+      `SELECT issuer FROM trexdb.sso_provider WHERE id = $1`,
+      [id],
+    );
+    assertEquals(rows, [{ issuer: "https://up.test/oidc" }]);
+  } finally {
+    await pool.query(`DELETE FROM trexdb.sso_provider WHERE id = $1`, [id]);
+  }
+});

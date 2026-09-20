@@ -109,6 +109,31 @@ test("Better Auth's own sign-in routes are not served under the provider mount",
   }
 });
 
+test("the SSO plugin's provider and callback routes are not served either", async (m) => {
+  // @better-auth/sso is mounted on this same engine, and its /sso/* endpoints
+  // would otherwise be a public surface for writing provider rows and for a
+  // second, unguarded callback beside trex's own. Federation's HTTP surface is
+  // /auth/v1/federation and /admin/federation, and nothing else.
+  const s = await m.startOidcServer();
+  try {
+    for (
+      const path of [
+        "/sso/register",
+        "/sso/update",
+        "/sso/delete-provider",
+        "/sso/callback/logto",
+        "/sign-in/sso",
+      ]
+    ) {
+      const res = await fetch(`${s.url}${path}`, { method: "POST" });
+      assertEquals(res.status, 404, `expected 404 for ${path}`);
+      await res.body?.cancel();
+    }
+  } finally {
+    await s.close();
+  }
+});
+
 test("the plugin's client administration is not served either", async (m) => {
   // /admin/oauth2/* would let a caller holding any session create a client.
   // Clients are seeded from the environment; there is no HTTP surface for them.
