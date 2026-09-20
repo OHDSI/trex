@@ -88,6 +88,13 @@ interface Upstream {
 async function startUpstream(
   claimsFor: () => Record<string, unknown>,
   userinfo?: () => Record<string, unknown>,
+  // Extra members of the *token response*, re-read on every /token call so one
+  // upstream can answer four consecutive callbacks differently. The token
+  // response is untyped all the way to the column — @better-auth/core's
+  // getOAuth2Tokens does `refreshToken: data.refresh_token` with no coercion
+  // and no schema — so what an IdP puts in this JSON is what the hook is
+  // handed, and `null`, `""` and a number are all ordinary JSON.
+  tokenExtra?: () => Record<string, unknown>,
 ): Promise<Upstream> {
   const { privateKey, publicKey } = await generateKeyPair("RS256");
   const jwk = await exportJWK(publicKey);
@@ -124,6 +131,7 @@ async function startUpstream(
           token_type: "Bearer",
           expires_in: 300,
           id_token: idToken,
+          ...(tokenExtra ? tokenExtra() : {}),
         });
       }
       return new Response("not found", { status: 404 });
@@ -581,6 +589,122 @@ dbTest("what the callback stored comes back through the sanctioned reader", asyn
     assertEquals(tokens!.accessToken, "stub-access-token");
     assertEquals(tokens!.refreshToken, null);
     assertEquals(JSON.parse(atob(tokens!.idToken!.split(".")[1])).sub, sub);
+  } finally {
+    await cleanUp(l.pool, id);
+    await l.pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [sub]);
+    await up.close();
+  }
+});
+
+dbTest("the four refresh-token shapes an upstream can send, measured on the row", async (l) => {
+  // The hook's return value says nothing about what is written: with-hooks.mjs
+  // merges it over the pending row (`actualData = {...actualData, ...result.data}`),
+  // so a field the hook declines to seal is not omitted — the ORIGINAL value goes
+  // to the adapter. Every assertion here is therefore on the column, read back
+  // after a real callback, and the four shapes run in order against the SAME row
+  // so that "preserved" and "destroyed" are distinguishable.
+  const id = slug();
+  const sub = `${id}-subject`;
+  let tokenExtra: Record<string, unknown> = { refresh_token: "seed-refresh-token" };
+  const up = await startUpstream(() => ({ sub, username: "alice" }), undefined, () => tokenExtra);
+  const refreshColumn = async () => (await storedTokens(l.pool, id))[0].refreshToken;
+  try {
+    await seedProvider(l, id, up.origin);
+    await l.pool.query(
+      `INSERT INTO trexdb."user" (id, name, email, "emailVerified", role)
+       VALUES ($1,'Alice',$2,false,'user')`,
+      [sub, `${sub}@d2e.local`],
+    );
+    await l.pool.query(
+      `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId")
+       VALUES ($1,$2,$3,$4)`,
+      [crypto.randomUUID(), sub, sub, id],
+    );
+    const engine = engineTrusting(l.auth, up.origin);
+
+    // 1. A string: sealed, and readable back through the sanctioned reader.
+    assertEquals((await signIn(engine, l.auth.options.baseURL, id)).error, null);
+    const seeded = await refreshColumn();
+    assertNotEquals(seeded, "seed-refresh-token");
+    assertEquals(await decryptWithDek(seeded), "seed-refresh-token");
+
+    // 2. Absent: Better Auth filters undefined out of its update, so the column
+    //    is not written at all — the same ciphertext, byte for byte, not a
+    //    re-seal of the same value.
+    tokenExtra = {};
+    assertEquals((await signIn(engine, l.auth.options.baseURL, id)).error, null);
+    assertEquals(await refreshColumn(), seeded);
+
+    // 3. null. An ordinary JSON shape, and it reaches the column: null is not
+    //    undefined, so Better Auth's filter keeps it.
+    tokenExtra = { refresh_token: null };
+    assertEquals((await signIn(engine, l.auth.options.baseURL, id)).error, null);
+    assertEquals(await refreshColumn(), null);
+
+    // 4. "". The empty string is a string, so only a length test stands between
+    //    it and the column. NULL is what it has to become: null-ness is the one
+    //    property every reader tests, and "" is not a token.
+    tokenExtra = { refresh_token: "" };
+    assertEquals((await signIn(engine, l.auth.options.baseURL, id)).error, null);
+    assertEquals(await refreshColumn(), null);
+
+    // 5. A number, from a non-conformant IdP. This is the one that mattered:
+    //    before the fix the column held the string "12345" in CLEAR TEXT and
+    //    readAccountTokens then threw on the row for good. NULL, like every
+    //    other unusable value, and the reader still works.
+    tokenExtra = { refresh_token: 12345 };
+    assertEquals((await signIn(engine, l.auth.options.baseURL, id)).error, null);
+    assertEquals(await refreshColumn(), null);
+    const tokens = await (await import("./providers.ts")).readAccountTokens(l.pool, id, sub);
+    assertEquals(tokens!.refreshToken, null);
+    assertEquals(tokens!.accessToken, "stub-access-token");
+  } finally {
+    await cleanUp(l.pool, id);
+    await l.pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [sub]);
+    await up.close();
+  }
+});
+
+dbTest("a large id_token and a base64-shaped refresh token are sealed like any other", async (l) => {
+  // Narrowness against the two guards that would look reasonable in review and
+  // are not: a size cap (`value.length > 4096`), which an IdP that puts groups
+  // in the id_token walks straight past, and a "this already looks base64, so
+  // it must already be sealed" test. Both change what reaches the column, and
+  // nothing else in the suite varies either dimension.
+  const id = slug();
+  const sub = `${id}-subject`;
+  const groups = Array.from({ length: 300 }, (_, i) => `group-with-a-long-name-${i}`);
+  const base64Shaped = btoa("a-refresh-token-that-happens-to-be-base64-shaped-aaaa");
+  const up = await startUpstream(
+    () => ({ sub, username: "alice", groups }),
+    undefined,
+    () => ({ refresh_token: base64Shaped }),
+  );
+  try {
+    await seedProvider(l, id, up.origin);
+    await l.pool.query(
+      `INSERT INTO trexdb."user" (id, name, email, "emailVerified", role)
+       VALUES ($1,'Alice',$2,false,'user')`,
+      [sub, `${sub}@d2e.local`],
+    );
+    await l.pool.query(
+      `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId")
+       VALUES ($1,$2,$3,$4)`,
+      [crypto.randomUUID(), sub, sub, id],
+    );
+    assertEquals(
+      (await signIn(engineTrusting(l.auth, up.origin), l.auth.options.baseURL, id)).error,
+      null,
+    );
+
+    const row = (await storedTokens(l.pool, id))[0];
+    const idToken = await decryptWithDek(row.idToken);
+    // The id_token really is over the cap a reviewer would reach for.
+    assertEquals(idToken.length > 4096, true);
+    assertEquals(JSON.parse(atob(idToken.split(".")[1])).groups.length, 300);
+    assertEquals((row.idToken as string).startsWith("eyJ"), false);
+    assertNotEquals(row.refreshToken, base64Shaped);
+    assertEquals(await decryptWithDek(row.refreshToken), base64Shaped);
   } finally {
     await cleanUp(l.pool, id);
     await l.pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [sub]);
