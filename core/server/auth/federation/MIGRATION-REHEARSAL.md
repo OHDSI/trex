@@ -151,3 +151,43 @@ Port kept, case folded, path and trailing slash dropped. The claim holds.
 
 The `{}` row falling back to `sub` is V20's documented fallback and is the case
 that makes a provider configured before federation still resolvable.
+
+## 4. The suites, against the migrated copy
+
+Run per directory, `DATABASE_URL` pointing at a clone of the migrated rehearsal
+database (V19 real schema + V20 + V21 + the 69-row population):
+
+| directory | result |
+|---|---|
+| `auth/federation/` | **262 passed / 0 failed** |
+| `auth/*.test.ts` | **185 passed / 0 failed** |
+| `auth/oidc/` | **79 passed / 0 failed** |
+| `mcp/tools/` | **10 passed / 0 failed** |
+
+536 total — identical to Task 10's baseline (`progress.md:1193`), so the
+migrated real-schema database reproduces it exactly.
+
+Frozen blobs re-verified on this tree:
+
+```
+a927802fef2abe5d93c5c79f928db702d5604ef0  admin-api.contract.test.ts
+de05a39f9c4fb73f8eb165d399525e50a55a21b0  auth-router.contract.test.ts
+02394bc9f89ee29e6d2e9a2587682f3ef6bfaa1d  head -2173 auth-router.contract.test.ts
+```
+
+All three match. Neither file was edited.
+
+### Two things the run needed that the brief did not mention
+
+1. **`deno test` must be run `--no-check`.** Type-checking fails on
+   `core/server/auth/password.ts:20` and `:41` — `Expected 3 arguments, but got
+   4` for `promisify(scrypt)`. That file was last touched in `451d3e45`, long
+   before Phase 3, and nothing in `auth/federation/` imports the failing
+   expression's types; it is a `@types/node` mismatch in the installed
+   `node_modules`, not a defect this phase introduced. Recorded because a
+   reader running the suites the obvious way will hit it and may mistake it for
+   one.
+2. **The copy needs the `auth` schema as well as `trexdb`.**
+   `admin.test.ts:650` calls `auth.uid()`. A `--schema=trexdb` dump alone makes
+   "a pre-linked user with a 12-character id signs in end to end" fail with
+   `schema "auth" does not exist`. With `--schema=auth` added, green.
