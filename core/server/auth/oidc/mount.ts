@@ -5,7 +5,7 @@
 // requireAdmin in front — so anything outside the provider's own paths is 404.
 import express from "express";
 import { BASE_PATH } from "../../config.ts";
-import { auth } from "../better-auth.ts";
+import { auth, JWKS_PATH } from "../better-auth.ts";
 import {
   userInfoFailureBudget,
   normalizeForwardedFor,
@@ -14,6 +14,7 @@ import {
   trustedProxies,
 } from "./config.ts";
 import { createFailureBudget, isUserInfoRefusal } from "./userinfo-limit.ts";
+import { createJwksLocalReadFetch, providerJwksUrl } from "./jwks-local-read.ts";
 import {
   annotateLogoutConfirmation,
   type HintVerdict,
@@ -326,7 +327,33 @@ export async function installSoftDeleteGuard(): Promise<void> {
  * fired and forgotten: the guard above has to be in place before the first
  * request, and a request cannot arrive before `server.listen`.
  */
+/**
+ * Answers the provider's own key-set request without letting it reach the
+ * network. jwks-local-read.ts carries the upstream inconsistency this works
+ * around and why `jwks.remoteUrl` cannot be used instead.
+ *
+ * Installed once, at mount time rather than per request: the provider issues
+ * this request from inside its own handler, so installing and removing a
+ * wrapper around each call would race between two concurrent logouts. Mount
+ * time also keeps it out of unit tests that merely import this module.
+ */
+function installJwksLocalRead(): void {
+  const realFetch = globalThis.fetch.bind(globalThis);
+  globalThis.fetch = createJwksLocalReadFetch({
+    jwksUrl: providerJwksUrl(oidcIssuer(), JWKS_PATH),
+    readJwks: () => auth.api.getJwks(),
+    realFetch,
+    onError: (error) =>
+      console.error(
+        "[oidc] reading the key set locally failed; falling back to the network " +
+          "request the provider would have made:",
+        error,
+      ),
+  });
+}
+
 export async function mountOidcProvider(app: express.Application): Promise<void> {
+  installJwksLocalRead();
   await installSoftDeleteGuard();
   // Mounted BEFORE the global body buffering, which is the most likely cause of
   // the body-parsing issues recorded when Better Auth was removed in March.

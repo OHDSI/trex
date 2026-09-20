@@ -30,6 +30,12 @@
 // Both were read off the pinned packages. So there is no configuration that
 // fixes the fetch without breaking discovery, and trex does not set it.
 //
+// SINCE THEN the fetch itself is answered in-process — jwks-local-read.ts
+// serves that one URL from the local key set, so the hint verifies and the
+// logout completes. This module still earns its place: that interception fails
+// OPEN, so a local read that throws puts the original network request back and
+// lands here exactly as before.
+//
 // What is left is to stop the failure being SILENT. To a browser it is
 // invisible today: a hint the provider could not verify produces the same
 // "Confirm logout" page as no hint at all, so a user who was supposed to be

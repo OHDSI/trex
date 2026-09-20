@@ -55,6 +55,16 @@ function authBaseUrl(): string {
   return oidcIssuer();
 }
 
+/**
+ * Where the jwt plugin serves the key set, relative to the base URL.
+ *
+ * Exported because the OAuth provider builds its OWN request for this path out
+ * of the same two values (`${baseURL}${jwksPath}`), and auth/oidc/mount.ts has
+ * to reproduce that URL exactly in order to answer it locally. A literal in
+ * both places is a literal that can drift.
+ */
+export const JWKS_PATH = "/.well-known/jwks.json";
+
 // The same variable and the same split as the CORS allow-list in index.ts, so
 // an origin trusted for one cannot silently differ from the other.
 const trustedOrigins = (Deno.env.get("BETTER_AUTH_TRUSTED_ORIGINS") || "")
@@ -193,7 +203,7 @@ export const auth = betterAuth({
     jwt({
       jwks: {
         keyPairConfig: { alg: "RS256", modulusLength: 2048 },
-        jwksPath: "/.well-known/jwks.json",
+        jwksPath: JWKS_PATH,
       },
       jwt: { issuer: oidcIssuer() },
       disableSettingJwtHeader: true,
