@@ -268,3 +268,95 @@ Deno.test("attach returns 500 on a fatal error regardless of collected results",
   // request), but it must not report failure.
   assertEquals(attachResponseStatus([], false), 200);
 });
+
+// ---------------------------------------------------------------------------
+// /d2e/oauth/token client authentication (routes.ts applyClientAuthentication)
+// ---------------------------------------------------------------------------
+import { applyClientAuthentication } from "./routes.ts";
+// The provider's OWN decoder, not a reimplementation. These assertions are only
+// worth anything if what this proxy encodes is what the thing at the other end
+// decodes, and that is exactly the pair the plugin uses
+// (extractClientCredentials -> basicToClientCredentials -> decodeBasicCredentials).
+import { decodeBasicCredentials } from "better-auth/oauth2";
+
+const TREX_CFG = {
+  clientId: "d2e-webapi",
+  clientSecret: "5FT0DkLlEvzGXAjP08EMuRSU3U72yh",
+  tokenEndpointAuthMethod: "client_secret_basic" as const,
+};
+
+Deno.test("trex: the secret moves into a Basic header and OUT of the body", () => {
+  // Both halves, because either one alone is a bug the stack showed:
+  // a body-only secret is refused with `client registered for
+  // client_secret_basic cannot use client_secret_post`, and a body secret sent
+  // ALONGSIDE the header is what Logto refuses and what would leave an unusable
+  // credential in this route's own log line.
+  const params = new URLSearchParams({
+    grant_type: "authorization_code",
+    client_id: "d2e-webapi",
+    code: "abc",
+    client_secret: "posted-by-the-caller",
+  });
+  const headers = applyClientAuthentication(params, TREX_CFG);
+  assertEquals(params.has("client_secret"), false);
+  assertEquals(params.get("code"), "abc");
+  assertEquals(Object.keys(headers), ["Authorization"]);
+  assertEquals(decodeBasicCredentials(headers.Authorization), {
+    clientId: "d2e-webapi",
+    clientSecret: "5FT0DkLlEvzGXAjP08EMuRSU3U72yh",
+  });
+});
+
+Deno.test("trex: a secret with reserved characters survives the round trip", () => {
+  // RFC 6749 §2.3.1 form-url-encodes each half before base64, and the provider
+  // form-url-DECODES each half. A hand-rolled `btoa(id + ":" + secret)` agrees
+  // with that for the alphanumeric secret d2e generates today and silently
+  // corrupts anything else, so the case that would catch it is asserted rather
+  // than the case that would not.
+  const params = new URLSearchParams({ grant_type: "refresh_token" });
+  const headers = applyClientAuthentication(params, {
+    ...TREX_CFG,
+    clientId: "d2e webapi+x",
+    clientSecret: "se:cr%et+ /",
+  });
+  assertEquals(decodeBasicCredentials(headers.Authorization), {
+    clientId: "d2e webapi+x",
+    clientSecret: "se:cr%et+ /",
+  });
+});
+
+Deno.test("logto: the secret stays in the body and no header is added", () => {
+  // The no-D2E_IDP regression. An existing deployment must be bit-for-bit what
+  // it was, and Logto refuses a request presenting client auth two ways.
+  const params = new URLSearchParams({ grant_type: "authorization_code", code: "abc" });
+  const headers = applyClientAuthentication(params, {
+    clientId: "portal-app",
+    clientSecret: "shh",
+    tokenEndpointAuthMethod: "client_secret_post",
+  });
+  assertEquals(headers, {});
+  assertEquals(params.get("client_secret"), "shh");
+});
+
+Deno.test("logto: a secret the caller already supplied is not overwritten", () => {
+  const params = new URLSearchParams({ client_secret: "callers-own" });
+  applyClientAuthentication(params, {
+    clientId: "portal-app",
+    clientSecret: "shh",
+    tokenEndpointAuthMethod: "client_secret_post",
+  });
+  assertEquals(params.getAll("client_secret"), ["callers-own"]);
+});
+
+Deno.test("no secret configured adds neither a header nor a body parameter", () => {
+  for (const method of ["client_secret_basic", "client_secret_post"] as const) {
+    const params = new URLSearchParams({ grant_type: "authorization_code" });
+    const headers = applyClientAuthentication(params, {
+      clientId: "c",
+      clientSecret: "",
+      tokenEndpointAuthMethod: method,
+    });
+    assertEquals(headers, {}, method);
+    assertEquals(params.has("client_secret"), false, method);
+  }
+});

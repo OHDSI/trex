@@ -22,6 +22,8 @@ export async function postToIdpToken(
   budgetMs: number = IDP_TOKEN_RETRY_BUDGET_MS,
   sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
   doFetch: typeof fetch = fetch,
+  /** Client authentication that does not ride in the body — i.e. `Authorization: Basic`. */
+  extraHeaders: Record<string, string> = {},
 ): Promise<Response> {
   const deadline = Date.now() + budgetMs;
   let delay = 500;
@@ -29,7 +31,7 @@ export async function postToIdpToken(
     try {
       return await doFetch(tokenUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: { "Content-Type": "application/x-www-form-urlencoded", ...extraHeaders },
         body,
       });
     } catch (e) {

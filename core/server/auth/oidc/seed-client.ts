@@ -135,18 +135,45 @@ async function registerClient(
       // Deliberately NOT `openid`: see SERVICE_SCOPE, where the reason lives
       // next to the value.
       JSON.stringify(confidential ? [SERVICE_SCOPE] : []),
-      // The plugin defaults requirePKCE to true even for a confidential client,
-      // which is stricter than trex's own row (require_pkce was set only for
-      // public clients). Kept, because it is also the only thing that stops a
-      // stolen authorization code being redeemed by whoever intercepted it.
-      true,
-      // Derived from how the credentials arrive: Basic header ->
-      // client_secret_basic, client_id + client_secret in the body ->
-      // client_secret_post. validateClientCredentials refuses outright when the
-      // presented method is not the registered one, and d2e's /oauth/token
-      // proxy sends the secret in the body and deliberately does not also send
-      // Basic (d2e-compat/routes.ts:390-393).
-      confidential ? "client_secret_post" : "none",
+      // Required of a public client, not of a confidential one — which is
+      // exactly the row trex wrote before this phase (`require_pkce` was set
+      // only for public clients), restored rather than reinvented.
+      //
+      // The plugin's own default is `true` for every client, and holding a
+      // confidential client to it is a **release blocker**: Spring Security
+      // sends no `code_challenge` at all — its authorize request is exactly
+      // `response_type, client_id, scope, state, redirect_uri, nonce` — so
+      // every WebAPI (and therefore every Atlas) sign-in is refused at
+      // /authorize with `pkce is required for this client`. Measured on a real
+      // stack; see CUTOVER-REHEARSAL.md §5a and §18.
+      //
+      // This gives up nothing for the clients that DO send PKCE. `requirePKCE`
+      // only decides whether a challenge is *demanded*; it does not decide
+      // whether a supplied one is *honoured*. /authorize still rejects a
+      // malformed or non-S256 challenge and still binds a well-formed one to
+      // the code (dist/authorize-riRRCSbC.mjs:5594-5596), and /oauth2/token
+      // still refuses the exchange when the challenge was used in
+      // authorization and the verifier is wrong or missing
+      // (dist/introspect-njKASm3q.mjs:1996-2009) — both branches keyed on the
+      // stored `code_challenge`, never on this column. Measured both ways on
+      // the running stack (CUTOVER-REHEARSAL.md §18), so the portal keeps its
+      // stolen-code protection in full.
+      //
+      // `false` and not null: the plugin reads `client.requirePKCE ?? true`, so
+      // leaving it unset would silently reinstate the blocker.
+      !confidential,
+      // The method the registered client must authenticate with. The plugin
+      // refuses any other one outright (validateClientCredentials,
+      // dist/utils-CWjOhEQb.mjs:641), so this single column has to name the
+      // method EVERY consumer of this client id uses.
+      //
+      // Basic, because Spring Security's is not negotiable: WebAPI sends the
+      // credentials as an Authorization header and the exchange 401s against a
+      // `client_secret_post` row (CUTOVER-REHEARSAL.md §5b). d2e's own
+      // /oauth/token proxy is code this repository owns, so it is the side that
+      // moves — it now sends Basic when it is talking to trex's own provider
+      // (d2e-compat/routes.ts).
+      confidential ? "client_secret_basic" : "none",
       JSON.stringify(["authorization_code", "refresh_token", "client_credentials"]),
       JSON.stringify(["code"]),
       // There is no column for the roles a client carries. They ride in

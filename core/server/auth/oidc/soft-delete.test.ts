@@ -14,6 +14,7 @@
 // Gated on DATABASE_URL like the other auth suites, and skipping rather than
 // inventing one.
 import { assertEquals, assertNotEquals } from "jsr:@std/assert";
+import { encodeBasicCredentials } from "better-auth/oauth2";
 
 const DATABASE_URL = Deno.env.get("DATABASE_URL");
 
@@ -146,10 +147,17 @@ async function authorize(flow: Flow): Promise<{ status: number; code: string | n
 async function postToken(flow: Flow, body: Record<string, string>) {
   const res = await fetch(`${flow.server.url}/oauth2/token`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      // Basic, not a body secret: upsertOAuthClient registers every
+      // confidential client `client_secret_basic` (seed-client.ts), and the
+      // provider refuses any other method outright. Encoded with the package's
+      // own encoder — the inverse of the decoder the provider runs — so the two
+      // cannot disagree about RFC 6749 §2.3.1.
+      authorization: encodeBasicCredentials(flow.clientId, CLIENT_SECRET),
+    },
     body: new URLSearchParams({
       client_id: flow.clientId,
-      client_secret: CLIENT_SECRET,
       ...body,
     }),
   });
@@ -380,10 +388,17 @@ test("a banned user's session no longer authorizes at all", async (m) => {
 async function introspect(flow: Flow, token: string) {
   const res = await fetch(`${flow.server.url}/oauth2/introspect`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      // Basic, not a body secret: upsertOAuthClient registers every
+      // confidential client `client_secret_basic` (seed-client.ts), and the
+      // provider refuses any other method outright. Encoded with the package's
+      // own encoder — the inverse of the decoder the provider runs — so the two
+      // cannot disagree about RFC 6749 §2.3.1.
+      authorization: encodeBasicCredentials(flow.clientId, CLIENT_SECRET),
+    },
     body: new URLSearchParams({
       client_id: flow.clientId,
-      client_secret: CLIENT_SECRET,
       token,
     }),
   });

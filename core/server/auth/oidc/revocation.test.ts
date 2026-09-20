@@ -16,6 +16,7 @@
 //
 // Gated on DATABASE_URL like the other auth suites.
 import { assertEquals, assertNotEquals } from "jsr:@std/assert";
+import { encodeBasicCredentials } from "better-auth/oauth2";
 import express from "express";
 
 const DATABASE_URL = Deno.env.get("DATABASE_URL");
@@ -196,10 +197,17 @@ async function establishOidcSession(flow: Flow): Promise<string> {
 async function postToken(flow: Flow, body: Record<string, string>) {
   const res = await fetch(`${flow.oidc}/oauth2/token`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      // Basic, not a body secret: upsertOAuthClient registers every
+      // confidential client `client_secret_basic` (seed-client.ts), and the
+      // provider refuses any other method outright. Encoded with the package's
+      // own encoder — the inverse of the decoder the provider runs — so the two
+      // cannot disagree about RFC 6749 §2.3.1.
+      authorization: encodeBasicCredentials(flow.clientId, CLIENT_SECRET),
+    },
     body: new URLSearchParams({
       client_id: flow.clientId,
-      client_secret: CLIENT_SECRET,
       ...body,
     }),
   });

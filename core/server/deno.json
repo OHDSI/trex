@@ -30,6 +30,7 @@
     "better-auth/plugins": "npm:better-auth@1.7.5/plugins",
     "better-auth/db/migration": "npm:better-auth@1.7.5/db/migration",
     "better-auth/crypto": "npm:better-auth@1.7.5/crypto",
+    "better-auth/oauth2": "npm:better-auth@1.7.5/oauth2",
     "@better-auth/oauth-provider": "npm:@better-auth/oauth-provider@1.7.5"
   },
   "tasks": {

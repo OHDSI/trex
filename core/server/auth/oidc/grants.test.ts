@@ -10,6 +10,7 @@
 // Gated on DATABASE_URL like the other auth suites, and skipping rather than
 // inventing one.
 import { assertEquals, assertNotEquals, assertStringIncludes } from "jsr:@std/assert";
+import { encodeBasicCredentials } from "better-auth/oauth2";
 
 const DATABASE_URL = Deno.env.get("DATABASE_URL");
 
@@ -152,10 +153,17 @@ async function authorize(
 async function postToken(flow: Flow, body: Record<string, string>) {
   const res = await fetch(`${flow.server.url}/oauth2/token`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      // Basic, not a body secret: upsertOAuthClient registers every
+      // confidential client `client_secret_basic` (seed-client.ts), and the
+      // provider refuses any other method outright. Encoded with the package's
+      // own encoder — the inverse of the decoder the provider runs — so the two
+      // cannot disagree about RFC 6749 §2.3.1.
+      authorization: encodeBasicCredentials(flow.clientId, CLIENT_SECRET),
+    },
     body: new URLSearchParams({
       client_id: flow.clientId,
-      client_secret: CLIENT_SECRET,
       ...body,
     }),
   });
@@ -212,15 +220,60 @@ test("a challenge and a method are both required, or neither", async (_m, flow) 
   assertEquals(res.code, null);
 });
 
-test("PKCE is required of this client even though it is confidential", async (_m, flow) => {
-  // isPKCERequired honours client.requirePKCE ?? true, which the seeder sets —
-  // stricter than trex, which required it only when the client said so. It is
-  // also the only thing that stops a stolen code being redeemed by whoever
-  // intercepted it.
+test("a confidential client may complete the flow without PKCE at all", async (_m, flow) => {
+  // This is WebAPI's shape, exactly: Spring Security's authorize request is
+  // `response_type, client_id, scope, state, redirect_uri, nonce` and carries
+  // no code_challenge (CUTOVER-REHEARSAL.md §5a). The plugin's own default —
+  // `client.requirePKCE ?? true` — refuses it with `pkce is required for this
+  // client`, which made every WebAPI and Atlas sign-in impossible; the seeder
+  // now registers a confidential client `requirePKCE: false`, which is the row
+  // trex wrote before this phase.
+  //
+  // Asserted through to a TOKEN, not just to a code: the token endpoint runs
+  // isPKCERequired a second time against the granted scopes
+  // (dist/introspect-njKASm3q.mjs:1983-1990), so a code issued here could still
+  // be unredeemable.
   const res = await authorize(flow, { code_challenge: null, code_challenge_method: null });
-  assertEquals(res.code, null);
-  assertEquals(res.error, "invalid_request");
-  assertStringIncludes(res.location ?? "", "pkce");
+  assertEquals(res.error, null, res.location ?? res.body);
+  assertNotEquals(res.code, null, res.location ?? res.body);
+
+  const exchanged = await postToken(flow, {
+    grant_type: "authorization_code",
+    code: res.code!,
+    redirect_uri: REDIRECT_URI,
+    resource: flow.server.issuer,
+  });
+  assertEquals(exchanged.status, 200, JSON.stringify(exchanged.body));
+});
+
+test("a public client is still held to PKCE, whatever the column says", async (m, flow) => {
+  // The half of the old behaviour that must NOT move with it. isPKCERequired
+  // refuses a public client before it ever reads requirePKCE
+  // (dist/utils-CWjOhEQb.mjs:836), and the seeder registers a client with no
+  // secret as `tokenEndpointAuthMethod: "none"` — so relaxing the column for
+  // confidential clients cannot relax it for public ones.
+  const publicId = `${flow.clientId}-public`;
+  await m.seed.upsertOAuthClient({
+    clientId: publicId,
+    clientSecret: undefined,
+    name: "grants suite public",
+    redirectUris: [REDIRECT_URI],
+    postLogoutRedirectUris: [],
+    clientRoles: [],
+    allowedScopes: ["openid", "profile", "email", "offline_access"],
+    resourceIdentifier: flow.server.issuer,
+  });
+  try {
+    const res = await authorize(
+      { ...flow, clientId: publicId },
+      { code_challenge: null, code_challenge_method: null },
+    );
+    assertEquals(res.code, null);
+    assertEquals(res.error, "invalid_request");
+    assertStringIncludes(res.location ?? "", "pkce");
+  } finally {
+    await m.db.pool.query(`DELETE FROM trexdb."oauthClient" WHERE "clientId" = $1`, [publicId]);
+  }
 });
 
 test("a code issued with a challenge needs the verifier that produced it", async (_m, flow) => {
@@ -235,13 +288,20 @@ test("a code issued with a challenge needs the verifier that produced it", async
     const [verifier, description] of [
       ["not-the-verifier", "code verification failed"],
       // An empty verifier is not "no PKCE": it is a falsy one, so it lands on
-      // the same branch as sending none at all. Measured, and one branch
-      // earlier than the "code_verifier required because PKCE was used in
-      // authorization" the plugin also carries (:1997-2000) — this client's
-      // requirePKCE column is checked first (:1985-1990), so a client with the
-      // column unset would fail here with the other message.
-      ["", "PKCE is required for this client"],
-      [null, "PKCE is required for this client"],
+      // the same branch as sending none at all.
+      //
+      // THIS IS THE TEST THAT CARRIES THE WHOLE ARGUMENT FOR requirePKCE:false.
+      // The refusal now comes from the branch keyed on the STORED
+      // code_challenge (:1996-2009) rather than from the requirePKCE column
+      // (:1983-1990), because the column is false for this confidential client.
+      // That is the point: the column decides whether a challenge is DEMANDED,
+      // never whether a supplied one is HONOURED. A client that sends PKCE — the
+      // d2e portal does — keeps its stolen-code protection in full, and these
+      // two rows are what says so. If this message ever reverts to "PKCE is
+      // required for this client", the column moved back and WebAPI cannot sign
+      // in; if it becomes a 200, the protection is gone.
+      ["", "code_verifier required because PKCE was used in authorization"],
+      [null, "code_verifier required because PKCE was used in authorization"],
     ] as const
   ) {
     const authorized = await authorize(flow);

@@ -23,6 +23,16 @@ export interface IdpConfig {
   /** Client the portal authenticates as, and its secret for the code exchange. */
   clientId: string;
   clientSecret: string;
+  /**
+   * How the /oauth/token proxy must present that secret.
+   *
+   * Not a preference: an OAuth client is registered for exactly one method and
+   * the provider refuses any other. trex's own provider refuses a mismatch with
+   * `client registered for … cannot use …`; Logto refuses a request that
+   * presents client auth two ways at once. So the proxy has to know which side
+   * it is talking to, and this is where that is decided.
+   */
+  tokenEndpointAuthMethod: "client_secret_basic" | "client_secret_post";
   scope: string;
   /** Token endpoint the /oauth/token proxy forwards to. */
   tokenUrl: string;
@@ -115,6 +125,13 @@ export function resolveIdpConfig(
       ),
       clientId: env.TREX_OIDC_CLIENT_ID ?? "",
       clientSecret: env.TREX_OIDC_CLIENT_SECRET ?? "",
+      // Basic, because there is exactly ONE seeded client row and WebAPI has to
+      // be able to use it too. Spring Security authenticates
+      // `client_secret_basic` and cannot be told otherwise, so a
+      // `client_secret_post` row 401s every WebAPI and Atlas sign-in
+      // (CUTOVER-REHEARSAL.md §5b). This proxy is the side that can move, so it
+      // moves; seed-client.ts registers the row to match.
+      tokenEndpointAuthMethod: "client_secret_basic",
       // offline_access is not optional here: the plugin issues a refresh token
       // only when that scope was granted
       // (dist/introspect-njKASm3q.mjs:1798), where trex's own provider issued
@@ -160,6 +177,11 @@ export function resolveIdpConfig(
     // that secret to Logto, which answers 401 on the code exchange, and the only
     // visible symptom is an undefined access_token failing much later.
     clientSecret: env.LOGTO__CLIENT_SECRET || env.SECURITY_AUTH_OIDC_APISECRET || "",
+    // Unchanged from every d2e release that predates trex's own provider: the
+    // secret goes in the body and no Basic header is sent alongside it, because
+    // Logto refuses a request that presents client auth twice. A deployment
+    // that sets no D2E_IDP is bit-for-bit what it was.
+    tokenEndpointAuthMethod: "client_secret_post",
     scope: env.LOGTO__SCOPE ?? "",
     tokenUrl: env.LOGTO__TOKEN_URL ?? "",
     resource: env.LOGTO__RESOURCE_API ?? "",

@@ -79,8 +79,21 @@ test("the seeded client never reaches a consent screen", async () => {
   const row = await clientRow();
   assertEquals(row.skipConsent, true);
   assertEquals(row.enableEndSession, true);
-  assertEquals(row.requirePKCE, true);
-  assertEquals(row.tokenEndpointAuthMethod, "client_secret_post");
+  // Both of these are the release blocker the cutover rehearsal found, pinned.
+  //
+  // requirePKCE MUST be false for a confidential client: Spring Security sends
+  // no code_challenge, so `true` refuses every WebAPI and Atlas sign-in with
+  // `pkce is required for this client` (CUTOVER-REHEARSAL.md §5a). It costs the
+  // clients that DO send PKCE nothing — grants.test.ts pins that the supplied
+  // challenge is still bound and verified.
+  //
+  // client_secret_basic MUST be the method for the same reason from the other
+  // end: Spring sends the credentials as an Authorization header and a
+  // client_secret_post row 401s the exchange (§5b). There is exactly one client
+  // row and WebAPI cannot be told to use the other method, so this is the one
+  // the d2e /oauth/token proxy was changed to match.
+  assertEquals(row.requirePKCE, false);
+  assertEquals(row.tokenEndpointAuthMethod, "client_secret_basic");
   assertEquals(row.grantTypes, ["authorization_code", "refresh_token", "client_credentials"]);
   assertEquals(row.responseTypes, ["code"]);
 });
@@ -102,6 +115,11 @@ test("a client with no secret is public and is held to PKCE instead", async () =
   const row = await clientRow();
   assertEquals(row.clientSecret, null);
   assertEquals(row.tokenEndpointAuthMethod, "none");
+  // Unchanged, and deliberately not moved with the confidential case: a public
+  // client has no secret to authenticate with, so PKCE is the only thing
+  // standing between a stolen code and a token. The plugin refuses one without
+  // PKCE regardless (dist/utils-CWjOhEQb.mjs:836); the column says the same
+  // thing rather than relying on that.
   assertEquals(row.requirePKCE, true);
   // The plugin refuses client_credentials scopes on a public client, and
   // refuses the grant itself for one, so the list is empty rather than wrong.

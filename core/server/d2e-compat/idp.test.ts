@@ -38,6 +38,10 @@ Deno.test("with no D2E_IDP every value matches the pre-switch Logto behaviour", 
   assertEquals(c.audiences, ["https://api.example"]);
   assertEquals(c.clientId, "portal-app");
   assertEquals(c.clientSecret, "shh");
+  // The secret still rides in the body and no Basic header is sent beside it.
+  // Logto refuses a request that presents client auth twice, so an existing
+  // deployment would stop being able to sign in at all if this moved.
+  assertEquals(c.tokenEndpointAuthMethod, "client_secret_post");
   assertEquals(c.scope, "openid profile email offline_access");
   assertEquals(c.tokenUrl, "https://logto.example/oidc/token");
   assertEquals(c.resource, "https://api.example");
@@ -94,6 +98,14 @@ Deno.test("trex: issuer, jwks and token endpoint come from the provider's own co
   assertEquals(c.tokenUrl, "https://trex.example/oidc/oauth2/token");
   assertEquals(c.clientId, "d2e-portal");
   assertEquals(c.clientSecret, "t-secret");
+  // Basic, and it is load-bearing. There is exactly one seeded client row and
+  // WebAPI shares it; Spring Security authenticates client_secret_basic and
+  // cannot be told otherwise, so the row is registered basic
+  // (auth/oidc/seed-client.ts) and this proxy is the side that moved. A row and
+  // a proxy that disagree produce
+  // `client registered for client_secret_basic cannot use client_secret_post`
+  // and break every portal call (CUTOVER-REHEARSAL.md §5c).
+  assertEquals(c.tokenEndpointAuthMethod, "client_secret_basic");
   assertEquals(c.audiences, ["https://trex.example/oidc", "d2e-portal"]);
   assertEquals(c.authorizePath, "oidc/oauth2/authorize");
   // Selecting trex must not leak Logto's endpoints through.

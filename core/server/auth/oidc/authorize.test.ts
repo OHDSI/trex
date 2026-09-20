@@ -14,6 +14,7 @@
 // Gated on DATABASE_URL like the other auth suites, and skipping rather than
 // inventing one.
 import { assertEquals, assertNotEquals, assertStringIncludes } from "jsr:@std/assert";
+import { encodeBasicCredentials } from "better-auth/oauth2";
 
 const DATABASE_URL = Deno.env.get("DATABASE_URL");
 
@@ -315,11 +316,18 @@ test("idp_groups is grantable only to a client that allows it", async (m, f) => 
 
   const token = await fetch(`${f.server.url}/oauth2/token`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      // Basic, not a body secret: upsertOAuthClient registers every
+      // confidential client `client_secret_basic` (seed-client.ts), and the
+      // provider refuses any other method outright. Encoded with the package's
+      // own encoder — the inverse of the decoder the provider runs — so the two
+      // cannot disagree about RFC 6749 §2.3.1.
+      authorization: encodeBasicCredentials(withIt, CLIENT_SECRET),
+    },
     body: new URLSearchParams({
       grant_type: "authorization_code",
       client_id: withIt,
-      client_secret: CLIENT_SECRET,
       code: code!,
       redirect_uri: REDIRECT_URI,
       code_verifier: granted.verifier,
