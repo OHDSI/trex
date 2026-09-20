@@ -191,3 +191,62 @@ All three match. Neither file was edited.
    `admin.test.ts:650` calls `auth.uid()`. A `--schema=trexdb` dump alone makes
    "a pre-linked user with a 12-character id signs in end to end" fail with
    `schema "auth" does not exist`. With `--schema=auth` added, green.
+
+## 5. THE GATE, on the whole migrated population — **PASSES**
+
+Driven through `auth.options` spread verbatim (the engine `better-auth.ts`
+exports, plugins and all; only `trustedOrigins` widened for the stub and the
+rate limiter off), against the **migrated** `logto` row — the row V20 wrote,
+re-aimed at the stub through `refreshProviderOidcConfig`, i.e. trex's own
+writer, not a literal.
+
+The upstream is deliberately **Logto-shaped**: its discovery document
+advertises `userinfo_endpoint`, so the plugin takes the UserInfo branch, and
+its UserInfo document carries `sub`, `username` and `name` and **no `email`,
+no `email_verified`** — a username-only directory entry.
+
+All 69 pre-linked users signed in, one after another:
+
+```
+REFUSED: 0 []
+SESSIONS distinct userId = 69
+ACCOUNTS {"n":69,"same":69}
+```
+
+- **0 refusals out of 69.** Every one returned 302 to `/signed-in` with no
+  `?error=`.
+- **69 distinct sessions**, each keyed on the user's pre-migration id.
+- **69 account rows, all with `"userId" = "accountId"`** — the plugin created
+  no second row for any identity, which is what `requireExactAccountBinding`
+  plus the preserved `("providerId","accountId")` key are for.
+- **`SELECT id, email, is_placeholder_email FROM trexdb."user" ORDER BY id`
+  is byte-identical before and after all 69 sign-ins.** The 66 `usrN@d2e.local`
+  placeholders were not rewritten and not one `is_placeholder_email` was
+  cleared. This is the gate the phase rests on, and it is open on the whole
+  population rather than on one fixture.
+- **`user_role` identical before and after**, all 69 rows.
+
+### The branch actually taken — §9.1 confirmed, §1's branch never runs
+
+```
+USERINFO calls=69 first={"sub":"logto-subject-1","username":"usr1","name":"Rehearsed User"}
+USERINFO auth header prefix=["Bearer"]
+```
+
+Sixty-nine UserInfo fetches for sixty-nine sign-ins. The id_token branch was
+**not taken once**. `PHASE3-SPIKE-FINDINGS.md` §9.1 is right and §1's line
+numbers describe a path this configuration never reaches — so the claim
+`mapping.email` names has to be present in the **UserInfo document**, not
+merely in the id_token. Section 6 below measures what happens when it is not.
+
+### The `idp` block, from the id_token, on the UserInfo branch
+
+```
+IDP {"app_metadata":{"idp":{"groups":["alp-admins"],"provider":"logto"},
+     "provider":"email","providers":["email"]},"stamped":true}
+```
+
+The groups claim reached trex even though UserInfo fed the profile, because
+`provision.ts` decodes the id_token rather than reading `userInfo` — exactly
+what §9.1 says has to be true, now observed on the branch that matters.
+`last_sign_in_at` is stamped.
