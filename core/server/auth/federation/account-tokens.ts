@@ -71,15 +71,14 @@ async function sealTokens(data: AccountData): Promise<{ data: Record<string, str
     // Everything else — null, "", a number — is named as null rather than left
     // to the merge, which would write it verbatim.
     //
-    // This does NOT reproduce upsertAccount's
-    // COALESCE(EXCLUDED."refreshToken", stored): an upstream that sends
-    // `refresh_token: null` clears a stored refresh token. The hook cannot
-    // prevent that, because updateWithHooks passes it the update payload and
-    // not the `where` clause, so it cannot tell which row is being written.
-    // Preserving the stored value has to happen where the old row is visible —
-    // a BEFORE UPDATE trigger on trexdb.account (a new migration), which would
-    // also cover every other writer. Not done here; recorded so the gap is not
-    // rediscovered as a surprise.
+    // Writing null here does NOT destroy a stored refresh token: V21's
+    // trg_account_preserve_refresh_token puts the old value back, which is
+    // upsertAccount's COALESCE(EXCLUDED."refreshToken", stored) restored. It has
+    // to live there rather than here because updateWithHooks passes this hook
+    // the update payload and the endpoint context but not the `where` clause,
+    // and the sign-in payload carries no id and no accountId — so the hook
+    // cannot identify the row it is updating, let alone read its old value.
+    // accessToken and idToken are deliberately NOT preserved; V21 says why.
     if (value !== undefined) out[field] = null;
   }
   return { data: out };
