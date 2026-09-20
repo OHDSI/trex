@@ -99,7 +99,7 @@ schemaTest("no schema migration is outstanding", async (auth) => {
       //
       //   issuer/domain — V11 left issuer nullable so a pre-federation row
       //     keeps working and is simply not usable for federation;
-      //     loadProviders' `issuer IS NOT NULL` carries the distinction, and
+      //     `issuer IS NOT NULL` carries the distinction, and
       //     domain is derived from issuer so it is NULL for exactly those rows.
       //   userId — trex has no value for it: the federation admin API
       //     authenticates with a service-role key that names no user.

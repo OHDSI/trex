@@ -253,7 +253,7 @@ export async function attachEngineSessionCookie(
  * its duplicate check and V1's UNIQUE(email) was case-sensitive too, so with
  * self-registration on an attacker could register a case variant of a victim's
  * address; the victim's next federated sign-in then lower-matched (see
- * findLinkCandidateByEmail) and could link their verified upstream identity
+ * federation/resolve-user.ts's findCandidate) and could link their verified identity
  * onto the attacker's row. V17's unique index on lower(email) is what makes
  * this match at most one user.
  *
@@ -1094,7 +1094,7 @@ router.put("/user", apiLimiter, async (req, res) => {
       // The flag means "this address is synthesised, not one anybody gave"
       // (V17's column comment), so it is derived from the new address rather
       // than cleared. Normally that means clearing it, which is the case this
-      // was written for: findLinkCandidateByEmail excludes flagged rows, so a
+      // was written for: federation's candidate lookup excludes flagged rows, so a
       // federated user who sets a real address here and stayed flagged could
       // never be linked by a provider asserting it — refused as no_account, or,
       // under auto-provision, a UNIQUE violation on user_email_key.

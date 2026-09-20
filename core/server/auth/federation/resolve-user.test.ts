@@ -118,7 +118,7 @@ Deno.test("a disabled provider refuses every sign-in", async () => {
 });
 
 Deno.test("a provider whose enabled column is not exactly true is disabled", async () => {
-  // loadProviders' WHERE clause was `enabled = true`, which is false for NULL
+  // The pre-cutover WHERE clause was `enabled = true`, which is false for NULL
   // as well as for false. A truthiness test here would read a column an older
   // database has not got as "enabled".
   for (const enabled of [null, undefined, 0, "true"]) {

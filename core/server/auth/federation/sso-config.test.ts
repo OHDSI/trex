@@ -31,9 +31,9 @@ Deno.test("every trex-only provider column is declared as an additional field", 
 });
 
 Deno.test("the declared model names the existing table rather than a second one", () => {
-  // One row per provider stays the whole truth: the admin API, loadProviders'
-  // successor and the plugin all address trexdb.sso_provider or they can
-  // disagree about which upstreams exist.
+  // One row per provider stays the whole truth: the admin API,
+  // enabledProviderIds and the plugin all address trexdb.sso_provider, or they
+  // can disagree about which upstreams exist.
   assertEquals(ssoProviderSchema.modelName, "sso_provider");
 });
 

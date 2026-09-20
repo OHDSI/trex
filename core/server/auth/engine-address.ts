@@ -98,7 +98,7 @@ export function emailDomain(email: string): string | null {
  * migrated user would land unflagged again.
  *
  * So the safety is not in the domain. It is in `is_placeholder_email`, which
- * federation's findLinkCandidateByEmail already branches on and any mail path
+ * federation's link candidate lookup already branches on and any mail path
  * added later must, and in the provider's emailDomainAllowlist, which is what
  * decides whether an upstream may speak for a domain at all.
  * isPlaceholderAddress below is how a row supplied with an address in this
@@ -126,8 +126,8 @@ export const PLACEHOLDER_EMAIL_DOMAIN = "d2e.local";
  * domain with is_placeholder_email false, emailVerified true and
  * email_confirmed_at set.
  *
- * That is not cosmetic. federation's findLinkCandidateByEmail excludes flagged
- * rows
+ * That is not cosmetic. federation's candidate lookup
+ * (resolve-user.ts's findCandidate) excludes flagged rows
  * precisely so an upstream asserting `<somebody's subject>@d2e.local` cannot
  * claim the row that holds it; unflagged, all 66 were candidates again, and a
  * second enabled upstream asserting one of those addresses as verified linked

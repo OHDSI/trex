@@ -42,18 +42,19 @@ export interface ExistingUser {
 export type LinkDecision =
   | { action: "link"; userId: string }
   // "provision" leaves the address to the caller and says nothing about what it
-  // will be. resolveFederatedUser's caller hands it to provisionUser, which
-  // synthesises <slug>@d2e.local for an address-less identity and flags the
-  // row; resolve-user.ts's caller hands it to Better Auth, which writes
-  // mapping.email's value instead — so that caller has its own guard. A future
-  // third caller owes one too: the branches below check isEngineAddressable
+  // will be. resolve-user.ts's caller hands it to Better Auth, which writes
+  // mapping.email's value — NOT the address judged here — so that caller has a
+  // guard of its own. The pre-cutover caller handed it to provisionUser, which
+  // synthesised <slug>@d2e.local for an address-less identity and flagged the
+  // row; the federation admin link still reaches provisionUser that way. A
+  // future caller owes a guard too: the branches below check isEngineAddressable
   // against `identity.email`, not against whatever the caller will store.
   | { action: "provision" }
   // Fixed codes, never upstream text: they are returned to a browser.
   // "upstream_email_unverified" | "upstream_email_unusable" |
   // "email_domain_not_allowed" | "elevated_account_link_refused" |
-  // "no_account" from here, and "account_disabled" from
-  // resolveFederatedUser's existing-link path.
+  // "no_account" from here, and "account_disabled" from resolve-user.ts's
+  // existing-link path.
   | { action: "refuse"; reason: string };
 
 /**
@@ -67,9 +68,9 @@ export function emailDomainAllowed(email: string, allowlist: string[] | null): b
   if (!allowlist || allowlist.length === 0) return true;
   const domain = emailDomain(email);
   if (!domain) return false;
-  // Domains are case-insensitive. loadProviders already lower-cases the stored
-  // list; doing it again here costs nothing and keeps this function correct for
-  // any caller, including a test that passes a list straight in.
+  // Domains are case-insensitive. normaliseDomains already lower-cases the
+  // stored list; doing it again here costs nothing and keeps this function
+  // correct for any caller, including a test that passes a list straight in.
   return allowlist.some((entry) => entry.trim().toLowerCase() === domain);
 }
 

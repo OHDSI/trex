@@ -819,7 +819,7 @@ dbTest("the configuration is built from the stored row, not from the payload", a
 dbTest("a provider with no issuer is left without a configuration", async (db, ctx) => {
   // V1's save_sso_provider writes five columns and issuer is not one of them,
   // so the rows it creates are configuration in progress rather than
-  // providers — loadProviders already excludes them, and inventing a
+  // providers — enabledProviderIds already excludes them, and inventing a
   // configuration around a NULL issuer would produce a row the plugin resolves
   // and then fails on.
   assertEquals(await refreshProviderOidcConfig(db, ctx.providerId), false);

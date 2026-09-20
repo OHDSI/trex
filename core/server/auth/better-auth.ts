@@ -159,7 +159,8 @@ export const auth = betterAuth({
       app_metadata: { type: "json", required: false, input: false },
       mustChangePassword: { type: "boolean", required: false, input: false },
       // What keeps a synthesised <subject>@d2e.local from being claimed is a
-      // predicate in trex's own SQL (findLinkCandidateByEmail), not anything
+      // predicate of trex's own (federation/resolve-user.ts's findCandidate),
+      // not anything
       // Better Auth knows. `plugins` below holds no social or OIDC provider
       // today; adding one would bring Better Auth's own account linking, which
       // matches by email inside the adapter and never calls that function — so

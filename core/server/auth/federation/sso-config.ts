@@ -39,8 +39,8 @@
  * schema check throw on every transactional path.
  *
  * modelName points at the existing table rather than creating a second one. One
- * row per provider stays the whole truth, so the admin API, loadProviders'
- * successor and the plugin can never disagree about which upstreams exist.
+ * row per provider stays the whole truth, so the admin API, enabledProviderIds
+ * and the plugin can never disagree about which upstreams exist.
  */
 export const ssoProviderSchema = {
   modelName: "sso_provider",
@@ -153,9 +153,10 @@ export function oidcConfigFor(row: SsoProviderRow): string {
 /**
  * The redirect_uri every provider already has registered.
  *
- * request.ts's callbackUri derives this from the request when
- * TREX_FEDERATION_REDIRECT_URI is unset, but the plugin takes one fixed value
- * at construction time and has no request to derive anything from. A
+ * request.ts's callbackUri used to derive this from the request when
+ * TREX_FEDERATION_REDIRECT_URI was unset. The plugin takes one fixed value at
+ * construction time and has no request to derive anything from, so that
+ * fallback is gone and this is the only source. A
  * deployment that federates therefore has to state it, and a missing value is
  * a boot-time error rather than a sign-in that fails at the upstream with a
  * redirect_uri it never registered.

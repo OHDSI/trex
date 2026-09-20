@@ -8,6 +8,14 @@ This file records that rehearsal: what was run, against what, and what an
 operator has to do before upgrading. Local parts of real addresses are redacted
 to their first two characters; real usernames are not reproduced.
 
+**Two function names in this file no longer exist.** The rehearsal is a dated
+record and is left as it was measured, but a reader following it into the tree
+should know that Phase 3's cutover to `@better-auth/sso` deleted
+`resolveFederatedUser` and `findLinkCandidateByEmail`. Their successors are
+`federation/resolve-user.ts`'s `resolveSsoUser` and its `findCandidate`, which
+make the same decisions in the same order against Better Auth's adapter; every
+property this file relies on is pinned in `federation/resolve-user.test.ts`.
+
 The tree rehearsed is this file's parent commit. Re-running it after a change to
 `engine-address.ts`, `federation/link.ts`, `federation/admin-store.ts`,
 `federation/providers.ts` or `core/schema/V16`–`V17` is the point of recording

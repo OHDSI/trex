@@ -24,7 +24,8 @@
 // which would make a refusal indistinguishable from a database outage; a
 // refusal is returned as { action: "reject", code } instead, and the code is
 // one of trex's own fixed strings — never upstream text — because it reaches a
-// browser through refusalRedirect's `?error=`.
+// browser as `?error=` on the login URL router.ts hands the plugin as
+// errorCallbackURL.
 import type {
   SSOUserResolution,
   SSOUserResolutionContext,
@@ -126,7 +127,8 @@ export const resolveSsoUser = async (
 
   // `enabled` is trex's own column and everything that is not exactly true
   // means off, including a column an older database has not got — the same
-  // rule loadProviders applied with `enabled = true` in its WHERE clause.
+  // rule the pre-cutover loadProviders applied with `enabled = true` in its
+  // WHERE clause, and that enabledProviderIds still applies to the login page.
   // Checked before the account lookup on purpose: an operator disabling a
   // provider during an incident is disabling it for the people already linked
   // to it, who are otherwise the ones it would keep authenticating.
@@ -228,8 +230,9 @@ export const resolveSsoUser = async (
   }
 
   const decision = decideLink(identity, {
-    // `=== true` throughout, for the reason loadProviders gives on
-    // allowElevatedAutoLink: these decide whether an upstream may mint trex
+    // `=== true` throughout, and not a truthiness test: a column an older
+    // database has not got reads as undefined. These decide whether an
+    // upstream may mint trex
     // accounts and whether it may take over an administrator's, so the one
     // value that enables them is the boolean true.
     autoProvision: row.auto_provision === true,
