@@ -65,14 +65,12 @@ ALTER TABLE trexdb.sso_provider
   ADD COLUMN IF NOT EXISTS domain           TEXT,
   -- The administrator who owns the configuration. trex's admin API
   -- authenticates with a service-role key that names no user, so the column
-  -- stays nullable and is left NULL unless an owner is known.
-  --
-  -- ON DELETE SET NULL, not the CASCADE Better Auth would generate: deleting an
-  -- administrator must not delete the provider configuration with them. That
-  -- would take federation down for everybody as a side effect of an unrelated
-  -- account being removed, and nothing would report it.
-  ADD COLUMN IF NOT EXISTS "userId"         TEXT
-    REFERENCES trexdb."user"(id) ON DELETE SET NULL;
+  -- stays nullable and is left NULL unless an owner is known. Its foreign key
+  -- is added separately below rather than inline, because an inline REFERENCES
+  -- rides on ADD COLUMN IF NOT EXISTS: against a database that somehow already
+  -- had the column, the whole clause is skipped and the table silently ends up
+  -- without the key.
+  ADD COLUMN IF NOT EXISTS "userId"         TEXT;
 
 -- Both backfills and the mirror below are only meaningful because the
 -- connection applying core/schema owns trexdb.sso_provider and bypasses its
@@ -152,13 +150,61 @@ UPDATE trexdb.sso_provider
 ALTER TABLE trexdb.sso_provider
   ALTER COLUMN "providerId" SET NOT NULL;
 
+-- The mirror, as an invariant rather than as a habit.
+--
+-- The trigger below fills only a NULL, by design, so without this an explicit
+-- `UPDATE ... SET "providerId" = <anything>` splits trex's identity for a
+-- provider (everything trex has keys on id) from the plugin's (which resolves
+-- by providerId alone) inside a single row — the "two sides disagree about
+-- which upstreams exist" failure this file's header says the mirror exists to
+-- prevent. It also gives providerId the pattern constraint it otherwise lacks,
+-- for free: id already carries CHECK (id ~ '^[a-z][a-z0-9_]*$').
+--
+-- A CHECK rather than an unconditional trigger assignment, deliberately.
+-- Overwriting the value would silently discard what a writer asked for, and
+-- the writer most likely to ask wrongly is a future one reading the wrong
+-- field into this column; that must fail where it happens, not be quietly
+-- corrected. The same reasoning applies to a replay: if some row has already
+-- been split, this ADD CONSTRAINT refuses, which is the right outcome — the
+-- split has to be looked at, not migrated over.
 DO $$
 BEGIN
   IF NOT EXISTS (
     SELECT 1
       FROM pg_constraint
-      WHERE conname = 'sso_provider_provider_id_key'
+      WHERE conname = 'sso_provider_provider_id_mirrors_id_check'
         AND conrelid = 'trexdb.sso_provider'::regclass
+  ) THEN
+    ALTER TABLE trexdb.sso_provider
+      ADD CONSTRAINT sso_provider_provider_id_mirrors_id_check
+      CHECK ("providerId" = id);
+  END IF;
+END
+$$;
+
+-- Guarded on the column set, not on the constraint name: a constraint that
+-- already covers ("providerId") satisfies the plugin whatever it is called,
+-- and keying on the name alone would add a second, duplicate unique index to
+-- any database where it had been renamed.
+--
+-- Strictly this is implied by the CHECK above plus the primary key on id. It
+-- is kept because the plugin's model declares the field `unique: true` in its
+-- own right, so a later decision to decouple providerId from id must not
+-- silently take uniqueness with it.
+DO $$
+DECLARE
+  provider_id_attnum SMALLINT;
+BEGIN
+  SELECT attnum INTO provider_id_attnum
+    FROM pg_attribute
+   WHERE attrelid = 'trexdb.sso_provider'::regclass
+     AND attname = 'providerId';
+  IF NOT EXISTS (
+    SELECT 1
+      FROM pg_constraint
+      WHERE conrelid = 'trexdb.sso_provider'::regclass
+        AND contype = 'u'
+        AND conkey = ARRAY[provider_id_attnum]
   ) THEN
     ALTER TABLE trexdb.sso_provider
       ADD CONSTRAINT sso_provider_provider_id_key UNIQUE ("providerId");
@@ -166,12 +212,50 @@ BEGIN
 END
 $$;
 
+-- ON DELETE SET NULL, not the CASCADE Better Auth would generate from the
+-- plugin's `references` (which names no onDelete): deleting an administrator
+-- must not delete the provider configuration with them. That would take
+-- federation down for everybody as a side effect of an unrelated account being
+-- removed, and nothing would report it — getMigrations does not diff foreign
+-- key actions, so the difference is invisible to every check in the tree
+-- except this file.
+--
+-- Guarded on the column set for the same reason as the unique constraint, and
+-- separate from ADD COLUMN so that a pre-existing column still gets the key.
+DO $$
+DECLARE
+  user_id_attnum SMALLINT;
+BEGIN
+  SELECT attnum INTO user_id_attnum
+    FROM pg_attribute
+   WHERE attrelid = 'trexdb.sso_provider'::regclass
+     AND attname = 'userId';
+  IF NOT EXISTS (
+    SELECT 1
+      FROM pg_constraint
+      WHERE conrelid = 'trexdb.sso_provider'::regclass
+        AND contype = 'f'
+        AND conkey = ARRAY[user_id_attnum]
+  ) THEN
+    ALTER TABLE trexdb.sso_provider
+      ADD CONSTRAINT sso_provider_user_id_fkey
+      FOREIGN KEY ("userId") REFERENCES trexdb."user"(id) ON DELETE SET NULL;
+  END IF;
+END
+$$;
+
 -- The backfill fixes the rows that exist; this keeps every later writer in
--- step. trexdb.save_sso_provider (V1, still reached by the sso-save MCP tool)
--- inserts five columns and knows nothing about providerId, so without this a
--- provider created that way would be invisible to the plugin — a row that
--- exists, is enabled, and that no sign-in can ever resolve. Only a NULL is
--- filled, so a writer that sets the column keeps whatever it set.
+-- step. There are two such writers today and neither sets providerId:
+-- trexdb.save_sso_provider (V1, still reached by the sso-save MCP tool at
+-- core/server/mcp/tools/sso.ts:35) inserts five columns, and upsertProvider
+-- (core/server/auth/federation/admin-store.ts:12-31) writes the federation
+-- columns. Without this, a provider created either way is invisible to the
+-- plugin — a row that exists, is enabled, and that no sign-in can ever
+-- resolve.
+--
+-- Only a NULL is filled. A writer that sets the column keeps what it set, and
+-- the CHECK above is what decides whether what it set was allowed: this is the
+-- default, not the rule.
 CREATE OR REPLACE FUNCTION trexdb.sso_provider_mirror_provider_id()
 RETURNS TRIGGER AS $$
 BEGIN

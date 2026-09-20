@@ -402,8 +402,20 @@ dbTest("providerId is unique, because the plugin declares it so", async ({ pool 
   // The plugin's model says `required: true, unique: true`, and it resolves a
   // provider by this column alone — two rows sharing one providerId would make
   // which upstream a sign-in reaches a matter of row order.
+  //
+  // The mirror CHECK makes a duplicate unconstructible through an ordinary
+  // insert — two rows sharing a providerId would have to share an id, which the
+  // primary key already refuses — so it is dropped for the length of this test
+  // and put back by replaying the migration. That is not a way of weakening the
+  // assertion: it is the only way to show the unique constraint would still
+  // catch a duplicate on its own, which is exactly what has to remain true if
+  // providerId is ever decoupled from id.
   const a = `task4_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
   const b = `task4_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+  await pool.query(
+    `ALTER TABLE trexdb.sso_provider
+       DROP CONSTRAINT sso_provider_provider_id_mirrors_id_check`,
+  );
   await pool.query(
     `INSERT INTO trexdb.sso_provider
        (id, "displayName", "clientId", "clientSecret", "providerId")
@@ -424,18 +436,127 @@ dbTest("providerId is unique, because the plugin declares it so", async ({ pool 
     }
     assertStringIncludes(message, "sso_provider_provider_id_key");
   } finally {
+    // The rows have to go before the replay, or restoring the CHECK fails on
+    // the very row this test created to violate it.
     await pool.query(`DELETE FROM trexdb.sso_provider WHERE id = ANY($1)`, [[a, b]]);
+    await pool.query(await Deno.readTextFile(MIGRATION));
   }
 });
 
-dbTest("the migration's own connection owns the table it rewrites", async ({ pool }) => {
+dbTest("providerId cannot be pointed anywhere but at id", async ({ pool }) => {
+  // The trigger fills only a NULL, by design, so without the CHECK an explicit
+  // UPDATE splits trex's identity for a provider — everything trex has keys on
+  // id — from the plugin's, which resolves by providerId alone, inside one row.
+  // That is the "two sides disagree about which upstreams exist" failure the
+  // mirror exists to prevent, and it has to fail where it happens rather than
+  // be silently corrected: the writer most likely to get this wrong is a future
+  // one reading the wrong field into the column.
+  const id = `task4_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+  await pool.query(
+    `INSERT INTO trexdb.sso_provider (id, "displayName", "clientId", "clientSecret")
+     VALUES ($1, 'Mirror', 'c', 's')`,
+    [id],
+  );
+  try {
+    let message = "";
+    try {
+      await pool.query(
+        `UPDATE trexdb.sso_provider SET "providerId" = $2 WHERE id = $1`,
+        [id, `${id}_other`],
+      );
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    assertStringIncludes(message, "sso_provider_provider_id_mirrors_id_check");
+
+    // Setting it back to NULL is not a way around the CHECK either: the trigger
+    // refills it from id before the constraint is evaluated.
+    await pool.query(`UPDATE trexdb.sso_provider SET "providerId" = NULL WHERE id = $1`, [id]);
+    const { rows } = await pool.query(
+      `SELECT "providerId" FROM trexdb.sso_provider WHERE id = $1`,
+      [id],
+    );
+    assertEquals(rows[0].providerId, id);
+  } finally {
+    await pool.query(`DELETE FROM trexdb.sso_provider WHERE id = $1`, [id]);
+  }
+});
+
+dbTest("the constraint guards key on the column, not on the constraint name", async ({ pool }) => {
+  // A guard that keys on the name adds a second, duplicate constraint to any
+  // database where the first was renamed, and skips a constraint that is
+  // missing under a different name. The unique constraint and the userId
+  // foreign key are both guarded on their column set instead; this drops one
+  // and renames the other, replays, and asserts the migration reaches the right
+  // conclusion about each.
+  const migration = await Deno.readTextFile(MIGRATION);
+  // The foreign key is dropped by looking it up on its column, not by its name
+  // — an inline REFERENCES on ADD COLUMN produces `sso_provider_userId_fkey`
+  // rather than the name the migration gives it, so a drop keyed on one name
+  // silently removes nothing and the assertion below would pass against the
+  // very shape this test exists to rule out. (Measured: it did.)
+  await pool.query(
+    `DO $$
+     DECLARE fk_name TEXT;
+     BEGIN
+       SELECT conname INTO fk_name
+         FROM pg_constraint
+        WHERE conrelid = 'trexdb.sso_provider'::regclass
+          AND contype = 'f'
+          AND conkey = ARRAY[(SELECT attnum FROM pg_attribute
+                               WHERE attrelid = 'trexdb.sso_provider'::regclass
+                                 AND attname = 'userId')];
+       IF fk_name IS NULL THEN
+         RAISE EXCEPTION 'no foreign key on userId to drop';
+       END IF;
+       EXECUTE format('ALTER TABLE trexdb.sso_provider DROP CONSTRAINT %I', fk_name);
+     END
+     $$;
+     ALTER TABLE trexdb.sso_provider
+       RENAME CONSTRAINT sso_provider_provider_id_key TO sso_provider_pid_renamed`,
+  );
+  try {
+    await pool.query(migration);
+    const { rows } = await pool.query(
+      `SELECT contype::text, conname, confdeltype::text
+         FROM pg_constraint
+        WHERE conrelid = 'trexdb.sso_provider'::regclass
+          AND contype IN ('u', 'f')
+          AND conkey = ARRAY[(SELECT attnum FROM pg_attribute
+                               WHERE attrelid = 'trexdb.sso_provider'::regclass
+                                 AND attname = CASE contype WHEN 'u' THEN 'providerId'
+                                                            ELSE 'userId' END)]
+        ORDER BY contype`,
+    );
+    // Exactly one unique constraint on providerId — the renamed one, kept, not
+    // a duplicate alongside it.
+    const unique = rows.filter((r: Record<string, unknown>) => r.contype === "u");
+    assertEquals(unique.length, 1);
+    assertEquals(unique[0].conname, "sso_provider_pid_renamed");
+    // The foreign key is back even though the column already existed, which an
+    // inline REFERENCES on ADD COLUMN IF NOT EXISTS would not have managed.
+    const fk = rows.filter((r: Record<string, unknown>) => r.contype === "f");
+    assertEquals(fk.length, 1);
+    // 'n' is SET NULL. getMigrations does not diff foreign key actions, so this
+    // is the only place the deliberate choice of SET NULL over Better Auth's
+    // CASCADE is checked at all.
+    assertEquals(fk[0].confdeltype, "n");
+  } finally {
+    await pool.query(
+      `ALTER TABLE trexdb.sso_provider
+         RENAME CONSTRAINT sso_provider_pid_renamed TO sso_provider_provider_id_key`,
+    );
+  }
+});
+
+dbTest("the pool Better Auth is handed bypasses the table's RLS policy", async ({ pool }) => {
   // Spike §2: trexdb.sso_provider carries admin_all_sso_providers, and under a
   // role the policy applies to an UPDATE returns NULL rather than erroring —
-  // which is how Phase 1 came to report a migration that linked nobody. The
-  // backfills above are only meaningful because the connection running them
-  // bypasses RLS on two independent grounds, so assert that rather than assume
-  // it: a pool routed through `authenticated` or `anon` would make every
-  // assertion in this file pass while changing nothing.
+  // which is how Phase 1 came to report a migration that linked nobody. This
+  // measures core/server/db.ts's pool, which is both what the engine is handed
+  // and what core/schema is applied through in this suite, so a pool routed
+  // through `authenticated` or `anon` would make every assertion in this file
+  // pass while changing nothing.
   const { rows } = await pool.query(
     `SELECT current_user::text                                    AS role,
             (SELECT usesuper FROM pg_user WHERE usename = current_user) AS superuser,
