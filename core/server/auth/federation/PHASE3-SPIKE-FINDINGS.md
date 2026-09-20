@@ -612,3 +612,71 @@ the variable or the mount.
 `OIDCConfig.tokenEndpointAuthentication` admits only `client_secret_post`,
 `client_secret_basic` and `private_key_jwt`; `client_secret_post` is what
 `federation/router.ts:193` already sends.
+
+---
+
+## 9. Addendum (Task 7): the UserInfo branch, and two `claim_map` keys nothing reads
+
+Measured 2026-09-20 against `trex_task6` (V1..V20) and the same stub upstream,
+now able to advertise a `userinfo_endpoint`.
+
+### 9.1 §1 measured the wrong branch for anything but email
+
+§1's whole argument runs through `dist/index.mjs:3926-3937`, the id_token
+branch. That branch is only reached when `config.userInfoEndpoint` is falsy
+(`:3909` is checked first), and `ensureRuntimeDiscovery` (`:3820`) hydrates
+`userInfoEndpoint` from the discovery document at **sign-in time**, from
+`:370`. So against any real upstream that publishes `userinfo_endpoint` —
+Logto and Entra both do — the profile comes from **UserInfo**, and §1's
+measurements describe a path production does not take.
+
+This does not move the gate: `readStringClaim(rawUserInfo, mapping.email ||
+"email")` at `:3921` is the same function against the same mapping, and
+`:3938` is downstream of both branches. `mapping.email` naming a non-address
+claim still works. §1's verdict stands; its line numbers do not.
+
+It does matter for anything that is not one of the five mapped fields.
+`userInfo` is `{id, email, emailVerified, name, image}` plus whatever
+`mapping.extraFields` names, in **both** branches — so a groups claim is not in
+it either way, whichever document fed it. `provisionUser` receives `userInfo`
+and `token`, never `rawProfile`, so the verified id_token is the only document
+in which a groups claim reaches trex. That is what `federation/provision.ts`
+decodes, and `sso-callback.test.ts` pins it on the UserInfo branch as well as
+the id_token one.
+
+### 9.2 `claim_map.sub` is dropped, and it is a link-breaking drop
+
+`applyClaimMap` (`federation/config.ts:41-58`) honours a `sub` entry: a
+provider mapping `sub` to Entra's `oid` has `trexdb.account."accountId"` rows
+holding **oid** values. Under the plugin the account key is
+`accountKey.accountId = userInfo.id`, which is `rawUserInfo.sub` or
+`idToken.sub` (`:3920`, `:3929`) with no mapping applied anywhere —
+`oidcConfigFor` builds no `sub` mapping, and V20's `mapping` object
+(`V20__sso_provider_better_auth.sql:125-129`) carries only `email`,
+`emailVerified` and `name`. So for such a provider every already-linked user
+presents a different `accountId` than its stored row holds, the pre-link
+lookup misses, and the identity falls through to the email path.
+
+There is no safe code-only fix. `accountKey` is computed before `resolveUser`
+runs and `requireExactAccountBinding` is on, so a resolver that found the user
+by the mapped subject would have Better Auth write a **second** account row
+keyed on the real `sub`. The correct repair depends on what the live rows
+carry: if no provider maps `sub`, this is documentation; if one does, it is a
+V21 that rewrites `trexdb.account."accountId"` for that provider. **Assigned to
+Task 8**, whose job is the audit of live `claim_map` rows.
+
+### 9.3 `claim_map.email_verified` is dropped too, and that one is cheap
+
+`oidcConfigFor` does write it, as `mapping.emailVerified` — but the plugin only
+reads `mapping.emailVerified` when the deprecated `trustEmailVerified` is on
+(`:3921`, `:3932`), and it is not; and `resolve-user.ts:185` reads
+`claims.email_verified` off the verified id_token by a hard-coded name. So the
+mapped name is persisted and then read by nobody.
+
+Unlike `sub`, V20 does not re-purpose this key, so honouring it means what it
+always meant and needs no migration — it is a one-line read of
+`claims[claim_map.email_verified ?? "email_verified"]`. It is left here rather
+than taken with Task 7 because it decides **who may link** under
+`link_policy = 'verified_email'`, which is Task 5's guard; changing a link
+decision from inside a metadata task is the wrong place for it. **Assigned to
+Task 8** with §9.2, which is where the live rows are already being read.
