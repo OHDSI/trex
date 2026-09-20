@@ -784,3 +784,65 @@ Alongside the refusal-vocabulary change (the plugin's own codes —
 `invalid_provider`, `discovery_failed`, `missing_user_info` — can now reach
 d2e's login page as `?error=`), these are the three behaviour changes a d2e
 reviewer cannot see from the diff.
+
+---
+
+## 11. Addendum (Task 10): where the deleted code's behaviour went
+
+Task 10 deleted the hand-written relying party's remaining readers. The
+enumeration lives in the commit messages and in the task report; this section
+records only the three things earlier sections here left open, and two facts
+about this file itself.
+
+### 11.1 §9.2's last paragraph is discharged
+
+`applyClaimMap` is deleted, and with it the `config.ts` comment naming Entra's
+`oid` — which by then described a capability that had ended at the cutover
+rather than one that was merely stale. The regression is recorded where an
+operator reads rather than where a maintainer does:
+`plugins/docs/docs/concepts/auth-model.md`, under "What the cutover to
+`@better-auth/sso` gave up", together with §10.1's `nonce` and §10.2's
+algorithm pinning. The repair for a deployment whose `claim_map` maps `sub` is
+still the migration §9.2 describes.
+
+`federation/config.ts` no longer exists. Its two environment switches are
+`federation/flags.ts`; every other reference in this document to `config.ts:NN`
+is to a deleted file.
+
+### 11.2 `trexdb.save_sso_provider` survives, and stopped being silent
+
+The function writes five columns and `issuer` is not among them, so every row
+the MCP `sso-save` tool can CREATE is excluded by `issuer IS NOT NULL` from both
+the login page (`enabledProviderIds`) and `/authorize`. Measured: the tool
+accepts `enabled: true`, reports success, `sso-list` then shows the provider
+enabled, and no button ever appears with no error anywhere.
+
+Neither is deleted. The tool has a job the admin API does not cover — rotating
+`clientId`/`clientSecret` on an already-configured provider, which Task 7 wired
+into `oidcConfig` — and the function is V1 and cannot be changed without a
+migration. What is fixed is the silence: the write reads `issuer` back in the
+same transaction and says the provider cannot federate, naming
+`PUT /admin/federation/providers/:id`. Pinned in `mcp/tools/sso.test.ts`, with a
+control so the warning cannot become unconditional.
+
+Consequently **V20's `trg_sso_provider_mirror_provider_id` stays needed.** It is
+the only thing filling `"providerId"` for that writer. Removing it would need a
+V22 and there is nothing to remove it for.
+
+### 11.3 `domain` and the authentication fingerprint
+
+`domain` feeds `computeProviderAuthenticationFingerprint` (`:916-920`), so the
+first `PUT /providers/:id` against a provider that predates V20's backfill
+changes the fingerprint once and aborts sign-ins already in flight — the same
+wanted behaviour Task 5 recorded for `oidcConfig`, arrived at for a different
+reason. Recorded in `plugins/docs/docs/apis/auth.md`, along with the fact that a
+hand-set multi-domain `domain` is overwritten by any later PUT and cannot be
+restored through any route, since the plugin's own provider-mutation endpoints
+are sealed.
+
+### 11.4 A stale statement in a frozen file, left stale
+
+`admin-api.contract.test.ts:15` says these tests need trexdb "at V19". The floor
+is V20, and V21 once Task 6's trigger is required. The file is frozen at blob
+`a927802fef2abe5d93c5c79f928db702d5604ef0` because d2e PR #3358 calls the wire
+it pins, so the comment is recorded here rather than corrected there.
