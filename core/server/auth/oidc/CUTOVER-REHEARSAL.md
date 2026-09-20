@@ -654,3 +654,67 @@ Two things this establishes about the deployed environments as well:
   value as `SECURITY_AUTH_OIDC_APISECRET`; the portal proxy logs
   `secret_present=true len=30` on every exchange, which is fine, but the
   retry loop logs it once per attempt during an outage.
+
+## 14. `email_verified` — neither relying party cares
+
+The claim tracks `trexdb."user"."emailVerified"` faithfully in all three
+places. Toggled on the running stack and read back from `/oauth2/userinfo`:
+
+```
+emailVerified = false -> {"sub":"cAsuq…","name":"admin","email":"admin@d2e.local","email_verified":false,"trex_role":"user"}
+emailVerified = true  -> {…,"email_verified":true,…}   (id_token agrees)
+```
+
+**WebAPI signs in with `email_verified: false`.** Every successful WebAPI login
+recorded in §5b and §6 was made by `admin@d2e.local`, a placeholder-domain
+account whose `emailVerified` was `false` throughout —
+`OIDC: Authenticated user sub=casuqjzdgzw9abykasofshhnfeupp2rg` and
+`LoginService: onSuccess`. **Atlas3 reaches the provider only through WebAPI**
+(§6), so it inherits that answer; the Atlas3 SPA loaded and redeemed its OTC
+with the same account. The portal's own API calls (§13a) also answered 200 with
+`email_verified: false` in the bearer.
+
+So the Phase-1 observation that 66 of 69 users flip to `email_verified: false`
+is, for these relying parties, **cosmetic**. Nothing observed here reads the
+claim. Recorded as measured, not as a guarantee about relying parties not in
+this stack.
+
+## 15. The old endpoints really are gone
+
+```
+GET  /trex/oidc/authorize    -> 404 {"error":"not_found"}
+POST /trex/oidc/token        -> 404 {"error":"not_found"}
+GET  /trex/oidc/session/end  -> 404 {"error":"not_found"}
+```
+
+`mount.ts`'s prefix gate answers these, so Task 12's deployment-ordering note is
+confirmed from the other side: anything still calling the old paths breaks the
+moment this image starts. `scripts/lib/idp-login.cjs` was one of them and is
+fixed in this rehearsal's d2e commit — **and the path was not the whole fix**;
+see that commit for the `handleRedirect`/`sec-fetch-mode` half, which would have
+made the script report "authorize returned no code" even with the path
+corrected.
+
+## 16. Disposition of the brief's seven steps
+
+| step | disposition |
+|---|---|
+| **1 — bring up a local stack on the new image** | **Done**, but not by the brief's commands: `npm run build -- -s trex` builds no trex code at all (§0). The stack runs `d2e-trex:phase2-local`, built on a `trexsql:phase2-local` overlay of this branch's `core/`. |
+| **2 — diff the discovery document** | **Partly.** Served and checked field by field against `discovery.test.ts` (§2). The diff *as written* is impossible: `docs/superpowers/golden/trex-oidc-discovery.json` does not exist, and macOS `curl` cannot complete a TLS handshake with this gateway at all. |
+| **3 — signing key imported, not minted** | **NOT RUN.** `trexdb.oidc_signing_key` is empty on a fresh install, so there is nothing to import (§2). Needs a database that ran the old provider. |
+| **4 — sign in through WebAPI end to end** | **Done, and it fails.** Two independent blockers (§5), the client authentication method settled (`client_secret_basic`), the roles question settled (`/userinfo` is on the critical path and carries no `roles`, §6), and the logout question settled — and the brief's reading of the confirmation page is wrong (§8). |
+| **5 — sign in through the portal end to end** | **Done.** JWT access token, `roles` populated, silent renewal with refresh rotation and replay refusal — and every portal API call 401ing until `TREX_OIDC_INTERNAL_BASE` was set (§13, §13a). |
+| **6 — run the d2e setup script** | **Done.** `scripts/lib/idp-login.cjs` fixed and `trexBearerToken` verified against the stack; `GET /d2e/usermgmt/api/user` with the bearer answers 200 (§15). |
+| **7 — write it down and commit** | This file, committed as the rehearsal ran. |
+
+## 17. What the stack was left in
+
+- `trexdb."oauthClient"` is back at its **seeded** values (`requirePKCE=true`,
+  `tokenEndpointAuthMethod=client_secret_post`) — the boot seeder upserts them,
+  so recreating the container after §13a restored them. **WebAPI therefore
+  cannot sign in on the stack as it now stands**, which is the honest resting
+  state until §5's blocker is fixed.
+- `banned`, `deletedAt` and `emailVerified` all restored to their original
+  values (verified by re-reading the row).
+- One leftover: `admin@d2e.local` still holds the `ALP_SYSTEM_ADMIN` role row
+  granted in §6 to make `roles` non-empty.
