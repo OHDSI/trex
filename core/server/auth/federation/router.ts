@@ -92,6 +92,42 @@ const STATE_REFUSAL_CODES = new Set([
   "invalid_state",
 ]);
 
+/**
+ * The headers the forwarded callback carries into the engine: the cookies, and
+ * an address.
+ *
+ * The address is not a nicety. Better Auth's limiter keys on
+ * `createRateLimitKey(getIP(req, options), path)` and `getIP` reads
+ * `x-forwarded-for` and nothing else (@better-auth/core utils/ip.mjs:203-219).
+ * A Request without one resolves to no IP, and every caller in the process then
+ * shares the single key `no-trusted-ip|/sso/callback`
+ * (api/rate-limiter/index.mjs:232-245) at the engine's default of 100 requests
+ * per 10 seconds — so roughly ten junk GETs a second, from anywhere, with no
+ * cookie and no valid state, locked out every federated user of the
+ * installation. Nothing in the response said so: a 429 from the engine reaches
+ * the browser as this route's generic 401. Pre-cutover there was no ceiling at
+ * all, because the route never called auth.handler.
+ *
+ * `req.ip`, not the raw `x-forwarded-for` header, and the distinction is the
+ * whole security of it. With no `trustedProxies` configured Better Auth trusts
+ * a single-value forwarded header outright (utils/ip.mjs:190-194), so passing
+ * the client's own header through would let any caller mint a fresh bucket per
+ * request and hand the DoS straight back. `req.ip` is express's resolution
+ * under `trust proxy`, which index.ts:72 pins to one hop by default — the same
+ * value trex's own authLimiter buckets on, so the two limiters cannot disagree
+ * about who is calling.
+ */
+function engineHeaders(req: Req): Headers {
+  const headers = new Headers({ cookie: req.headers.cookie ?? "" });
+  // Single-valued deliberately: getIPFromHeader refuses a chain it cannot
+  // attribute (`forwardedIps.length !== 1`) and falls back to the shared
+  // bucket, which is the state being fixed.
+  if (typeof req.ip === "string" && req.ip.length > 0) {
+    headers.set("x-forwarded-for", req.ip);
+  }
+  return headers;
+}
+
 /** The plugin's own shared callback, in this process rather than over HTTP. */
 function pluginCallbackUrl(baseURL: string): URL {
   // better-call routes on `new URL(ctx.baseURL).pathname`, so the path is built
@@ -199,7 +235,7 @@ export function registerFederationRoutes(
       const target = pluginCallbackUrl(ctx.baseURL);
       target.search = new URL(req.originalUrl, target.origin).search;
       const handled = await auth.handler(
-        new Request(target, { headers: new Headers({ cookie: req.headers.cookie ?? "" }) }),
+        new Request(target, { headers: engineHeaders(req) }),
       );
 
       const location = handled.headers.get("location");

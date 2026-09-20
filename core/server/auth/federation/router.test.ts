@@ -113,6 +113,11 @@ async function boot(): Promise<Loaded> {
 
   const express = (await import("express")).default;
   const app = express();
+  // index.ts:72's default, so req.ip is resolved the way a deployment resolves
+  // it: one trusted hop, i.e. the last entry of X-Forwarded-For. Without this
+  // every request in the file is 127.0.0.1 and the flood case below could not
+  // tell an attacker's address from a victim's.
+  app.set("trust proxy", 1);
   const server = app.listen(0, "127.0.0.1");
   await new Promise<void>((r) => server.once("listening", () => r()));
   const { port } = server.address() as { port: number };
@@ -732,6 +737,131 @@ Deno.test("the audit says nothing when every issuer origin is trusted", async ()
   const { auditTrustedIssuerOrigins } = await import("./router.ts");
   await auditTrustedIssuerOrigins(pool, (m: string) => said.push(m), () => true);
   assertEquals(said, []);
+});
+
+// ── Rate limiting ───────────────────────────────────────────────────────────
+//
+// Two measurements, because the repair has two halves and either one alone
+// leaves a hole the other covers. `engineHeaders` gives the engine an address
+// so the bucket is per caller; the `/sso/callback` custom rule sizes that
+// bucket back to what the route allowed before the cutover. The first case
+// fails without the address, the second without the rule.
+
+/**
+ * The header a caller behind one reverse proxy actually arrives with: whatever
+ * it chose to send, then the address the proxy appended. Under `trust proxy: 1`
+ * express resolves `req.ip` to the rightmost entry — the only one the caller
+ * cannot write — and discards the rest (measured: `9.9.9.9, 203.0.113.9` gives
+ * `req.ip === "203.0.113.9"`).
+ *
+ * Every case below sends a chain rather than a bare address, because that is
+ * the shape a deployment sees and it is the shape that separates forwarding
+ * `req.ip` from forwarding the raw header. Better Auth refuses a chain it
+ * cannot attribute — `forwardedIps.length !== 1` (@better-auth/core
+ * utils/ip.mjs:190) — and falls straight back to the one shared bucket, so a
+ * route that passed the caller's own header through would look correct here and
+ * hand the denial of service back to every proxied installation. The leftmost
+ * value varies per request for the same reason: it must not be able to buy
+ * anything.
+ */
+const chain = (edge: string, spoof: string) => `${spoof}, ${edge}`;
+
+/** `n` junk callbacks from `edge` — no cookie, no usable state, any source. */
+async function flood(l: Loaded, edge: string, n: number) {
+  for (let i = 0; i < n; i++) {
+    const junk = await fetch(
+      `${l.base}/trex/auth/v1/callback?code=x&state=junk-${edge}-${i}`,
+      { headers: { "x-forwarded-for": chain(edge, `9.9.9.${i % 256}`) }, redirect: "manual" },
+    );
+    await junk.body?.cancel();
+  }
+}
+
+/** One whole browser journey, attributed to `edge`. */
+async function signInFrom(l: Loaded, id: string, edge: string) {
+  const forwarded = chain(edge, "10.0.0.1");
+  const started = await fetch(
+    `${l.base}/trex/auth/v1/authorize?provider=${id}&redirect_to=%2Fportal`,
+    { headers: { "x-forwarded-for": forwarded }, redirect: "manual" },
+  );
+  await started.body?.cancel();
+  assertEquals(started.status, 302);
+  const state = new URL(started.headers.get("location")!).searchParams.get("state")!;
+  const done = await fetch(
+    `${l.base}/trex/auth/v1/callback?code=stub-code&state=${encodeURIComponent(state)}`,
+    { headers: { cookie: cookieHeader(started), "x-forwarded-for": forwarded }, redirect: "manual" },
+  );
+  await done.body?.cancel();
+  return done;
+}
+
+dbTest("a flood at /callback cannot lock out a sign-in from another address", async (l) => {
+  // Unauthenticated denial of service, and the reason /callback forwards an
+  // address at all. The inner Request this route builds used to carry the
+  // cookie header and nothing else, so Better Auth could resolve no client IP
+  // and bucketed the whole process into ONE key, "no-trusted-ip|/sso/callback"
+  // (api/rate-limiter/index.mjs:232-245). Nothing in the response said so
+  // either: a 429 from the engine reaches the browser as this route's generic
+  // 401, which names nothing an operator could act on.
+  //
+  // 700 requests over seven addresses, so trex's own authLimiter (600 per IP
+  // per 15 minutes) never fires and every one of them reaches the engine. That
+  // is past any shared bucket this route could be given — including the 600 the
+  // custom rule sets — so only per-caller bucketing can save the victim, and
+  // only the forwarded address produces that.
+  const id = slug();
+  const sub = `${id}-subject`;
+  l.claims.value = { sub, username: "alice" };
+  const victim = "198.51.100.7";
+  try {
+    await seedProvider(l, id, l.trusted.origin);
+    await seedLinkedUser(l, id, sub);
+    for (let host = 1; host <= 7; host++) await flood(l, `203.0.113.${host}`, 100);
+
+    const done = await signInFrom(l, id, victim);
+    assertEquals(done.status, 302, "the victim's sign-in must survive the flood");
+    assertEquals(new URL(done.headers.get("location")!).pathname, "/portal");
+    // The wire alone would be satisfied by a redirect carrying no session, so
+    // the row is what says the exchange actually completed.
+    const refresh = await l.pool.query(
+      `SELECT count(*)::int AS n FROM trexdb.refresh_token WHERE "userId" = $1`,
+      [sub],
+    );
+    assertEquals(refresh.rows[0].n, 1);
+  } finally {
+    await cleanUp(l, id, sub);
+  }
+});
+
+dbTest("a busy shared address does not lock itself out of /callback", async (l) => {
+  // The other half, and the case an address alone does not fix. An IP is not a
+  // user — middleware/rate-limit.ts says so at length — so a site behind one
+  // NAT gateway is one bucket, and the engine's default for this path is 100
+  // requests per 10 seconds. That is far below the 600 per 15 minutes the
+  // pre-cutover route allowed, and a site that crossed it would lock ITSELF
+  // out of federated sign-in with no attacker involved.
+  //
+  // 150 from one address: past the engine default, inside the restored budget.
+  const id = slug();
+  const sub = `${id}-subject`;
+  l.claims.value = { sub, username: "alice" };
+  const nat = "192.0.2.44";
+  try {
+    await seedProvider(l, id, l.trusted.origin);
+    await seedLinkedUser(l, id, sub);
+    await flood(l, nat, 150);
+
+    const done = await signInFrom(l, id, nat);
+    assertEquals(done.status, 302, "150 callbacks in a window must not exhaust one site's budget");
+    assertEquals(new URL(done.headers.get("location")!).pathname, "/portal");
+    const refresh = await l.pool.query(
+      `SELECT count(*)::int AS n FROM trexdb.refresh_token WHERE "userId" = $1`,
+      [sub],
+    );
+    assertEquals(refresh.rows[0].n, 1);
+  } finally {
+    await cleanUp(l, id, sub);
+  }
 });
 
 // ── Teardown ────────────────────────────────────────────────────────────────

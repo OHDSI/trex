@@ -90,7 +90,29 @@ export const auth = betterAuth({
   // had authLimiter on /authorize and /token — so without this /oauth2/token is
   // unthrottled. Better Auth's own default is `isProduction`, which is false
   // everywhere in this tree because nothing sets NODE_ENV=production.
-  rateLimit: { enabled: true },
+  rateLimit: {
+    enabled: true,
+    // The plugin's shared callback is the one engine path trex forwards a
+    // browser to, and the engine's default — 100 requests per 10 seconds — is
+    // far below what the route it replaced allowed. federation/router.ts
+    // carried no ceiling of its own beyond trex's authLimiter, which is 600 per
+    // IP per 15 minutes (middleware/rate-limit.ts), so that is the budget
+    // restored here rather than a number invented for the occasion.
+    //
+    // This is belt to engineHeaders' braces. With an address forwarded the key
+    // is per-IP and a flood costs the attacker their own bucket; without one —
+    // a deployment whose trustedProxies list happens to swallow the client
+    // address, say — every caller shares `no-trusted-ip|/sso/callback`, and
+    // this is what stops that shared bucket being 100 in 10 seconds.
+    //
+    // Only the shared callback is named. /sso/callback/:providerId is the
+    // plugin's per-provider route, which nothing forwards to and oidc/mount.ts
+    // 404s from outside, and a wildcard here would not match the exact path
+    // anyway.
+    customRules: {
+      "/sso/callback": { window: 900, max: 600 },
+    },
+  },
   advanced: {
     // x-forwarded-for is what Caddy sends and already what Better Auth reads,
     // so only the proxy list is worth stating. Empty unless the deployment says
