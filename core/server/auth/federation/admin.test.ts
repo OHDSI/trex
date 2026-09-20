@@ -248,6 +248,12 @@ Deno.test("upsertProvider writes every federation column in one statement", asyn
   const insert = c.ran.find((s) => s.includes("INSERT INTO trexdb.sso_provider"))!;
   assertEquals(insert.includes("ON CONFLICT (id) DO UPDATE"), true);
   assertEquals(insert.includes("authorization_endpoint"), true);
+  // The two the plugin needs on every row and that nothing else on this path
+  // fills. Asserted on the UPDATE side as well as the insert list: an edit that
+  // left them out would still produce a correct row on create and a stale one
+  // forever after, which is the harder failure to see.
+  assertEquals(insert.includes('"providerId" = EXCLUDED."providerId"'), true);
+  assertEquals(insert.includes("domain = EXCLUDED.domain"), true);
 });
 
 Deno.test("upsertProvider writes the row and its oidcConfig in one transaction", async () => {
@@ -815,6 +821,63 @@ dbTest("the rebuild picks up an edit save_sso_provider made", async (db, ctx) =>
     clientId: "cid2",
     clientSecret: "rotated",
   });
+});
+
+// ── providerId and domain: the plugin's own columns on trex's own writer ────
+
+dbTest("a provider created through the admin API carries the columns the plugin resolves it by", async (db, ctx) => {
+  // @better-auth/sso resolves a provider by "providerId" and never by the
+  // primary key (dist/index.mjs:4082-4103), so a row without one is a provider
+  // that exists, is enabled, and that no sign-in can reach. V20's trigger would
+  // fill it, but only because it fills a NULL; this pins that the statement
+  // itself is complete.
+  await upsertProvider(db, parseProviderUpsert(ctx.providerId, upsertBody())!);
+  const { rows } = await db.query(
+    `SELECT "providerId", domain FROM trexdb.sso_provider WHERE id = $1`,
+    [ctx.providerId],
+  );
+  assertEquals(rows, [{
+    providerId: ctx.providerId,
+    // PORT INCLUDED and lower-cased: V20's backfill is
+    // lower(split_part(regexp_replace(issuer, '^scheme://', ''), '/', 1)), so a
+    // provider written here and one migrated from the same issuer must hold the
+    // same string. `new URL(issuer).hostname` would give "logto.internal" and
+    // make the two disagree on exactly the rows nobody looks at.
+    domain: "logto.internal:3001",
+  }]);
+});
+
+dbTest("moving a provider to another host rewrites domain rather than keeping the old one", async (db, ctx) => {
+  // The ON CONFLICT side. domain is derived, so a statement that wrote it on
+  // insert and not on update would leave every edited provider pointing at the
+  // host it used to live on — and no other test would notice, because the
+  // create path would still look right.
+  await upsertProvider(db, parseProviderUpsert(ctx.providerId, upsertBody())!);
+  await upsertProvider(
+    db,
+    parseProviderUpsert(ctx.providerId, upsertBody({ issuer: "https://ID.Example.TEST/oidc" }))!,
+  );
+  const { rows } = await db.query(
+    `SELECT domain FROM trexdb.sso_provider WHERE id = $1`,
+    [ctx.providerId],
+  );
+  // Lower-cased, and the path is gone: hostnames are case-insensitive and the
+  // plugin compares this column as text.
+  assertEquals(rows, [{ domain: "id.example.test" }]);
+});
+
+dbTest("an issuer that is not a URL is stored rather than refused", async (db, ctx) => {
+  // parseProviderUpsert checks only that issuer is a non-empty string, so this
+  // body reaches the store today and gets a 204. Deriving domain with
+  // `new URL(p.issuer)` would throw here and turn that into a 500 — a wire
+  // change the frozen contract file does not cover, because every fixture in it
+  // is a well-formed URL.
+  await upsertProvider(db, parseProviderUpsert(ctx.providerId, upsertBody({ issuer: "not a url" }))!);
+  const { rows } = await db.query(
+    `SELECT issuer, domain FROM trexdb.sso_provider WHERE id = $1`,
+    [ctx.providerId],
+  );
+  assertEquals(rows, [{ issuer: "not a url", domain: "not a url" }]);
 });
 
 dbTest("an unknown provider is reported rather than written around", async (db) => {

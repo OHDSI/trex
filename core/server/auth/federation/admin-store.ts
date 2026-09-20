@@ -91,12 +91,58 @@ export async function upsertProvider(client: PgClient, p: ProviderUpsert): Promi
   }
 }
 
+/**
+ * The row itself: trex's own federation columns, plus the two the plugin needs
+ * on every row and that nothing else on this path would fill.
+ *
+ * "providerId" is written rather than left to V20's BEFORE INSERT OR UPDATE
+ * trigger. The trigger fills only a NULL and V20's own comment calls that "the
+ * default, not the rule", so relying on it would make the admin API's rows
+ * correct by way of a mechanism that exists for the writers that cannot be
+ * changed (trexdb.save_sso_provider). Writing $1 into it is what the CHECK
+ * ("providerId" = id) already requires, so this can only ever agree with the
+ * trigger — and it keeps the statement true on its own.
+ *
+ * domain is the issuer's host, PORT INCLUDED, lower-cased — computed here with
+ * V20's backfill expression character for character, so a provider created
+ * through this route and one migrated by V20 from the same issuer hold the same
+ * value. It is derived in SQL rather than with `new URL(p.issuer).host` for two
+ * reasons: parseProviderUpsert checks only that issuer is a non-empty string,
+ * so `new URL` would turn a PUT that is a 204 today into a 500 for an issuer
+ * that is not a URL; and one expression in two places cannot drift the way two
+ * implementations can.
+ *
+ * The column is inert while domainVerification stays disabled — isTrustedProvider
+ * is gated on `"domainVerified" in provider` (dist/index.mjs:3952, :3008), which
+ * the model does not carry, and findVerifiedDomainProviders filters on the same
+ * flag — so this is not a trust decision. It is written because the plugin's
+ * model declares the field required, because it feeds
+ * computeProviderAuthenticationFingerprint (:916-920), and because a NULL here
+ * on new rows only would be a silent disagreement with every migrated row.
+ *
+ * jwks_endpoint is NOT written, and not because it is unimportant: there is no
+ * such column. V20 says so explicitly — the resolved JWKS URL lives inside the
+ * serialized oidcConfig — and it is left out of that too, because
+ * ensureRuntimeDiscovery runs unconditionally ahead of the jwks_endpoint_not_found
+ * check (dist/index.mjs:3820) and fills it precisely because it is absent. See
+ * refreshProviderOidcConfig.
+ *
+ * Every optional column is ASSIGNED from EXCLUDED, never COALESCEd with the
+ * stored value. This is a PUT: a body that omits discoveryUrl means "there is
+ * no discovery URL override", and merging would make it impossible to clear one
+ * through this API at all. The sibling upsertAccount does merge refresh tokens,
+ * for a reason that is specific to refresh tokens and does not generalise here.
+ */
 async function upsertProviderRow(client: PgClient, p: ProviderUpsert): Promise<void> {
   await client.query(
     `INSERT INTO trexdb.sso_provider
        (id, "displayName", "clientId", "clientSecret", enabled, issuer, discovery_url,
-        authorization_endpoint, scopes, groups_source, groups_claim, auto_provision, "updatedAt")
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+        authorization_endpoint, scopes, groups_source, groups_claim, auto_provision,
+        "providerId", domain, "updatedAt")
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+             $1,
+             lower(split_part(regexp_replace($6, '^[A-Za-z][A-Za-z0-9+.-]*://', ''), '/', 1)),
+             NOW())
      ON CONFLICT (id) DO UPDATE SET
        "displayName" = EXCLUDED."displayName",
        "clientId" = EXCLUDED."clientId",
@@ -109,6 +155,11 @@ async function upsertProviderRow(client: PgClient, p: ProviderUpsert): Promise<v
        groups_source = EXCLUDED.groups_source,
        groups_claim = EXCLUDED.groups_claim,
        auto_provision = EXCLUDED.auto_provision,
+       "providerId" = EXCLUDED."providerId",
+       -- Recomputed from the issuer in the same statement that writes the
+       -- issuer, so the two can never disagree after an edit that moves the
+       -- upstream to a different host.
+       domain = EXCLUDED.domain,
        "updatedAt" = NOW()`,
     [p.id, p.displayName, p.clientId, p.clientSecret, p.enabled, p.issuer, p.discoveryUrl,
      p.authorizationEndpoint, p.scopes, p.groupsSource, p.groupsClaim, p.autoProvision],
