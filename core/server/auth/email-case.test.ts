@@ -17,7 +17,7 @@
 // live users on one address resolve to nobody", and the real-adapter
 // "an upstream address in another case still resolves through the real
 // adapter".
-import { assertEquals, assertRejects, assertStringIncludes } from "jsr:@std/assert";
+import { assertEquals, assertRejects } from "jsr:@std/assert";
 import { provisionUser } from "./federation/providers.ts";
 
 // ── Against a real database ──────────────────────────────────────────────────

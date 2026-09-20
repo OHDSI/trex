@@ -1,4 +1,4 @@
-import { assertEquals, assertNotEquals, assertRejects, assertStringIncludes, assertThrows } from "jsr:@std/assert";
+import { assertEquals, assertNotEquals, assertRejects, assertStringIncludes } from "jsr:@std/assert";
 import { _resetDekCache, _setDekForTests, decryptWithDek } from "../dek.ts";
 import { federationEnabled, nativePasswordLoginEnabled } from "./flags.ts";
 import { decideLink, emailDomain, emailDomainAllowed, isElevatedRole } from "./link.ts";
