@@ -367,6 +367,17 @@ export async function readAccountTokens(
   };
 }
 
+/**
+ * Create or update one account row.
+ *
+ * The federation ADMIN link is the only caller, and it passes no tokens: the
+ * sign-in path's token writes go through account-tokens.ts's Better Auth hooks
+ * now. The token parameters and the ON CONFLICT merge below are therefore a
+ * capability rather than a live path — kept, not deleted, because this is still
+ * trex's own account writer and V21's header names it as "a second writer" the
+ * trigger has to cover. A reader looking for what preserves a refresh token in
+ * production should read that trigger, not this COALESCE.
+ */
 export async function upsertAccount(client: PgClient, args: {
   userId: string;
   providerId: string;

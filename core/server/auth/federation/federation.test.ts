@@ -382,6 +382,24 @@ Deno.test("no link, or a link the JOIN drops, is reported as no link at all", as
 });
 
 // ── Upstream tokens at rest (providers.ts) ─────────────────────────────────
+//
+// Both subjects are still here, so these cases are: upsertAccount is the
+// statement the federation ADMIN link runs (admin-store.ts's linkIdentity), and
+// readAccountTokens is the only sanctioned reader of the three ciphertext
+// columns — V21's column comment names it as such, and phase 5's token broker
+// is the consumer it exists for.
+//
+// One honest limit on what they are evidence OF. No live caller passes
+// upsertAccount a token any more: linkIdentity supplies only
+// (userId, providerId, accountId), and the sign-in path's writes go through
+// account-tokens.ts's Better Auth hooks, which seal independently and are
+// pinned in account-tokens.test.ts. So the sealing half below pins a capability
+// the statement has rather than one anything currently exercises, and the
+// COALESCE half reads back through captureClient's own emulation of the ON
+// CONFLICT clause — the load-bearing assertion there is that an absent token
+// reaches SQL as NULL, which is real; the read-back is the stub agreeing with
+// itself. What actually preserves a stored refresh token in production is
+// V21's trg_account_preserve_refresh_token, pinned against a real database.
 
 /**
  * The DEK is a process-wide singleton, so pin a known one for these tests and
