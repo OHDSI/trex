@@ -1,4 +1,4 @@
-// The federation relying-party endpoints.
+// The federation relying-party endpoints, served from @better-auth/sso.
 //
 // These are NOT the OIDC provider's /authorize (that lives under
 // `${BASE_PATH}/oidc` and faces the other way, serving relying parties such as
@@ -7,38 +7,135 @@
 // issues — so from the moment /callback finishes the request is
 // indistinguishable from a native login, and neither the OIDC provider nor any
 // relying party needs to know federation exists.
+//
+// Both paths, both methods and both refusal envelopes are unchanged. What is
+// gone is everything behind them: state, PKCE, discovery, id_token
+// verification and single-use enforcement are the plugin's now.
+//
+//  - the self-contained encrypt-then-MAC `state` is replaced by the plugin's
+//    database state strategy, which better-auth picks by default whenever a
+//    database is configured (context/create-context.mjs:137). The payload goes
+//    into trexdb.verification and the opaque `state` value into a SIGNED
+//    cookie;
+//  - that signed cookie IS what `__Host-trex_federation` was: the callback
+//    compares it against the state it was handed (better-auth
+//    dist/state.mjs:132-136) and refuses a browser that did not start the
+//    flow. `account.skipStateCookieCheck` would switch that comparison off and
+//    is deliberately left unset — router.test.ts pins that;
+//  - the per-process replay map is replaced by
+//    deleteVerificationByIdentifier(state) (dist/state.mjs:139), which is
+//    strictly stronger: the row is gone for every replica, not only for the
+//    process that happened to see the first use;
+//  - STATE_TTL_SECONDS is replaced by `expiresAt` inside the stored payload
+//    (:141), and PKCE S256 by `oidcConfig.pkce: true` per provider.
+//
+// "Exactly the session" is two cookies and not one, and the claim above was
+// false for as long as it was one: sb-access-token is measured to be no
+// session at all at /oauth2/authorize, which reads Better Auth's own cookie
+// and nothing else. Both are still set — the engine's by the plugin's own
+// Set-Cookie headers, which /callback forwards, and sb-access-token by
+// createTokenResponse.
 import { Router } from "express";
+import { isAPIError } from "better-auth/api";
 import { authLimiter } from "../../middleware/rate-limit.ts";
+import { auth } from "../better-auth.ts";
 import { createTokenResponse } from "../auth-router.ts";
-import { IDP_METADATA_KEY } from "../oidc/claims.ts";
 import { loginUrl } from "../oidc/config.ts";
-import { applyClaimMap, authorizationEndpointFor, federationEnabled } from "./config.ts";
-import { loadDiscovery } from "./discovery.ts";
-import { resolveGroups } from "./groups.ts";
-import { challengeFor, createVerifier } from "./pkce.ts";
-import { loadProviders, provisionUser, resolveFederatedUser, upsertAccount } from "./providers.ts";
-import {
-  bindingCookieName,
-  bindingMatches,
-  callbackUri,
-  consumeState,
-  isSecureRequest,
-  refusalRedirect,
-  safeErrorCode,
-  safeRedirectTo,
-  warnIfInsecureBinding,
-} from "./request.ts";
-import { hashBinding, signState, STATE_TTL_SECONDS, stateKeys, verifyState } from "./state.ts";
-import { verifyFederatedIdToken } from "./verify.ts";
+import { federationEnabled } from "./flags.ts";
+import { federationRedirectUri } from "./sso-config.ts";
+import { safeErrorCode, safeRedirectTo } from "./request.ts";
 
 // Re-exported so these read as one unit from outside; request.ts exists only to
 // keep express out of the unit tests' module graph.
-export { bindingMatches, callbackUri, consumeState, refusalRedirect, safeErrorCode, safeRedirectTo };
+export { safeErrorCode, safeRedirectTo };
 
 // deno-lint-ignore no-explicit-any
 type Req = any;
 // deno-lint-ignore no-explicit-any
 type Res = any;
+
+/**
+ * Where /authorize points the plugin when this deployment has configured no
+ * login page, and the one thing /callback needs in order to tell a refusal it
+ * must render as JSON from one it must redirect.
+ *
+ * The pre-cutover refusalRedirect answered `null` without a login URL, and the
+ * callback then replied with a JSON body rather than redirecting. The plugin
+ * has no such mode — it always appends `?error=` to a URL and redirects — so
+ * the JSON refusal is reproduced by pointing it at a path that is mounted
+ * nowhere and recognising that path on the way back. Nothing is ever served
+ * here and no browser ever reaches it.
+ */
+const REFUSAL_SENTINEL_PATH = "/__trex_federation_refused";
+
+/**
+ * The refusals that mean "this callback did not start in this browser", which
+ * the pre-cutover route answered with a 401 body rather than by sending the
+ * browser anywhere.
+ *
+ * All four come out of parseState/handleOIDCCallback rather than out of trex's
+ * policy, and between them they cover every successor to the binding cookie and
+ * the replay map: a missing or mismatched signed state cookie and a rotated
+ * provider are `state_mismatch`/`invalid_state`, a redeemed or expired state is
+ * `state_mismatch` (its verification row is gone), an absent one is
+ * `state_not_found` and an undecryptable one is `state_invalid`.
+ *
+ * Kept as a body and not a redirect deliberately. These are the codes an
+ * attacker can cause on a victim's browser, and the login page is the one place
+ * that victim would be inclined to re-enter credentials; the pre-cutover route
+ * never sent them there and neither does this.
+ */
+const STATE_REFUSAL_CODES = new Set([
+  "state_mismatch",
+  "state_not_found",
+  "state_invalid",
+  "invalid_state",
+]);
+
+/**
+ * The headers the forwarded callback carries into the engine: the cookies, and
+ * an address.
+ *
+ * The address is not a nicety. Better Auth's limiter keys on
+ * `createRateLimitKey(getIP(req, options), path)` and `getIP` reads
+ * `x-forwarded-for` and nothing else (@better-auth/core utils/ip.mjs:203-219).
+ * A Request without one resolves to no IP, and every caller in the process then
+ * shares the single key `no-trusted-ip|/sso/callback`
+ * (api/rate-limiter/index.mjs:232-245) at the engine's default of 100 requests
+ * per 10 seconds — so roughly ten junk GETs a second, from anywhere, with no
+ * cookie and no valid state, locked out every federated user of the
+ * installation. Nothing in the response said so: a 429 from the engine reaches
+ * the browser as this route's generic 401. Pre-cutover there was no ceiling at
+ * all, because the route never called auth.handler.
+ *
+ * `req.ip`, not the raw `x-forwarded-for` header, and the distinction is the
+ * whole security of it. With no `trustedProxies` configured Better Auth trusts
+ * a single-value forwarded header outright (utils/ip.mjs:190-194), so passing
+ * the client's own header through would let any caller mint a fresh bucket per
+ * request and hand the DoS straight back. `req.ip` is express's resolution
+ * under `trust proxy`, which index.ts:72 pins to one hop by default — the same
+ * value trex's own authLimiter buckets on, so the two limiters cannot disagree
+ * about who is calling.
+ */
+function engineHeaders(req: Req): Headers {
+  const headers = new Headers({ cookie: req.headers.cookie ?? "" });
+  // Single-valued deliberately: getIPFromHeader refuses a chain it cannot
+  // attribute (`forwardedIps.length !== 1`) and falls back to the shared
+  // bucket, which is the state being fixed.
+  if (typeof req.ip === "string" && req.ip.length > 0) {
+    headers.set("x-forwarded-for", req.ip);
+  }
+  return headers;
+}
+
+/** The plugin's own shared callback, in this process rather than over HTTP. */
+function pluginCallbackUrl(baseURL: string): URL {
+  // better-call routes on `new URL(ctx.baseURL).pathname`, so the path is built
+  // from the engine's OWN resolved base URL rather than from the issuer: a
+  // trailing slash, or a base path the engine normalised differently, would
+  // route to nothing and 404 every federated sign-in.
+  return new URL(`${baseURL.replace(/\/+$/, "")}/sso/callback`);
+}
 
 export function registerFederationRoutes(
   // deno-lint-ignore no-explicit-any
@@ -51,281 +148,190 @@ export function registerFederationRoutes(
   const router = Router();
 
   router.get("/authorize", authLimiter, async (req: Req, res: Res) => {
-    let client;
+    const providerId = String(req.query.provider ?? "");
     try {
-      client = await pool.connect();
-      const providers = await loadProviders(client);
-      const provider = providers.get(String(req.query.provider ?? ""));
-      if (!provider) {
+      // trex's own gate, and it stays AT /authorize rather than moving to the
+      // resolver. The plugin has no hook on /sign-in/sso, so resolveUser's
+      // `enabled` check fires only at the callback — which is after the person
+      // has already authenticated upstream. An operator who disables a provider
+      // during an incident means "stop offering this", not "let them sign in
+      // upstream and then say no". The pre-cutover route refused here too:
+      // loadProviders selected `WHERE enabled = true AND issuer IS NOT NULL`,
+      // so a disabled or half-configured row was already "Unknown provider",
+      // which is why that envelope is what this returns. Both gates are kept;
+      // neither is sufficient alone.
+      const { rows } = await pool.query(
+        `SELECT 1 FROM trexdb.sso_provider
+          WHERE id = $1 AND enabled = true AND issuer IS NOT NULL`,
+        [providerId],
+      );
+      if (rows.length === 0) {
         res.status(400).json({ error: "invalid_request", error_description: "Unknown provider" });
         return;
       }
-      const doc = await loadDiscovery(provider.discoveryUrl);
-      const verifier = createVerifier();
-      const nonce = crypto.randomUUID();
 
-      // Ties the flow to this browser (see request.ts). SameSite=Lax rather
-      // than Strict on purpose: the browser reaches /callback through a
-      // top-level cross-site redirect from the identity provider, and a Strict
-      // cookie is withheld on exactly that navigation, which would refuse every
-      // legitimate sign-in. Lax is sent on a top-level cross-site GET, which is
-      // what this is.
-      const binding = `${crypto.randomUUID()}${crypto.randomUUID()}`;
-      const secure = isSecureRequest(req);
-      // A deployment that lands here is weakening its own binding, usually by
-      // accident (a TLS-terminating proxy sending no X-Forwarded-Proto), and
-      // nothing else about the request would show it.
-      warnIfInsecureBinding(secure);
-      res.cookie(bindingCookieName(secure), binding, {
-        httpOnly: true,
-        sameSite: "lax",
-        secure,
-        path: "/",
-        maxAge: STATE_TTL_SECONDS * 1000,
+      const returnTo = safeRedirectTo(req.query.redirect_to as string | undefined);
+      // The origin the upstream sends the browser back to, i.e. the redirect
+      // URI registered at the provider. The throwing form on purpose: a
+      // federating deployment that has not set it would otherwise send an
+      // unregistered redirect_uri and fail at the upstream with nothing to
+      // point at.
+      const origin = new URL(federationRedirectUri()).origin;
+      // The plugin appends ?error=<code> (and error_description) to
+      // errorCallbackURL on every refusal (@better-auth/sso
+      // dist/index.mjs:3804-3810), so the return path is put on it here. That
+      // reproduces the deleted refusalRedirect's output — the login URL, its
+      // own query parameters kept, plus error and return_to — without a second
+      // redirect.
+      const login = loginUrl();
+      const errorCallbackURL = new URL(login ?? `${origin}${REFUSAL_SENTINEL_PATH}`);
+      errorCallbackURL.searchParams.set("return_to", returnTo);
+
+      const started = await auth.api.signInSSO({
+        body: {
+          providerId,
+          callbackURL: `${origin}${returnTo}`,
+          errorCallbackURL: errorCallbackURL.toString(),
+        },
+        returnHeaders: true,
       });
-
-      const state = await signState({
-        provider: provider.id,
-        redirectTo: safeRedirectTo(req.query.redirect_to as string | undefined),
-        nonce,
-        verifier,
-        bind: await hashBinding(binding),
-        exp: Math.floor(Date.now() / 1000) + STATE_TTL_SECONDS,
-      }, await stateKeys());
-
-      const url = new URL(authorizationEndpointFor(provider, doc));
-      url.searchParams.set("response_type", "code");
-      url.searchParams.set("client_id", provider.clientId);
-      url.searchParams.set("redirect_uri", callbackUri(req, basePath));
-      url.searchParams.set("scope", provider.scopes);
-      url.searchParams.set("state", state);
-      url.searchParams.set("nonce", nonce);
-      url.searchParams.set("code_challenge", await challengeFor(verifier));
-      url.searchParams.set("code_challenge_method", "S256");
-      res.redirect(302, url.toString());
+      // The signed state cookie IS the browser binding: the callback refuses
+      // when it does not match the state it was handed. Forwarding these
+      // headers is not optional.
+      for (const cookie of started.headers.getSetCookie()) res.append("Set-Cookie", cookie);
+      res.redirect(302, started.response.url);
     } catch (err) {
-      // The detail stays in the log. Anything thrown here — a discovery fetch,
-      // a database error, a key derivation — can name internal hosts or
-      // configuration, and this response goes straight to a browser.
+      // The detail stays in the log: a discovery fetch, a database error or a
+      // key derivation can name internal hosts, and this response goes to a
+      // browser.
       console.error("[federation] /authorize failed:", err);
-      if (!res.headersSent) {
-        res.status(500).json({
-          error: "server_error",
-          error_description: "Federated sign-in could not be started",
-        });
+      if (res.headersSent) return;
+      // Branch rather than collapse every throw into 400. signInSSO answers
+      // NOT_FOUND for a providerId no row matches (dist/index.mjs:3687) — that
+      // is the case the d2e login page distinguishes from a server error.
+      // Everything else it raises is a server-side fault dressed as a 4xx: a
+      // missing BETTER_AUTH_TRUSTED_ORIGINS entry, for one, arrives here as a
+      // BAD_REQUEST out of mapDiscoveryErrorToAPIError, and reporting that as
+      // "Unknown provider" would send an operator to the provider row instead
+      // of to the variable. Those keep the pre-cutover 500.
+      if (isAPIError(err) && err.statusCode === 404) {
+        res.status(400).json({ error: "invalid_request", error_description: "Unknown provider" });
+        return;
       }
-    } finally {
-      client?.release();
+      res.status(500).json({
+        error: "server_error",
+        error_description: "Federated sign-in could not be started",
+      });
     }
   });
 
   router.get("/callback", authLimiter, async (req: Req, res: Res) => {
-    let client;
     try {
-      // The upstream declined (consent refused, and so on). Say so without
-      // reflecting whatever text it chose to put in error_description.
-      if (req.query.error) {
-        const target = refusalRedirect(loginUrl(), safeErrorCode(req.query.error), "/");
-        if (target) {
-          res.redirect(302, target);
-          return;
-        }
-        res.status(401).json({
-          error: safeErrorCode(req.query.error),
-          error_description: "The identity provider refused the sign-in",
-        });
-        return;
-      }
+      const ctx = await auth.$context;
+      // The upstream redirects here because this is the redirect_uri every
+      // provider has registered; the plugin's own handler lives at
+      // ${baseURL}/sso/callback and reads the providerId out of the state
+      // (dist/index.mjs:4164-4193). Forwarding rather than re-registering keeps
+      // d2e's Logto, its Helm values and its ENV_YML secret untouched.
+      const target = pluginCallbackUrl(ctx.baseURL);
+      target.search = new URL(req.originalUrl, target.origin).search;
+      const handled = await auth.handler(
+        new Request(target, { headers: engineHeaders(req) }),
+      );
 
-      const rawState = String(req.query.state ?? "");
-      const state = await verifyState(rawState, await stateKeys());
-
-      // Before the token exchange, before any database work: a callback that
-      // did not start in this browser is login CSRF and must cost nothing to
-      // refuse. The cookie is cleared either way — it has served its purpose on
-      // success, and on failure it is not this browser's to keep.
-      // The name is chosen by THIS request's scheme, and only that name is
-      // read: on HTTPS an unprefixed cookie is ignored even when no prefixed
-      // one is present, or a sibling host could plant the value it needs.
-      const bound = await bindingMatches(req.headers.cookie, state.bind, isSecureRequest(req));
-      clearBinding(req, res);
-      if (!bound) {
+      const location = handled.headers.get("location");
+      // Set-Cookie repeats legitimately and Headers folds repeats into one
+      // comma-joined value, which turns two cookies into one unparseable one.
+      // getSetCookie is the only reader that keeps them apart.
+      const setCookies = handled.headers.getSetCookie();
+      for (const cookie of setCookies) res.append("Set-Cookie", cookie);
+      if (!location) {
         res.status(401).json({
           error: "invalid_request",
-          error_description: "This sign-in did not start in this browser",
+          error_description: "Federated sign-in failed",
         });
         return;
       }
 
-      // Only after the signature and expiry check, so the replay map holds
-      // nothing an attacker chose and nothing that outlives its own TTL.
-      if (!consumeState(rawState, state.exp)) {
-        res.status(401).json({
-          error: "invalid_request",
-          error_description: "This sign-in has already been completed",
-        });
-        return;
-      }
-
-      client = await pool.connect();
-      const providers = await loadProviders(client);
-      const provider = providers.get(state.provider);
-      if (!provider) {
-        res.status(400).json({ error: "invalid_request", error_description: "Unknown provider" });
-        return;
-      }
-      const doc = await loadDiscovery(provider.discoveryUrl);
-
-      const form = new URLSearchParams({
-        grant_type: "authorization_code",
-        code: String(req.query.code ?? ""),
-        // Must be byte-identical to the one /authorize sent, hence the same
-        // function rather than a second copy of the string.
-        redirect_uri: callbackUri(req, basePath),
-        client_id: provider.clientId,
-        code_verifier: state.verifier,
-      });
-      // client_secret_post. A provider registered as a public client has no
-      // secret and authenticates with PKCE alone, so an absent one is omitted
-      // rather than sent as "".
-      if (provider.clientSecret) form.set("client_secret", provider.clientSecret);
-
-      const tokenRes = await fetch(doc.token_endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "Accept": "application/json",
-        },
-        body: form,
-      });
-      if (!tokenRes.ok) {
-        // The upstream body goes to the log only: it commonly echoes the
-        // request, client_id included, and is not ours to show a browser.
-        const detail = await tokenRes.text().catch(() => "");
-        console.error(
-          `[federation] token exchange with ${provider.id} failed: ${tokenRes.status} ${detail}`,
-        );
-        res.status(401).json({
-          error: "invalid_grant",
-          error_description: "Upstream token exchange failed",
-        });
-        return;
-      }
-      const tokens = await tokenRes.json();
-      if (typeof tokens.id_token !== "string") {
-        throw new Error(`upstream ${provider.id} returned no id_token`);
-      }
-      const claims = await verifyFederatedIdToken(tokens.id_token, {
-        doc,
-        clientId: provider.clientId,
-        nonce: state.nonce,
-      });
-      const identity = applyClaimMap(claims, provider.claimMap);
-      // Step 6 of the flow. Read off the validated id_token, so the claim is
-      // one this provider signed; raw, so d2e sees what the upstream said.
-      const groups = resolveGroups(claims, provider);
-
-      // Identity first, email second: an upstream subject already linked to a
-      // trex user IS that user, whatever address the upstream now asserts.
-      const decision = await resolveFederatedUser(client, provider, identity);
-      if (decision.action === "refuse") {
-        // The reasons are trex's own fixed codes, not upstream text.
-        const target = refusalRedirect(loginUrl(), decision.reason, state.redirectTo);
-        if (target) {
-          res.redirect(302, target);
+      const landing = new URL(location, ctx.baseURL);
+      const refusal = landing.searchParams.get("error");
+      if (refusal !== null) {
+        // A refusal already carries ?error= on the URL /authorize supplied, so
+        // it is passed through untouched rather than re-derived — except for
+        // the two landings no browser should be sent to.
+        if (STATE_REFUSAL_CODES.has(refusal)) {
+          res.status(401).json({
+            error: "invalid_request",
+            error_description: "This sign-in did not start in this browser",
+          });
           return;
         }
-        res.status(403).json({ error: "access_denied", error_description: decision.reason });
-        return;
-      }
-      // One transaction for the whole write sequence: provisioning a user and
-      // then failing to write its account row would leave a user who exists,
-      // owns no credential and no upstream link, and cannot sign in by any
-      // route — and whose email would be found by the next flow's
-      // findLinkCandidateByEmail and linked to.
-      let sessionUser;
-      await client.query("BEGIN");
-      try {
-        const userId = decision.action === "link"
-          ? decision.userId
-          : await provisionUser(client, identity);
-
-        await upsertAccount(client, {
-          userId,
-          providerId: provider.id,
-          accountId: identity.sub,
-          accessToken: tokens.access_token,
-          refreshToken: tokens.refresh_token,
-          accessTokenExpiresAt: tokens.expires_in
-            ? new Date(Date.now() + tokens.expires_in * 1000)
-            : undefined,
-          scope: tokens.scope,
-          idToken: tokens.id_token,
-        });
-
-        // Two things at once, and both belong to this sign-in.
-        //
-        // last_sign_in_at is parity with the native grants, which stamp it on
-        // every successful login; without it a federated user never records a
-        // sign-in.
-        //
-        // The idp block is how the OIDC provider learns, later and on a
-        // different request, that this user's current session came from an
-        // upstream and which groups it asserted. fetchUser() there is handed
-        // nothing but a user id — no session row, no code record — so the
-        // fact has to be durable and keyed by the user. It is written inside
-        // this transaction with the account row it describes, and dropped
-        // again by a native password sign-in, so it always describes the most
-        // recent sign-in rather than accumulating.
-        await client.query(
-          `UPDATE trexdb."user"
-              SET last_sign_in_at = NOW(),
-                  app_metadata = COALESCE(app_metadata, '{}'::jsonb)
-                                 || jsonb_build_object($2::text, $3::jsonb),
-                  "updatedAt" = NOW()
-            WHERE id = $1`,
-          [
-            userId,
-            IDP_METADATA_KEY,
-            JSON.stringify({ provider: provider.id, groups }),
-          ],
-        );
-
-        // The columns createTokenResponse's DbUser needs, named rather than
-        // SELECT *: the session it signs is built out of this row.
-        const { rows } = await client.query(
-          `SELECT id, name, email, image, role, banned, "emailVerified", email_confirmed_at,
-                  last_sign_in_at, "mustChangePassword", user_metadata, app_metadata,
-                  password_hash, "createdAt", "updatedAt"
-             FROM trexdb."user"
-            WHERE id = $1 AND "deletedAt" IS NULL AND banned IS NOT TRUE`,
-          [userId],
-        );
-        // Belt and braces on the disabled-user rule: whichever path resolved
-        // the user — an existing link or a fresh email match — no session is
-        // ever built from a row this SELECT would not return.
-        if (!rows.length) {
-          throw new Error("federated user is gone or deactivated between link and session");
+        if (landing.pathname === REFUSAL_SENTINEL_PATH) {
+          // No login page is configured, so there is nothing to redirect to
+          // that could explain this. Same envelope the pre-cutover route used
+          // when refusalRedirect returned null (request.ts, deleted in Task 10).
+          res.status(403).json({
+            error: "access_denied",
+            error_description: safeErrorCode(refusal),
+          });
+          return;
         }
-        sessionUser = rows[0];
-        await client.query("COMMIT");
-      } catch (err) {
-        // A rollback that itself fails must not replace the real error.
-        await client.query("ROLLBACK").catch(() => {});
-        throw err;
+        if (landing.pathname === new URL(`${ctx.baseURL.replace(/\/+$/, "")}/error`).pathname) {
+          // The engine's default error page, which oidc/mount.ts 404s. It is
+          // reached only when the failure happened before any per-flow errorURL
+          // was recovered, so there is no login page to send anyone to that was
+          // chosen by this flow. Generic body, same as any other failed
+          // exchange.
+          res.status(401).json({
+            error: "invalid_request",
+            error_description: "Federated sign-in failed",
+          });
+          return;
+        }
+        // The upstream chooses the text of `error` and `error_description` when
+        // it is the upstream that declined (dist/index.mjs:3807), and the
+        // plugin appends both verbatim. Neither is trex's to put on its own
+        // login page: refusalRedirect set a bounded `error` and no description
+        // at all, and that is what is rebuilt here now that it is gone. A trex or plugin code is a
+        // bounded token already and passes through unchanged.
+        landing.searchParams.set("error", safeErrorCode(refusal));
+        landing.searchParams.delete("error_description");
+        res.redirect(302, landing.toString());
+        return;
       }
 
       // Issue exactly the session the password grant issues: it sets the
-      // sb-access-token cookie the OIDC provider reads and returns its body
-      // rather than writing one, so the redirect below is what the browser gets.
-      await createTokenResponse(sessionUser, undefined, res);
-      // Signed, so already safe; re-checked because the cost is nil and this is
-      // the one redirect an attacker would want to reach.
-      res.redirect(302, safeRedirectTo(state.redirectTo));
+      // sb-access-token cookie same-origin iframes read. Better Auth's own
+      // session cookie is already on the response — the plugin's
+      // setSessionCookie put it there and the loop above forwarded it — and
+      // that is the one /oauth2/authorize authenticates against, so the two
+      // cookies the pre-cutover route set by hand are both still set.
+      const session = await auth.api.getSession({
+        headers: new Headers({
+          cookie: setCookies.map((c) => c.split(";")[0]).join("; "),
+        }),
+      });
+      if (!session?.user) throw new Error("federated sign-in produced no session");
+      // The columns createTokenResponse's DbUser needs, named rather than
+      // SELECT *: the session it signs is built out of this row.
+      const { rows } = await pool.query(
+        `SELECT id, name, email, image, role, banned, "emailVerified", email_confirmed_at,
+                last_sign_in_at, "mustChangePassword", user_metadata, app_metadata,
+                password_hash, "createdAt", "updatedAt"
+           FROM trexdb."user"
+          WHERE id = $1 AND "deletedAt" IS NULL AND banned IS NOT TRUE`,
+        [session.user.id],
+      );
+      // Belt and braces on the disabled-user rule: no session is ever built
+      // from a row this SELECT would not return.
+      if (!rows.length) {
+        throw new Error("federated user is gone or deactivated between link and session");
+      }
+      await createTokenResponse(rows[0], undefined, res);
+      res.redirect(302, location);
     } catch (err) {
-      // Same rule as /authorize: an upstream URL, a JWKS failure or a database
-      // message must not reach the browser. One generic code covers every
-      // failure of the exchange, and the detail goes to the log.
+      // One generic code covers every failure of the exchange; an upstream URL,
+      // a JWKS failure or a database message must not reach the browser.
       console.error("[federation] /callback failed:", err);
       if (!res.headersSent) {
         res.status(401).json({
@@ -333,30 +339,190 @@ export function registerFederationRoutes(
           error_description: "Federated sign-in failed",
         });
       }
-    } finally {
-      client?.release();
     }
   });
 
   app.use(`${basePath}/auth/v1`, router);
   console.log(`Federation endpoints mounted on ${basePath}/auth/v1/{authorize,callback}`);
+  // Fired rather than awaited: registerFederationRoutes is called from index.ts
+  // on the synchronous boot path, and nothing about serving the routes depends
+  // on the answer. A failure to run the audit must not take the server down.
+  void auth.$context
+    .then((ctx) => warnIfStateCookieInsecure(ctx.baseURL))
+    .catch(() => {});
+  void auditTrustedIssuerOrigins(pool).catch((err) => {
+    console.warn(
+      "[federation] could not check issuer origins against BETTER_AUTH_TRUSTED_ORIGINS:",
+      err,
+    );
+  });
+}
+
+// ── The deployment requirement this cutover introduces ──────────────────────
+
+/**
+ * Every upstream's issuer origin must now be in BETTER_AUTH_TRUSTED_ORIGINS.
+ *
+ * This is new configuration for every existing deployment and it is the one
+ * part of the cutover that cannot be read off the provider row.
+ * `fetchOIDCEndpoint` refuses discovery, the token exchange and JWKS for an
+ * origin outside the list (@better-auth/sso dist/index.mjs:395, :421, :505),
+ * and the refusal arrives as a DiscoveryError that mapDiscoveryErrorToAPIError
+ * turns into a plain 400. Left to itself that reads as an upstream outage or a
+ * bad provider row — an operator would spend the incident in Logto's logs — so
+ * it is named here, at boot, with the exact value to add.
+ *
+ * The predicate is the engine's OWN isTrustedOrigin rather than a
+ * reimplementation: it is the function the plugin will actually call,
+ * wildcards and all, so this cannot drift from it. A hand-rolled string
+ * comparison would raise a false alarm for every deployment configured with
+ * `*.example.test`, and a false alarm at boot is how an operator learns to
+ * ignore the line.
+ */
+export async function untrustedIssuerOrigins(
+  // deno-lint-ignore no-explicit-any
+  pool: any,
+  isTrusted?: (url: string) => boolean,
+): Promise<{ id: string; url: string; origin: string }[]> {
+  let predicate = isTrusted;
+  if (!predicate) {
+    const ctx = await auth.$context;
+    predicate = (url: string) => ctx.isTrustedOrigin(url);
+  }
+  const { rows } = await pool.query(
+    `SELECT id, issuer, discovery_url, "oidcConfig" FROM trexdb.sso_provider
+      WHERE enabled = true AND issuer IS NOT NULL`,
+  );
+  const out: { id: string; url: string; origin: string }[] = [];
+  for (const row of rows) {
+    for (const url of checkableEndpoints(row)) {
+      let origin: string;
+      try {
+        origin = new URL(url).origin;
+      } catch {
+        // A row carrying something that is not a URL is broken in a way this
+        // check is not about, and it fails loudly at its first sign-in anyway.
+        continue;
+      }
+      if (!predicate(url)) out.push({ id: String(row.id), url, origin });
+    }
+  }
+  return out;
 }
 
 /**
- * Clears the browser-binding cookie. Both names, because a deployment can
- * change its mind about HTTPS between the two legs of one flow and a stale
- * cookie under the other name would then outlive the sign-in it belonged to.
+ * Every URL of a provider row whose origin the plugin will demand be trusted,
+ * as far as the row itself can say.
+ *
+ * Not just discovery. `assertServerFetchedOIDCEndpointsAllowed`
+ * (@better-auth/sso dist/index.mjs:513-521) runs the same trusted-origin test
+ * over the token, UserInfo and JWKS endpoints, and an internal IdP is perfectly
+ * entitled to publish those on a different host from the one that serves its
+ * discovery document. Auditing the discovery origin alone therefore passed such
+ * a deployment at boot and let it fail at sign-in — the exact outcome the audit
+ * exists to prevent, one endpoint further on.
+ *
+ * "As far as the row itself can say" is the honest limit and it is deliberate.
+ * An endpoint that exists only in the upstream's discovery document is not
+ * knowable here without fetching it, and making boot depend on every configured
+ * upstream being reachable would trade a silent misconfiguration for a node
+ * that will not start when somebody else's IdP is down. What IS knowable is
+ * whatever `oidcConfigFor` persisted, which for a row written through
+ * /admin/federation is the authorization endpoint and, once resolved, the JWKS
+ * endpoint.
  */
-function clearBinding(req: Req, res: Res): void {
-  const secure = isSecureRequest(req);
-  for (const name of [bindingCookieName(true), bindingCookieName(false)]) {
-    res.clearCookie(name, {
-      httpOnly: true,
-      sameSite: "lax",
-      // The prefixed name is only ever valid with Secure; the plain one takes
-      // whatever this request is, matching how it was set.
-      secure: name.startsWith("__Host-") ? true : secure,
-      path: "/",
-    });
+// deno-lint-ignore no-explicit-any
+function checkableEndpoints(row: any): string[] {
+  const urls = new Set<string>();
+  // The same URL oidcConfigFor serialises as discoveryEndpoint, because that is
+  // the one the plugin fetches first and the one every later endpoint is
+  // normalised against.
+  urls.add(
+    row.discovery_url ??
+      String(row.issuer).replace(/\/+$/, "") + "/.well-known/openid-configuration",
+  );
+  // The column is TEXT holding JSON. A row whose configuration has not been
+  // written yet, or that holds something unparseable, contributes nothing
+  // rather than throwing: this is a warning, not a gate.
+  let config: Record<string, unknown> | undefined;
+  try {
+    const raw = row.oidcConfig;
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (parsed && typeof parsed === "object") config = parsed as Record<string, unknown>;
+  } catch {
+    config = undefined;
   }
+  for (const key of ["authorizationEndpoint", "tokenEndpoint", "userInfoEndpoint", "jwksEndpoint"]) {
+    const value = config?.[key];
+    if (typeof value === "string" && value.length > 0) urls.add(value);
+  }
+  return [...urls];
+}
+
+/** The audit above, said out loud. Separate so a test can drive either half. */
+export async function auditTrustedIssuerOrigins(
+  // deno-lint-ignore no-explicit-any
+  pool: any,
+  log: (msg: string) => void = console.error,
+  isTrusted?: (url: string) => boolean,
+): Promise<void> {
+  const missing = await untrustedIssuerOrigins(pool, isTrusted);
+  if (missing.length === 0) return;
+  const origins = [...new Set(missing.map((m) => m.origin))];
+  log(
+    "[federation] MISCONFIGURED: BETTER_AUTH_TRUSTED_ORIGINS does not contain the " +
+      `issuer origin of ${missing.length} enabled provider(s) — ` +
+      `${missing.map((m) => `${m.id} (${m.origin})`).join(", ")}. ` +
+      "Every federated sign-in through them will fail at discovery with a " +
+      "generic 400 that looks like an upstream outage. Add these origins to " +
+      `BETTER_AUTH_TRUSTED_ORIGINS (comma-separated): ${origins.join(",")}`,
+  );
+}
+
+/**
+ * What is left of warnIfInsecureBinding, moved to boot because the thing it
+ * warned about is no longer a per-request decision.
+ *
+ * The browser binding used to be trex's own cookie, named `__Host-` or not
+ * according to THIS request's scheme, with a warning the first time the weak
+ * name was issued. The binding is now the plugin's signed `state` cookie, whose
+ * Secure flag and `__Secure-` prefix come from `options.baseURL` once, at
+ * construction (better-auth cookies/index.mjs:23) — so there is nothing to
+ * decide per request and nothing to notice per request either.
+ *
+ * The failure it still catches is the same one, and it is the common one: a
+ * TLS-terminating proxy in front of a trex configured with an http issuer.
+ * Nothing about a request looks wrong, the sign-in works, and the cookie that
+ * binds the flow to the browser is one any sibling host — or anyone injecting
+ * over plaintext for one — can write.
+ *
+ * Loopback is exempt: a developer's http://localhost is not a weakened
+ * deployment, and a warning there is how an operator learns to filter the line
+ * out before it ever means anything.
+ */
+export function warnIfStateCookieInsecure(
+  baseURL: string,
+  log: (msg: string) => void = console.warn,
+): void {
+  let url: URL;
+  try {
+    url = new URL(baseURL);
+  } catch {
+    return;
+  }
+  if (url.protocol === "https:") return;
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (
+    host === "localhost" || host.endsWith(".localhost") || host === "::1" ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
+  ) return;
+  log(
+    `[federation] WARNING: the engine's base URL is ${baseURL}, which is not ` +
+      "https, so @better-auth/sso's `state` cookie is issued without Secure " +
+      "and without the __Secure- prefix. That cookie is the browser binding on " +
+      "the federated callback: without the prefix a sibling subdomain, or " +
+      "anyone injecting over plaintext for one, can write it, which weakens " +
+      "the login-CSRF protection. If TLS is terminated by a proxy, set " +
+      "TREX_OIDC_ISSUER to the https URL browsers actually use.",
+  );
 }

@@ -1,35 +1,13 @@
-/** One configured upstream identity provider, as stored in trexdb.sso_provider. */
-export interface ProviderConfig {
-  id: string;
-  displayName: string;
-  clientId: string;
-  clientSecret: string;
-  issuer: string;
-  discoveryUrl: string;
-  /**
-   * Browser-facing authorize URL, when the discovery document's is not
-   * reachable from a browser. `null` means use discovery.
-   */
-  authorizationEndpoint: string | null;
-  scopes: string;
-  claimMap: Record<string, string>;
-  groupsSource: "claim" | "graph" | "none";
-  groupsClaim: string | null;
-  linkPolicy: "verified_email";
-  autoProvision: boolean;
-  /**
-   * Optional per-provider restriction on which verified upstream addresses may
-   * link or provision at all. `null` (and an empty list, which loadProviders
-   * normalises to `null`) means no restriction — today's behaviour.
-   * Entries are bare domains, lower-cased on load.
-   */
-  emailDomainAllowlist: string[] | null;
-  /**
-   * Whether a first-time upstream identity may be auto-linked to an existing
-   * trex user whose role is elevated. Off by default; see link.ts.
-   */
-  allowElevatedAutoLink: boolean;
-}
+// What the federation flow knows about a person, and nothing else.
+//
+// ProviderConfig lived here until the cutover: loadProviders normalised a
+// whole provider row into it, and nothing normalises a provider row any more.
+// @better-auth/sso reads its configuration out of sso_provider."oidcConfig"
+// (sso-config.ts), and the columns that are trex's own policy are read off the
+// raw adapter row by resolve-user.ts and provision.ts. A second normalised copy
+// could only drift from the one a sign-in obeys, so the two readers that need a
+// shape declare exactly the fields they read: link.ts's LinkPolicy and
+// groups.ts's GroupsConfig.
 
 /** What we learned about a person from an upstream id_token, normalised. */
 export interface UpstreamIdentity {

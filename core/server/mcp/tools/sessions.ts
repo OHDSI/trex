@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { pool } from "../../db.ts";
+import { revokeOidcTokensForSession } from "../../auth/oidc/revoke.ts";
 
 export function registerSessionTools(server: McpServer) {
   server.tool(
@@ -45,6 +46,18 @@ export function registerSessionTools(server: McpServer) {
     },
     async ({ sessionId }) => {
       try {
+        // BEFORE the DELETE, and the ordering is the whole point.
+        // oauthRefreshToken."sessionId" is a foreign key to trexdb.session with
+        // ON DELETE SET NULL (V19), so deleting the session first nulls the
+        // only column a session-scoped revocation can join on. That does not
+        // merely fail to revoke — it leaves the OIDC refresh chain alive AND
+        // orphaned, unreachable by any later /logout from any device, because
+        // nothing can ever name the session it belonged to again.
+        //
+        // Without this the tool lies: it reports the session revoked, "forcing
+        // the user to log in again", while the OIDC chain keeps minting access
+        // tokens for as long as it is rotated.
+        await revokeOidcTokensForSession(sessionId);
         const result = await pool.query(
           `DELETE FROM trexdb.session WHERE id = $1 RETURNING id, "userId"`,
           [sessionId],

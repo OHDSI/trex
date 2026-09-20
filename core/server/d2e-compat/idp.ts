@@ -23,6 +23,16 @@ export interface IdpConfig {
   /** Client the portal authenticates as, and its secret for the code exchange. */
   clientId: string;
   clientSecret: string;
+  /**
+   * How the /oauth/token proxy must present that secret.
+   *
+   * Not a preference: an OAuth client is registered for exactly one method and
+   * the provider refuses any other. trex's own provider refuses a mismatch with
+   * `client registered for … cannot use …`; Logto refuses a request that
+   * presents client auth two ways at once. So the proxy has to know which side
+   * it is talking to, and this is where that is decided.
+   */
+  tokenEndpointAuthMethod: "client_secret_basic" | "client_secret_post";
   scope: string;
   /** Token endpoint the /oauth/token proxy forwards to. */
   tokenUrl: string;
@@ -56,12 +66,11 @@ export function resolveIdpConfig(
 
   if (idp === "trex") {
     // Same issuer the provider stamps into its tokens and advertises in its
-    // discovery document (see registerOidcRoutes) — derived the same way rather
-    // than restated, so the two cannot drift apart.
-    // The issuer carries the mount's base path, because every endpoint the
-    // provider advertises is built from it (see registerOidcRoutes/buildReturnTo).
-    // Includes the `/oidc` mount, matching what registerOidcRoutes advertises
-    // and where the discovery document actually lives.
+    // discovery document — derived the same way rather than restated, so the
+    // two cannot drift apart. It carries the `/oidc` mount, because that is
+    // where the discovery document lives and because Better Auth builds every
+    // endpoint URL it advertises from exactly this value (auth/better-auth.ts
+    // makes it the engine's base URL for that reason).
     const issuer = issuerUrl(env.TREX_OIDC_ISSUER, `${basePath}/oidc`);
     // Where THIS process fetches the provider's own endpoints. Normally the
     // issuer itself, but a deployment can point it at an address that resolves
@@ -78,24 +87,73 @@ export function resolveIdpConfig(
     const internalBase = env.TREX_OIDC_INTERNAL_BASE
       ? issuerUrl(env.TREX_OIDC_INTERNAL_BASE, `${basePath}/oidc`)
       : issuer;
+    // The identifier the token request names as its RFC 8707 resource, and
+    // therefore the value the access token carries in `aud`. Hoisted out of the
+    // returned object because the audience list is derived from it: the two
+    // describe the same identifier from opposite ends, and a deployment that
+    // overrides one without the other rejects every access token it issues.
+    //
+    // The issuer rather than nothing. `resolveResourcePolicy` returns no
+    // audience claim at all for a request that named no resource
+    // (dist/introspect-njKASm3q.mjs:453-462), and the access token is then an
+    // opaque string rather than a JWT — which the portal cannot decode for
+    // `roles` and auth.ts cannot verify against the JWKS. The portal's
+    // authorize request carries no `resource`, so the /oauth/token proxy is
+    // the only leg that can supply one; the plugin honours it there because
+    // the stored code named none to narrow it against
+    // (`resource ?? storedResources`, :1937).
+    const resource = env.D2E_IDP_RESOURCE ?? issuer;
     return {
       idp,
       issuer,
       jwksUri: `${internalBase}/.well-known/jwks.json`,
-      audiences: splitList(env.D2E_IDP_AUDIENCES ?? env.TREX_OIDC_CLIENT_ID),
+      // Two values, not the client id alone. The access token's `aud` is the
+      // RFC 8707 resource identifier plus `<issuer>/oauth2/userinfo`, which the
+      // plugin appends whenever `openid` was granted. The id_token's `aud` is
+      // still the client id, and that is the token scripts/lib/idp-login.cjs
+      // picks (`id_token || access_token`). The portal sends the ACCESS token as
+      // its bearer, so the client id alone 401s every portal call on an audience
+      // mismatch. jose accepts a token whose `aud` carries any one of the
+      // configured values, so naming both verifies both without widening either.
+      //
+      // Derived from `resource`, not from `issuer`: they are the same string
+      // until a deployment sets D2E_IDP_RESOURCE, and from then on it is the
+      // resource that lands in `aud`. Deriving from the issuer would leave that
+      // deployment refusing every access token it just configured.
+      audiences: splitList(
+        env.D2E_IDP_AUDIENCES ?? `${resource},${env.TREX_OIDC_CLIENT_ID ?? ""}`,
+      ),
       clientId: env.TREX_OIDC_CLIENT_ID ?? "",
       clientSecret: env.TREX_OIDC_CLIENT_SECRET ?? "",
-      scope: env.D2E_IDP_SCOPE ?? "openid profile email",
-      tokenUrl: `${internalBase}/token`,
-      resource: env.D2E_IDP_RESOURCE ?? "",
+      // Basic, because there is exactly ONE seeded client row and WebAPI has to
+      // be able to use it too. Spring Security authenticates
+      // `client_secret_basic` and cannot be told otherwise, so a
+      // `client_secret_post` row 401s every WebAPI and Atlas sign-in. This
+      // proxy is the side that can move, so it moves; seed-client.ts registers
+      // the row to match.
+      tokenEndpointAuthMethod: "client_secret_basic",
+      // offline_access is not optional here: the plugin issues a refresh token
+      // only when that scope was granted
+      // (dist/introspect-njKASm3q.mjs:1798), where trex's own provider issued
+      // one unconditionally. Without it the portal — which renews 180s before
+      // expiry — gets no refresh token at all and drops the user back to the
+      // login page an hour in.
+      scope: env.D2E_IDP_SCOPE ?? "openid profile email offline_access",
+      // /oauth2/*, not the bare paths the hand-written provider served:
+      // @better-auth/oauth-provider hard-codes them and its discovery document
+      // cannot be overridden. This is the one thing a relying party sees change
+      // in the cutover, and the reason to read them from the document rather
+      // than to restate them here is exactly this line.
+      tokenUrl: `${internalBase}/oauth2/token`,
+      resource,
       // Browser-visible paths, relative to the public gateway origin. They carry
       // the mount's base path because the d2e front door does NOT strip it: it
       // proxies /trex/* to this node as-is, and routes a bare /oidc/* to Logto.
       // Emitting "oidc/authorize" therefore sent the portal's login to Logto,
       // which knows nothing of trex's clients or sessions. Derived from the same
       // issuer the discovery document advertises, so the two cannot drift.
-      authorizePath: `${new URL(issuer).pathname.replace(/^\//, "")}/authorize`,
-      endSessionPath: `${new URL(issuer).pathname.replace(/^\//, "")}/session/end`,
+      authorizePath: `${new URL(issuer).pathname.replace(/^\//, "")}/oauth2/authorize`,
+      endSessionPath: `${new URL(issuer).pathname.replace(/^\//, "")}/oauth2/end-session`,
     };
   }
 
@@ -119,6 +177,11 @@ export function resolveIdpConfig(
     // that secret to Logto, which answers 401 on the code exchange, and the only
     // visible symptom is an undefined access_token failing much later.
     clientSecret: env.LOGTO__CLIENT_SECRET || env.SECURITY_AUTH_OIDC_APISECRET || "",
+    // Unchanged from every d2e release that predates trex's own provider: the
+    // secret goes in the body and no Basic header is sent alongside it, because
+    // Logto refuses a request that presents client auth twice. A deployment
+    // that sets no D2E_IDP is bit-for-bit what it was.
+    tokenEndpointAuthMethod: "client_secret_post",
     scope: env.LOGTO__SCOPE ?? "",
     tokenUrl: env.LOGTO__TOKEN_URL ?? "",
     resource: env.LOGTO__RESOURCE_API ?? "",
@@ -154,4 +217,43 @@ export function isSystemAdminClaims(
   }
 
   return false;
+}
+
+/**
+ * Warns at boot when the configured audience list cannot match an access token.
+ *
+ * `D2E_IDP_AUDIENCES` REPLACES the default pair rather than adding to it, and
+ * the value that was correct before the provider moved onto
+ * `@better-auth/oauth-provider` — the bare client id — is now the one that
+ * breaks. An operator who sets it that way sees every portal call answer 401
+ * with nothing in the log connecting the two, because a token that fails the
+ * audience check fails it the same way a forged one does.
+ *
+ * Checked against `resource`, not against the issuer: the access token's `aud`
+ * is whatever the token request named as its RFC 8707 resource, and a
+ * deployment that sets D2E_IDP_RESOURCE to a resource of its own has legitimate
+ * reason for the issuer to be absent from the list. That is also the only such
+ * reason, which is why this is a warning about the resource rather than one
+ * about the issuer.
+ *
+ * A warning and not a refusal: a deployment may deliberately accept only
+ * id_tokens, and boot is not the place to overrule it. An empty list — the
+ * documented "do not check the audience at all" — is left alone for the same
+ * reason.
+ */
+export function warnOnUnmatchableAudience(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+  log: (msg: string) => void = console.warn,
+): boolean {
+  const { idp, audiences, resource } = resolveIdpConfig(env);
+  if (idp !== "trex") return false;
+  if (audiences.length === 0 || !resource) return false;
+  if (audiences.includes(resource)) return false;
+  log(
+    `[d2e-compat] D2E_IDP_AUDIENCES does not name "${resource}", the resource ` +
+      `identifier every access token carries in its \`aud\` — access tokens ` +
+      `will be rejected and every portal call will answer 401. ` +
+      `Configured: ${audiences.join(", ")}`,
+  );
+  return true;
 }

@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { pool } from "../../db.ts";
 import { hashPassword } from "../../auth/password.ts";
+import { isEngineAddressable, isPlaceholderAddress } from "../../auth/engine-address.ts";
 
 export function registerUserTools(server: McpServer) {
   server.tool(
@@ -77,15 +78,45 @@ export function registerUserTools(server: McpServer) {
     },
     async ({ name, email, password, role }) => {
       try {
+        // One of the six routes that write a login address (all enumerated on
+        // isEngineAddressable), at the same privilege tier as POST /admin/users:
+        // an admin API key reaches this tool, and the schema above is a bare
+        // z.string(), so nothing between the caller and the INSERT has ever
+        // looked at the address. After V17 that writes exactly
+        // the row V17 refuses to migrate — Better Auth validates the address
+        // before it looks anybody up, so the account would exist, look created,
+        // and only ever be told its credentials are invalid.
+        //
+        // Refused before either INSERT, so a rejected call writes nothing at
+        // all, not even the credential-less half.
+        if (!isEngineAddressable(email)) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: `Error: '${email}' is not an address the authentication engine can serve. ` +
+                `It needs a dotted domain (someone@example.com, not someone@localhost); ` +
+                `an account created with this address could never sign in.`,
+            }],
+            isError: true,
+          };
+        }
+
         const id = crypto.randomUUID();
         const userRole = role || "user";
+        // Same rule as POST /admin/users, which this tool is the MCP twin of:
+        // an address on the placeholder domain is synthetic whoever typed it,
+        // so the row is flagged, unverified and unconfirmed rather than
+        // claiming an address nobody can receive mail at. See
+        // isPlaceholderAddress for why the domain and not the caller decides.
+        const synthetic = isPlaceholderAddress(email);
 
         if (password) {
           const passwordHash = await hashPassword(password);
           await pool.query(
-            `INSERT INTO trexdb."user" (id, name, email, role, "emailVerified", email_confirmed_at, password_hash)
-             VALUES ($1, $2, $3, $4, true, NOW(), $5)`,
-            [id, name, email, userRole, passwordHash],
+            `INSERT INTO trexdb."user" (id, name, email, role, "emailVerified", email_confirmed_at,
+                                        is_placeholder_email, password_hash)
+             VALUES ($1, $2, $3, $4, $5::boolean, CASE WHEN $5::boolean THEN NOW() END, $6::boolean, $7)`,
+            [id, name, email, userRole, !synthetic, synthetic, passwordHash],
           );
           // Also create account record for backward compat
           await pool.query(
@@ -96,9 +127,10 @@ export function registerUserTools(server: McpServer) {
           );
         } else {
           await pool.query(
-            `INSERT INTO trexdb."user" (id, name, email, role, "emailVerified", email_confirmed_at)
-             VALUES ($1, $2, $3, $4, true, NOW())`,
-            [id, name, email, userRole],
+            `INSERT INTO trexdb."user" (id, name, email, role, "emailVerified", email_confirmed_at,
+                                        is_placeholder_email)
+             VALUES ($1, $2, $3, $4, $5::boolean, CASE WHEN $5::boolean THEN NOW() END, $6::boolean)`,
+            [id, name, email, userRole, !synthetic, synthetic],
           );
         }
 

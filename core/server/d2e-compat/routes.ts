@@ -44,8 +44,11 @@ import { getTrexPublications, syncTrexDatabaseManager } from "./dbm-sync.ts";
 import { syncPrefectDatabaseCredentials } from "./prefect-sync.ts";
 import { upsertDatabaseCredential } from "./db-credential.ts";
 import { decryptSecret } from "../auth/crypto.ts";
-import { resolveIdpConfig } from "./idp.ts";
+import { type IdpConfig, resolveIdpConfig } from "./idp.ts";
 import { postToIdpToken } from "./lib/idp-token.ts";
+// The inverse of the decoder the provider runs on the header it receives, so
+// the two cannot disagree about RFC 6749 §2.3.1 form-url-encoding.
+import { encodeBasicCredentials } from "better-auth/oauth2";
 import {
   CACHE_DIR,
   ensureCacheAttached,
@@ -168,6 +171,46 @@ export function shouldReserializeParsedBody(
   if (kind !== "object" && kind !== "number" && kind !== "boolean") return false;
   const ct = String(Array.isArray(contentType) ? contentType[0] : contentType ?? "").toLowerCase();
   return ct.includes("application/json") || ct.includes("+json");
+}
+
+// ---------------------------------------------------------------------------
+// POST /d2e/oauth/token — how the client secret is presented to the IdP
+// ---------------------------------------------------------------------------
+// Exactly ONE client authentication method may reach the IdP, and which one it
+// is comes from the IdP, not from the caller.
+//
+// @better-auth/oauth-provider resolves the method from how the credentials
+// arrived — a Basic header wins outright over the body
+// (extractClientCredentials, dist/utils-CWjOhEQb.mjs:725-739) — and then
+// refuses any method other than the one the client is registered for
+// (validateClientCredentials, :641). Logto refuses a request that presents
+// client auth two ways at all. So sending both is wrong against either side.
+//
+// Mutates `params` and returns the headers to add, because those are the two
+// halves of one decision: the secret moves OUT of the body when it moves INTO
+// the header. Stripping rather than leaving it as dead weight is deliberate —
+// this route logs its own parameter names, and a credential that cannot be used
+// should not be carried through a retry loop or written to a log.
+export function applyClientAuthentication(
+  params: URLSearchParams,
+  idpCfg: Pick<IdpConfig, "clientId" | "clientSecret" | "tokenEndpointAuthMethod">,
+): Record<string, string> {
+  const { clientId, clientSecret, tokenEndpointAuthMethod } = idpCfg;
+  if (tokenEndpointAuthMethod === "client_secret_basic") {
+    params.delete("client_secret");
+    // The package's own encoder, not a hand-rolled base64: the provider
+    // form-url-decodes each half per RFC 6749 §2.3.1 (@better-auth/core/oauth2
+    // basic-credentials.mjs), so a secret containing `+`, `%`, `:` or a space
+    // only survives the round trip if this end encodes it the same way.
+    // Importing the inverse of the decoder is the only version of that which
+    // cannot drift.
+    return clientSecret ? { Authorization: encodeBasicCredentials(clientId, clientSecret) } : {};
+  }
+  // client_secret_post, unchanged: the caller may already have supplied the
+  // secret (scripts/lib/idp-login.cjs does), and its value wins so a deployment
+  // with more than one client is not silently rewritten to this one.
+  if (!params.has("client_secret") && clientSecret) params.append("client_secret", clientSecret);
+  return {};
 }
 
 // ---------------------------------------------------------------------------
@@ -381,16 +424,13 @@ export function mountD2eRoutes(app: Express): void {
     if (!params.has("resource") && resource) params.append("resource", resource);
 
     const clientSecret = idpCfg.clientSecret;
-    if (!params.has("client_secret") && clientSecret) params.append("client_secret", clientSecret);
+    const headers = applyClientAuthentication(params, idpCfg);
     console.log(
-      `[d2e-compat] /oauth/token: secret_present=${clientSecret.length > 0} len=${clientSecret.length} keys=${[...params.keys()].join(",")}`,
+      `[d2e-compat] /oauth/token: auth=${idpCfg.tokenEndpointAuthMethod} secret_present=${clientSecret.length > 0} len=${clientSecret.length} keys=${[...params.keys()].join(",")}`,
     );
 
     try {
-      // client_secret_post only (secret is in the body). Logto rejects requests
-      // that present client auth via two mechanisms, so do NOT also send a Basic
-      // Authorization header.
-      const r = await postToIdpToken(tokenUrl, params.toString());
+      const r = await postToIdpToken(tokenUrl, params.toString(), undefined, undefined, undefined, headers);
       // Not every response is JSON: a rate-limited request comes back as plain
       // text, and parsing it unconditionally turned a 429 the caller could act
       // on into an opaque 500 that named nothing.

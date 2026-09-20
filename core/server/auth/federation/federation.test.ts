@@ -1,40 +1,20 @@
-import { assertEquals, assertNotEquals, assertRejects, assertStringIncludes, assertThrows } from "jsr:@std/assert";
+import { assertEquals, assertNotEquals, assertRejects, assertStringIncludes } from "jsr:@std/assert";
 import { _resetDekCache, _setDekForTests, decryptWithDek } from "../dek.ts";
-import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "npm:jose";
-import {
-  applyClaimMap,
-  authorizationEndpointFor,
-  federationEnabled,
-  nativePasswordLoginEnabled,
-} from "./config.ts";
-import { hashBinding, signState, stateKeys, verifyState } from "./state.ts";
-import { challengeFor, createVerifier } from "./pkce.ts";
-import { clearDiscoveryCache, loadDiscovery } from "./discovery.ts";
-import { verifyFederatedIdToken } from "./verify.ts";
+import { federationEnabled, nativePasswordLoginEnabled } from "./flags.ts";
 import { decideLink, emailDomain, emailDomainAllowed, isElevatedRole } from "./link.ts";
 import { resolveGroups } from "./groups.ts";
 import {
-  findLinkCandidateByEmail,
   findLinkedUser,
-  loadProviders,
+  PLACEHOLDER_EMAIL_DOMAIN,
+  placeholderLocalPart,
+  provisionUser,
   readAccountTokens,
-  resolveFederatedUser,
   upsertAccount,
 } from "./providers.ts";
-import {
-  _resetInsecureBindingWarning,
-  bindingCookieName,
-  bindingMatches,
-  callbackUri,
-  consumeState,
-  isSecureRequest,
-  readBindingCookie,
-  refusalRedirect,
-  safeRedirectTo,
-  warnIfInsecureBinding,
-} from "./request.ts";
-import type { ExistingUser } from "./link.ts";
-import type { ProviderConfig, UpstreamIdentity } from "./types.ts";
+import { safeRedirectTo } from "./request.ts";
+import type { ExistingUser, LinkPolicy } from "./link.ts";
+import type { GroupsConfig } from "./groups.ts";
+import type { UpstreamIdentity } from "./types.ts";
 
 Deno.test("federationEnabled is off unless explicitly enabled", () => {
   assertEquals(federationEnabled(undefined), false);
@@ -56,415 +36,18 @@ Deno.test("nativePasswordLoginEnabled is on unless explicitly turned off", () =>
   assertEquals(nativePasswordLoginEnabled("no"), true);
 });
 
-Deno.test("applyClaimMap renames upstream claims onto canonical fields", () => {
-  const identity = applyClaimMap(
-    { oid: "abc-123", upn: "jo@example.test", name: "Jo", email_verified: true },
-    { sub: "oid", email: "upn", name: "name", email_verified: "email_verified" },
-  );
-  assertEquals(identity, {
-    sub: "abc-123",
-    email: "jo@example.test",
-    name: "Jo",
-    emailVerified: true,
-  });
-});
-
-Deno.test("applyClaimMap falls back to standard claim names when unmapped", () => {
-  const identity = applyClaimMap(
-    { sub: "s-1", email: "a@b.test", email_verified: false },
-    {},
-  );
-  assertEquals(identity.sub, "s-1");
-  assertEquals(identity.email, "a@b.test");
-  assertEquals(identity.emailVerified, false);
-});
-
-Deno.test("applyClaimMap rejects a missing subject", () => {
-  assertThrows(
-    () => applyClaimMap({ email: "a@b.test" }, {}),
-    Error,
-    "subject",
-  );
-});
-
-// A username-only upstream account (64 of 69 on the d2e installation this was
-// written for) asserts no address. The subject alone is a complete identity.
-Deno.test("applyClaimMap accepts an id_token carrying no email", () => {
-  assertEquals(applyClaimMap({ sub: "s-1" }, {}), {
-    sub: "s-1",
-    email: null,
-    emailVerified: false,
-  });
-  // An empty string is no address either, not an address of length zero.
-  assertEquals(applyClaimMap({ sub: "s-1", email: "" }, {}).email, null);
-  // A mapped-but-absent claim behaves the same as an unmapped one.
-  assertEquals(applyClaimMap({ sub: "s-1" }, { email: "upn" }).email, null);
-});
-
-Deno.test("applyClaimMap still requires a subject when there is no email either", () => {
-  assertThrows(() => applyClaimMap({}, {}), Error, "subject");
-});
-
-Deno.test("applyClaimMap treats a missing email_verified as unverified", () => {
-  const identity = applyClaimMap({ sub: "s-1", email: "a@b.test" }, {});
-  assertEquals(identity.emailVerified, false);
-});
-
-const payload = {
-  provider: "logto",
-  redirectTo: "/atlas/",
-  nonce: "n-1",
-  verifier: "v-1",
-  bind: "YmluZGluZy1oYXNo",
-  exp: 2_000_000_000,
-};
-
-Deno.test("state round-trips through sign and verify", async () => {
-  const keys = await stateKeys("test-root-key");
-  const token = await signState(payload, keys);
-  assertEquals(await verifyState(token, keys, 1_000_000_000), payload);
-});
-
-Deno.test("state with a tampered body is rejected", async () => {
-  const keys = await stateKeys("test-root-key");
-  const token = await signState(payload, keys);
-  const [body, sig] = token.split(".");
-  const forged = btoa(JSON.stringify({ ...payload, redirectTo: "/evil" }))
-    .replace(/=+$/, "");
-  await assertRejects(
-    () => verifyState(`${forged}.${sig}`, keys, 1_000_000_000),
-    Error,
-    "signature",
-  );
-  assertNotEquals(body, forged);
-});
-
-Deno.test("state signed with another key is rejected", async () => {
-  const token = await signState(payload, await stateKeys("root-a"));
-  const keysB = await stateKeys("root-b");
-  await assertRejects(
-    () => verifyState(token, keysB, 1_000_000_000),
-    Error,
-    "signature",
-  );
-});
-
-Deno.test("expired state is rejected", async () => {
-  const keys = await stateKeys("test-root-key");
-  const token = await signState(payload, keys);
-  await assertRejects(
-    () => verifyState(token, keys, 2_000_000_001),
-    Error,
-    "expired",
-  );
-});
-
-// The reason the body is encrypted at all: this token rides in the same URL as
-// the authorization code, and that URL reaches the identity provider's logs and
-// any Referer header the browser sends on. A plaintext state would hand whoever
-// read it the PKCE code_verifier — and client_secret is optional, so for a
-// public-client provider that is everything needed to redeem the code upstream.
-Deno.test("nothing in the state is readable from the token", async () => {
-  const keys = await stateKeys("test-root-key");
-  const token = await signState(payload, keys);
-
-  assertEquals(token.includes(payload.verifier), false);
-  assertEquals(token.includes(payload.nonce), false);
-  assertEquals(token.includes(payload.redirectTo), false);
-  assertEquals(token.includes(payload.provider), false);
-
-  // Nor after undoing the transport encoding: the bytes are ciphertext.
-  const body = token.slice(0, token.indexOf("."));
-  const norm = body.replace(/-/g, "+").replace(/_/g, "/");
-  const decoded = atob(norm + "=".repeat((4 - (norm.length % 4)) % 4));
-  assertEquals(decoded.includes(payload.verifier), false);
-  assertEquals(decoded.includes(payload.nonce), false);
-  // No field names either — the JSON itself never leaves the process.
-  // (Single characters are not asserted on: over ~250 bytes of ciphertext any
-  // given byte value turns up by chance, and the test would flake.)
-  assertEquals(decoded.includes("verifier"), false);
-  assertEquals(decoded.includes("redirectTo"), false);
-});
-
-Deno.test("the same payload seals differently every time", async () => {
-  const keys = await stateKeys("test-root-key");
-  // A fresh GCM nonce per state: two flows started with identical parameters
-  // must not produce the same token, or consumeState would treat the second as
-  // a replay of the first and refuse a legitimate sign-in.
-  assertNotEquals(await signState(payload, keys), await signState(payload, keys));
-});
-
-// The MAC is over the ciphertext, so it passes here and decryption is what
-// refuses — a root-key rotation between /authorize and /callback, in effect.
-Deno.test("a body sealed under a different encryption key is refused", async () => {
-  const a = await stateKeys("root-a");
-  const b = await stateKeys("root-b");
-  const mismatched = await signState(payload, { mac: a.mac, enc: b.enc });
-  await assertRejects(
-    () => verifyState(mismatched, a, 1_000_000_000),
-    Error,
-    "decrypted",
-  );
-});
-
-Deno.test("a malformed state is refused, not thrown at", async () => {
-  const keys = await stateKeys("test-root-key");
-  await assertRejects(() => verifyState("no-dot-here", keys), Error, "malformed");
-  await assertRejects(() => verifyState("", keys), Error, "malformed");
-});
-
-Deno.test("verifier is unreserved-charset and long enough for RFC 7636", () => {
-  const v = createVerifier();
-  assertEquals(v.length >= 43 && v.length <= 128, true);
-  assertEquals(/^[A-Za-z0-9\-._~]+$/.test(v), true);
-});
-
-Deno.test("verifiers are not repeated", () => {
-  assertNotEquals(createVerifier(), createVerifier());
-});
-
-Deno.test("many verifiers still conform to charset and length (rejection sampling)", () => {
-  // Not a uniformity test (that would be slow and flaky) — just confirms the
-  // rejection-sampling loop in createVerifier always terminates with a
-  // full-length, in-alphabet string, including its rare refill path.
-  for (let i = 0; i < 200; i++) {
-    const v = createVerifier();
-    assertEquals(v.length, 64);
-    assertEquals(/^[A-Za-z0-9\-._~]+$/.test(v), true);
-  }
-});
-
-Deno.test("challenge is the base64url SHA-256 of the verifier", async () => {
-  // Known vector from RFC 7636 appendix B.
-  const challenge = await challengeFor("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
-  assertEquals(challenge, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
-});
-
-const DOC = {
-  issuer: "https://logto.test/oidc",
-  authorization_endpoint: "https://logto.test/oidc/auth",
-  token_endpoint: "https://logto.test/oidc/token",
-  jwks_uri: "https://logto.test/oidc/jwks",
-  id_token_signing_alg_values_supported: ["RS256", "ES384"],
-};
-
-function stubFetch(doc: unknown, counter: { n: number }): typeof fetch {
-  return ((_url: string) => {
-    counter.n++;
-    return Promise.resolve(new Response(JSON.stringify(doc), { status: 200 }));
-  }) as unknown as typeof fetch;
-}
-
-Deno.test("discovery document is fetched and parsed", async () => {
-  clearDiscoveryCache();
-  const c = { n: 0 };
-  const doc = await loadDiscovery("https://logto.test/.well-known/openid-configuration", stubFetch(DOC, c));
-  assertEquals(doc.token_endpoint, "https://logto.test/oidc/token");
-  assertEquals(c.n, 1);
-});
-
-Deno.test("discovery document is cached within its TTL", async () => {
-  clearDiscoveryCache();
-  const c = { n: 0 };
-  const url = "https://logto.test/.well-known/openid-configuration";
-  await loadDiscovery(url, stubFetch(DOC, c), 1000);
-  await loadDiscovery(url, stubFetch(DOC, c), 1060);
-  assertEquals(c.n, 1);
-});
-
-Deno.test("discovery cache expires", async () => {
-  clearDiscoveryCache();
-  const c = { n: 0 };
-  const url = "https://logto.test/.well-known/openid-configuration";
-  await loadDiscovery(url, stubFetch(DOC, c), 1000);
-  await loadDiscovery(url, stubFetch(DOC, c), 1000 + 3601);
-  assertEquals(c.n, 2);
-});
-
-Deno.test("a discovery document missing required endpoints is rejected", async () => {
-  clearDiscoveryCache();
-  const c = { n: 0 };
-  await assertRejects(
-    () => loadDiscovery("https://x.test/d", stubFetch({ issuer: "https://x.test" }, c)),
-    Error,
-    "incomplete",
-  );
-});
-
-Deno.test("discovery cache is frozen; mutations do not affect subsequent fetches", async () => {
-  clearDiscoveryCache();
-  const c = { n: 0 };
-  const url = "https://logto.test/.well-known/openid-configuration";
-  const doc1 = await loadDiscovery(url, stubFetch(DOC, c), 1000);
-
-  // Attempt to mutate top-level string property; frozen objects reject mutations
-  try {
-    (doc1 as unknown as Record<string, unknown>).token_endpoint = "https://evil.test/token";
-  } catch {
-    // Expected: frozen object in strict mode
-  }
-
-  // Attempt to mutate the algorithm array via push; frozen array rejects mutations
-  try {
-    doc1.id_token_signing_alg_values_supported.push("HS256");
-  } catch {
-    // Expected: frozen array in strict mode
-  }
-
-  // Attempt to mutate array via index assignment; frozen array rejects mutations
-  try {
-    (doc1.id_token_signing_alg_values_supported as unknown[])[0] = "none";
-  } catch {
-    // Expected: frozen array in strict mode
-  }
-
-  // Fetch again from cache; returns the same frozen instance
-  const doc2 = await loadDiscovery(url, stubFetch(DOC, c), 1001);
-  // All mutations are rejected; cached value is unchanged
-  assertEquals(doc2.token_endpoint, "https://logto.test/oidc/token");
-  assertEquals(doc2.id_token_signing_alg_values_supported, ["RS256", "ES384"]);
-  assertEquals(c.n, 1); // Only one fetch, no refetch
-});
-
-Deno.test("discovery cache expires at exactly the TTL boundary", async () => {
-  clearDiscoveryCache();
-  const c = { n: 0 };
-  const url = "https://logto.test/.well-known/openid-configuration";
-  await loadDiscovery(url, stubFetch(DOC, c), 1000);
-  // Fetch exactly DISCOVERY_TTL_SECONDS later (3600); should treat as expired
-  await loadDiscovery(url, stubFetch(DOC, c), 1000 + 3600);
-  assertEquals(c.n, 2);
-});
-
-Deno.test("discovery filters algorithms to asymmetric only", async () => {
-  clearDiscoveryCache();
-  const c = { n: 0 };
-  const doc = await loadDiscovery(
-    "https://logto.test/.well-known/openid-configuration",
-    stubFetch({
-      ...DOC,
-      id_token_signing_alg_values_supported: ["RS256", "none"],
-    }, c),
-  );
-  assertEquals(doc.id_token_signing_alg_values_supported, ["RS256"]);
-});
-
-Deno.test("discovery rejects a document advertising no usable signing algorithms", async () => {
-  clearDiscoveryCache();
-  const c = { n: 0 };
-  await assertRejects(
-    () => loadDiscovery(
-      "https://logto.test/.well-known/openid-configuration",
-      stubFetch({ ...DOC, id_token_signing_alg_values_supported: ["none"] }, c),
-    ),
-    Error,
-    "no usable signing algorithms",
-  );
-});
-
-Deno.test("discovery rejects HS256 as unsuitable for JWKS verification", async () => {
-  clearDiscoveryCache();
-  const c = { n: 0 };
-  await assertRejects(
-    () => loadDiscovery(
-      "https://logto.test/.well-known/openid-configuration",
-      stubFetch({ ...DOC, id_token_signing_alg_values_supported: ["HS256"] }, c),
-    ),
-    Error,
-    "no usable signing algorithms",
-  );
-});
-
-Deno.test("discovery defaults absent id_token_signing_alg_values_supported to RS256", async () => {
-  clearDiscoveryCache();
-  const c = { n: 0 };
-  const doc = await loadDiscovery(
-    "https://logto.test/.well-known/openid-configuration",
-    stubFetch({
-      issuer: "https://logto.test/oidc",
-      authorization_endpoint: "https://logto.test/oidc/auth",
-      token_endpoint: "https://logto.test/oidc/token",
-      jwks_uri: "https://logto.test/oidc/jwks",
-    }, c),
-  );
-  assertEquals(doc.id_token_signing_alg_values_supported, ["RS256"]);
-});
-
-async function signedIdToken(over: Record<string, unknown> = {}) {
-  const { privateKey, publicKey } = await generateKeyPair("RS256");
-  const jwk = await exportJWK(publicKey);
-  jwk.kid = "k1";
-  const token = await new SignJWT({ nonce: "n-1", email: "jo@example.test", ...over })
-    .setProtectedHeader({ alg: "RS256", kid: "k1" })
-    .setIssuer(over.iss as string ?? "https://logto.test/oidc")
-    .setAudience(over.aud as string ?? "d2e-client")
-    .setSubject("s-1")
-    .setExpirationTime("5m")
-    .sign(privateKey);
-  return { token, jwks: createLocalJWKSet({ keys: [jwk] }) };
-}
-
-Deno.test("a well-formed id_token verifies", async () => {
-  const { token, jwks } = await signedIdToken();
-  const claims = await verifyFederatedIdToken(token, {
-    doc: DOC, clientId: "d2e-client", nonce: "n-1", jwks,
-  });
-  assertEquals(claims.sub, "s-1");
-});
-
-Deno.test("a wrong audience is rejected", async () => {
-  const { token, jwks } = await signedIdToken({ aud: "someone-else" });
-  await assertRejects(
-    () => verifyFederatedIdToken(token, { doc: DOC, clientId: "d2e-client", nonce: "n-1", jwks }),
-    Error,
-    "aud",
-  );
-});
-
-Deno.test("a wrong issuer is rejected", async () => {
-  const { token, jwks } = await signedIdToken({ iss: "https://evil.test" });
-  await assertRejects(
-    () => verifyFederatedIdToken(token, { doc: DOC, clientId: "d2e-client", nonce: "n-1", jwks }),
-    Error,
-    "iss",
-  );
-});
-
-Deno.test("a mismatched nonce is rejected", async () => {
-  const { token, jwks } = await signedIdToken({ nonce: "other" });
-  await assertRejects(
-    () => verifyFederatedIdToken(token, { doc: DOC, clientId: "d2e-client", nonce: "n-1", jwks }),
-    Error,
-    "nonce",
-  );
-});
-
-Deno.test("a token with no nonce claim is rejected even against an empty-string nonce", async () => {
-  const { token, jwks } = await signedIdToken({ nonce: undefined });
-  await assertRejects(
-    () => verifyFederatedIdToken(token, { doc: DOC, clientId: "d2e-client", nonce: "", jwks }),
-    Error,
-    "nonce",
-  );
-});
-
-Deno.test("an algorithm the provider does not advertise is rejected", async () => {
-  const { token, jwks } = await signedIdToken();
-  const doc = { ...DOC, id_token_signing_alg_values_supported: ["ES384"] };
-  await assertRejects(
-    () => verifyFederatedIdToken(token, { doc, clientId: "d2e-client", nonce: "n-1", jwks }),
-    Error,
-    "alg",
-  );
-});
-
-const provider = (over: Partial<ProviderConfig> = {}): ProviderConfig => ({
-  id: "logto", displayName: "Logto", clientId: "c", clientSecret: "s",
-  issuer: "https://logto.test/oidc", discoveryUrl: "https://logto.test/d",
-  authorizationEndpoint: null,
-  scopes: "openid profile email", claimMap: {}, groupsSource: "none",
-  groupsClaim: null, linkPolicy: "verified_email", autoProvision: false,
-  emailDomainAllowlist: null, allowElevatedAutoLink: false, ...over,
+// Exactly the fields decideLink and resolveGroups declare, because those are
+// the only fields either reads. There is no wider provider type to Partial<>
+// any more, and inventing one here would put a shape in the tests that no
+// caller builds.
+type TestProvider = LinkPolicy & GroupsConfig;
+const provider = (over: Partial<TestProvider> = {}): TestProvider => ({
+  groupsSource: "none",
+  groupsClaim: null,
+  autoProvision: false,
+  emailDomainAllowlist: null,
+  allowElevatedAutoLink: false,
+  ...over,
 });
 const identity = (verified: boolean): UpstreamIdentity => ({
   sub: "s-1", email: "jo@example.test", emailVerified: verified,
@@ -501,38 +84,65 @@ Deno.test("verified email, no user, auto-provision on provisions", () => {
   );
 });
 
-// The guards are only as good as the configuration reaching them, and the
-// column→field mapping is the one part of that with no type to catch it.
-Deno.test("the link guards are loaded off sso_provider onto ProviderConfig", async () => {
-  const row = (over: Record<string, unknown>) => ({
-    id: "logto", displayName: "Logto", clientId: "c", clientSecret: "s",
-    issuer: "https://logto.test/oidc", discovery_url: null,
-    scopes: "openid profile email", claim_map: {}, groups_source: "none",
-    groups_claim: null, link_policy: "verified_email", auto_provision: false, ...over,
-  });
-  const load = async (over: Record<string, unknown>) =>
-    (await loadProviders({ query: () => Promise.resolve({ rows: [row(over)] }) })).get("logto")!;
+// ── An upstream address the engine cannot serve ─────────────────────────────
+//
+// The upstream's `email` claim is taken verbatim — it is an identifier and not
+// trex's to rewrite — so an IdP is free to assert one V17 would have refused to
+// migrate. auto_provision then writes it, after V17 has run, with no
+// administrator in the loop: the only one of the six address-writing routes
+// (see isEngineAddressable) that needs none.
 
-  const configured = await load({
-    // As an operator would plausibly write them: mixed case, padding, and the
-    // '@' they think of as part of a domain.
-    email_domain_allowlist: [" Corp.TEST ", "@example.test"],
-    allow_elevated_auto_link: true,
-  });
-  assertEquals(configured.emailDomainAllowlist, ["corp.test", "example.test"]);
-  assertEquals(configured.allowElevatedAutoLink, true);
+const unusable = (over: Partial<UpstreamIdentity> = {}): UpstreamIdentity => ({
+  sub: "s-1", email: "alice@localhost", emailVerified: true, ...over,
+});
 
-  // Unset, and an empty list, both mean "no restriction" — an existing row is
-  // exactly as unrestricted as it was before these columns existed.
-  for (const allowlist of [null, undefined, []]) {
-    const p = await load({ email_domain_allowlist: allowlist });
-    assertEquals(p.emailDomainAllowlist, null);
-    assertEquals(p.allowElevatedAutoLink, false);
-  }
-  // Anything short of boolean true leaves the elevated guard on.
-  for (const raw of [undefined, null, "true", 1]) {
-    assertEquals((await load({ allow_elevated_auto_link: raw })).allowElevatedAutoLink, false);
-  }
+Deno.test("auto-provision refuses an upstream address the engine cannot serve", () => {
+  assertEquals(
+    decideLink(unusable(), provider({ autoProvision: true }), null),
+    { action: "refuse", reason: "upstream_email_unusable" },
+  );
+});
+
+// The refusal is about writing the address, not about reading it. A row that
+// already holds it was vetted by whichever door created it, and linking writes
+// no address at all — so this must not start refusing established users.
+Deno.test("an unservable upstream address still links to an existing user", () => {
+  assertEquals(
+    decideLink(unusable(), provider({ autoProvision: true }), ordinary()),
+    { action: "link", userId: "u-1" },
+  );
+});
+
+// Order matters: the cheaper, more specific refusals stay ahead of it, so an
+// operator reading the error code learns the first thing that was wrong.
+Deno.test("the earlier refusals still win over the addressability check", () => {
+  assertEquals(
+    decideLink(unusable({ emailVerified: false }), provider({ autoProvision: true }), null),
+    { action: "refuse", reason: "upstream_email_unverified" },
+  );
+  assertEquals(
+    decideLink(
+      unusable(),
+      provider({ autoProvision: true, emailDomainAllowlist: ["corp.test"] }),
+      null,
+    ),
+    { action: "refuse", reason: "email_domain_not_allowed" },
+  );
+  // auto_provision off is already a refusal, and stays the one reported.
+  assertEquals(
+    decideLink(unusable(), provider(), null),
+    { action: "refuse", reason: "no_account" },
+  );
+});
+
+// The address-less branch provisions too, and is deliberately NOT guarded: it
+// mints a placeholder rather than writing what the upstream said. This asserts
+// the exemption is safe rather than assumed.
+Deno.test("an identity with no address still provisions, since its placeholder is addressable", () => {
+  assertEquals(
+    decideLink({ sub: "s-1", email: null, emailVerified: false }, provider({ autoProvision: true }), null),
+    { action: "provision" },
+  );
 });
 
 // ── Link guards: domain allowlist and elevated accounts (link.ts) ──────────
@@ -733,199 +343,63 @@ Deno.test("'none' and (for now) 'graph' resolve to no groups", () => {
   assertEquals(resolveGroups(claims, provider({ groupsSource: "graph", groupsClaim: "groups" })), []);
 });
 
-// ── Identity resolution (providers.ts) ──────────────────────────────────────
+// ── The link lookup the federation ADMIN api still uses (providers.ts) ──────
+//
+// resolveFederatedUser and findLinkCandidateByEmail are gone: the sign-in path
+// makes those decisions in resolve-user.ts, through Better Auth's adapter, and
+// resolve-user.test.ts pins them. findLinkedUser survived because linkIdentity
+// still calls it, so it is still tested — for what linkIdentity actually reads.
 
-/**
- * A pg client stubbed by which statement it is asked to run. Enough to drive
- * resolveFederatedUser, which is the only place the two lookups are ordered
- * against each other, without a database.
- */
-function stubClient(rows: { linked?: unknown[]; byEmail?: unknown[] }) {
+/** A pg client stubbed by which statement it is asked to run. */
+function stubClient(rows: unknown[]) {
   const seen: string[] = [];
   return {
     seen,
     // deno-lint-ignore no-explicit-any
-    query(sql: string, _params: unknown[]): Promise<any> {
-      // The link lookup joins user, so it must be recognised first.
-      if (sql.includes("FROM trexdb.account a")) {
-        seen.push("link");
-        return Promise.resolve({ rows: rows.linked ?? [] });
-      }
-      if (sql.includes('FROM trexdb."user"')) {
-        seen.push("email");
-        return Promise.resolve({ rows: rows.byEmail ?? [] });
-      }
+    query(sql: string, params: unknown[]): Promise<any> {
+      seen.push(sql.replace(/\s+/g, " ").trim());
+      if (sql.includes("FROM trexdb.account a")) return Promise.resolve({ rows });
       throw new Error(`unexpected query: ${sql}`);
     },
   };
 }
 
-Deno.test("an existing link is found and reports whether its user is disabled", async () => {
-  const live = await findLinkedUser(
-    stubClient({ linked: [{ userId: "u-1", disabled: false }] }),
-    "logto",
-    "s-1",
-  );
-  assertEquals(live, { userId: "u-1", disabled: false });
-
-  const banned = await findLinkedUser(
-    stubClient({ linked: [{ userId: "u-1", disabled: true }] }),
-    "logto",
-    "s-1",
-  );
-  assertEquals(banned, { userId: "u-1", disabled: true });
-
-  assertEquals(await findLinkedUser(stubClient({}), "logto", "s-1"), null);
+Deno.test("an existing link is found by (providerId, accountId), and only the id is read", async () => {
+  const client = stubClient([{ userId: "u-1" }]);
+  assertEquals(await findLinkedUser(client, "logto", "s-1"), { userId: "u-1" });
+  // Keyed on BOTH columns: UNIQUE("providerId","accountId") is the identity, and
+  // a lookup on accountId alone would hand one upstream's subject the account
+  // another upstream owns.
+  assertEquals(client.seen.length, 1);
+  assertStringIncludes(client.seen[0], 'a."providerId" = $1 AND a."accountId" = $2');
+  // The JOIN is load-bearing rather than decoration: a link whose user row has
+  // gone must read as NO link, not as a link to a missing id.
+  assertStringIncludes(client.seen[0], 'JOIN trexdb."user" u ON u.id = a."userId"');
 });
 
-// The upstream changed the address. The link is the identity, so the sign-in
-// lands on the linked user and never looks at whoever now holds that email.
-Deno.test("an existing link wins over a different email", async () => {
-  const client = stubClient({
-    linked: [{ userId: "u-linked", disabled: false }],
-    byEmail: [{ id: "u-someone-else" }],
-  });
-  assertEquals(
-    await resolveFederatedUser(client, provider(), {
-      sub: "s-1",
-      email: "changed@example.test",
-      emailVerified: true,
-    }),
-    { action: "link", userId: "u-linked" },
-  );
-  // Not merely outranked: the email question is never asked.
-  assertEquals(client.seen, ["link"]);
-});
-
-// An unverified upstream email would refuse a *new* link; it is irrelevant to
-// one that already exists, because no linking decision is being made.
-Deno.test("an existing link does not re-ask the verified-email question", async () => {
-  const client = stubClient({ linked: [{ userId: "u-linked", disabled: false }] });
-  assertEquals(
-    await resolveFederatedUser(client, provider(), {
-      sub: "s-1",
-      email: "jo@example.test",
-      emailVerified: false,
-    }),
-    { action: "link", userId: "u-linked" },
-  );
-  assertEquals(client.seen, ["link"]);
-});
-
-// The case this whole change exists for. d2e's migration pre-links every Logto
-// user by subject before anyone signs in, and most of those accounts have no
-// address, so the established link has to carry the sign-in on its own.
-Deno.test("an established link signs in with no email whatsoever", async () => {
-  const client = stubClient({ linked: [{ userId: "u-linked", disabled: false }] });
-  assertEquals(
-    await resolveFederatedUser(client, provider(), noEmail),
-    { action: "link", userId: "u-linked" },
-  );
-  assertEquals(client.seen, ["link"]);
-});
-
-// Nothing to look one up by. The query is skipped rather than run with null and
-// left to match whatever `lower(NULL)` would.
-Deno.test("with no link and no email, no candidate is looked up", async () => {
-  const client = stubClient({ byEmail: [{ id: "u-2" }] });
-  assertEquals(
-    await resolveFederatedUser(client, provider({ autoProvision: true }), noEmail),
-    { action: "provision" },
-  );
-  assertEquals(client.seen, ["link"]);
-});
-
-Deno.test("an existing link to a disabled user is refused", async () => {
-  const client = stubClient({
-    linked: [{ userId: "u-banned", disabled: true }],
-    // Would be email-linkable if the flow ever fell through to it.
-    byEmail: [{ id: "u-someone-else" }],
-  });
-  const decision = await resolveFederatedUser(client, provider(), identity(true));
-  assertEquals(decision, { action: "refuse", reason: "account_disabled" });
-  // And it stops there rather than falling through to provision or re-link.
-  assertEquals(client.seen, ["link"]);
-});
-
-Deno.test("with no link, a verified email links as before", async () => {
-  const client = stubClient({ byEmail: [{ id: "u-2" }] });
-  assertEquals(
-    await resolveFederatedUser(client, provider(), identity(true)),
-    { action: "link", userId: "u-2" },
-  );
-  assertEquals(client.seen, ["link", "email"]);
-});
-
-Deno.test("with no link and no matching user, the provider's policy decides", async () => {
-  assertEquals(
-    await resolveFederatedUser(stubClient({}), provider(), identity(true)),
-    { action: "refuse", reason: "no_account" },
-  );
-  assertEquals(
-    await resolveFederatedUser(stubClient({}), provider({ autoProvision: true }), identity(true)),
-    { action: "provision" },
-  );
-  // An unverified upstream email still links to nothing.
-  assertEquals(
-    (await resolveFederatedUser(
-      stubClient({ byEmail: [{ id: "u-2" }] }),
-      provider(),
-      identity(false),
-    )).action,
-    "refuse",
-  );
-});
-
-Deno.test("the email lookup carries the role the elevated guard needs", async () => {
-  const found = await findLinkCandidateByEmail(
-    stubClient({ byEmail: [{ id: "u-1", role: "admin" }] }),
-    "jo@example.test",
-  );
-  assertEquals(found, { id: "u-1", role: "admin" });
-
-  // NULL role (the column is nullable, defaulting to 'user') is reported as
-  // null, not dropped, so isElevatedRole decides rather than `undefined`.
-  assertEquals(
-    await findLinkCandidateByEmail(stubClient({ byEmail: [{ id: "u-1" }] }), "jo@example.test"),
-    { id: "u-1", role: null },
-  );
-  assertEquals(await findLinkCandidateByEmail(stubClient({}), "jo@example.test"), null);
-});
-
-Deno.test("a first-time identity matching an admin's address is refused", async () => {
-  const client = stubClient({ byEmail: [{ id: "u-admin", role: "admin" }] });
-  assertEquals(
-    await resolveFederatedUser(client, provider(), identity(true)),
-    { action: "refuse", reason: "elevated_account_link_refused" },
-  );
-  assertEquals(client.seen, ["link", "email"]);
-});
-
-// The whole point of the additive guards: they gate the *first* link only.
-Deno.test("an existing link to an elevated user still signs in", async () => {
-  const client = stubClient({ linked: [{ userId: "u-admin", disabled: false }] });
-  assertEquals(
-    // Restrictive on both counts, and neither is consulted: this identity was
-    // linked already, so no linking decision is being made.
-    await resolveFederatedUser(
-      client,
-      provider({ emailDomainAllowlist: ["corp.test"] }),
-      { sub: "s-1", email: "jo@example.test", emailVerified: true },
-    ),
-    { action: "link", userId: "u-admin" },
-  );
-  assertEquals(client.seen, ["link"]);
-});
-
-Deno.test("a first-time identity outside the allowlist is refused before any link", async () => {
-  const client = stubClient({ byEmail: [{ id: "u-2", role: "user" }] });
-  assertEquals(
-    await resolveFederatedUser(client, provider({ emailDomainAllowlist: ["corp.test"] }), identity(true)),
-    { action: "refuse", reason: "email_domain_not_allowed" },
-  );
+Deno.test("no link, or a link the JOIN drops, is reported as no link at all", async () => {
+  assertEquals(await findLinkedUser(stubClient([]), "logto", "s-1"), null);
 });
 
 // ── Upstream tokens at rest (providers.ts) ─────────────────────────────────
+//
+// Both subjects are still here, so these cases are: upsertAccount is the
+// statement the federation ADMIN link runs (admin-store.ts's linkIdentity), and
+// readAccountTokens is the only sanctioned reader of the three ciphertext
+// columns — V21's column comment names it as such, and phase 5's token broker
+// is the consumer it exists for.
+//
+// One honest limit on what they are evidence OF. No live caller passes
+// upsertAccount a token any more: linkIdentity supplies only
+// (userId, providerId, accountId), and the sign-in path's writes go through
+// account-tokens.ts's Better Auth hooks, which seal independently and are
+// pinned in account-tokens.test.ts. So the sealing half below pins a capability
+// the statement has rather than one anything currently exercises, and the
+// COALESCE half reads back through captureClient's own emulation of the ON
+// CONFLICT clause — the load-bearing assertion there is that an absent token
+// reaches SQL as NULL, which is real; the read-back is the stub agreeing with
+// itself. What actually preserves a stored refresh token in production is
+// V21's trg_account_preserve_refresh_token, pinned against a real database.
 
 /**
  * The DEK is a process-wide singleton, so pin a known one for these tests and
@@ -1089,7 +563,7 @@ Deno.test("an undecryptable stored token is surfaced, not silently reported abse
   }
 });
 
-// ── Federation RP routes (router.ts) ────────────────────────────────────────
+// ── Request shaping for the RP routes (request.ts) ──────────────────────────
 
 Deno.test("redirect_to accepts same-origin paths", () => {
   assertEquals(safeRedirectTo("/atlas/"), "/atlas/");
@@ -1119,219 +593,259 @@ Deno.test("redirect_to rejects backslash and control-character smuggling", () =>
   assertEquals(safeRedirectTo("/\n/evil.test"), "/");
 });
 
-Deno.test("callback URI prefers explicit configuration over request headers", () => {
-  const req = { headers: { "x-forwarded-proto": "http", host: "internal:33001" } };
-  assertEquals(
-    callbackUri(req, "/trex", "https://trex.example/trex/auth/v1/callback"),
-    "https://trex.example/trex/auth/v1/callback",
-  );
+// ── Placeholder addresses (providers.ts) ─────────────────────────────────────
+//
+// V17 restored user.email NOT NULL, so the branch decideLink routes an
+// address-less identity down — {action:"provision"} under autoProvision —
+// cannot write a NULL any more. These pin the rule that replaced it, which is
+// shared by hand with V17's DO block.
+
+Deno.test("the placeholder local part is the slug V17 computes", () => {
+  assertEquals(placeholderLocalPart("Alice.Example"), "alice.example");
+  assertEquals(placeholderLocalPart("alice example"), "alice-example");
+  assertEquals(placeholderLocalPart("carol@corp.example"), "carol-corp.example");
+  // btrim(…, '-.') at both ends: a local part may neither start nor end with a
+  // dot, and a run of rejected characters must not leave a trailing dash.
+  assertEquals(placeholderLocalPart(".weird!"), "weird");
+  // Nothing usable survives. The caller has to notice rather than mint the
+  // address `@d2e.local`.
+  assertEquals(placeholderLocalPart("###"), "");
 });
 
-Deno.test("callback URI falls back to the forwarded origin", () => {
-  assertEquals(
-    callbackUri(
-      { headers: { "x-forwarded-proto": "https, http", "x-forwarded-host": "trex.test" } },
-      "/trex",
-      // Explicit rather than omitted: the parameter default reads
-      // TREX_FEDERATION_REDIRECT_URI, so leaving it out makes this test pass or
-      // fail depending on the developer's environment.
-      "",
-    ),
-    "https://trex.test/trex/auth/v1/callback",
-  );
-  assertEquals(
-    callbackUri({ headers: { host: "trex.test" } }, "", ""),
-    "https://trex.test/auth/v1/callback",
-  );
-  // A plain-HTTP deployment with no proxy header must not claim https: the
-  // provider would reject a redirect_uri it never registered.
-  assertEquals(
-    callbackUri({ protocol: "http", headers: { host: "localhost:33001" } }, "/trex", ""),
-    "http://localhost:33001/trex/auth/v1/callback",
-  );
-  // A proxy header still wins over the connection's own protocol.
-  assertEquals(
-    callbackUri(
-      { protocol: "http", headers: { "x-forwarded-proto": "https", host: "trex.test" } },
-      "/trex",
-      "",
-    ),
-    "https://trex.test/trex/auth/v1/callback",
-  );
-});
+/** Answers provisionUser's collision probe and records what it would insert. */
+function provisionClient(taken: string[] = []) {
+  const inserts: unknown[][] = [];
+  return {
+    inserts,
+    query(sql: string, params: unknown[]): Promise<{ rows: unknown[] }> {
+      if (sql.includes('INSERT INTO trexdb."user"')) {
+        inserts.push(params);
+        return Promise.resolve({ rows: [] });
+      }
+      if (sql.includes("lower(email) = $1")) {
+        return Promise.resolve({ rows: taken.includes(params[0] as string) ? [{ one: 1 }] : [] });
+      }
+      throw new Error(`unexpected query: ${sql}`);
+    },
+  };
+}
 
-Deno.test("a state is accepted once and refused on replay", () => {
-  assertEquals(consumeState("sig-once", 100, 10), true);
-  assertEquals(consumeState("sig-once", 100, 11), false);
-  assertEquals(consumeState("sig-once", 100, 12), false);
-});
+const anonymous = (sub: string) => ({ sub, email: null, emailVerified: false });
 
-Deno.test("consumed states stop being remembered once they expire", () => {
-  assertEquals(consumeState("sig-expiring", 100, 10), true);
-  // Past its own expiry the entry is pruned; verifyState rejects such a state
-  // before consumeState is ever reached, so nothing is re-openable in practice.
-  assertEquals(consumeState("sig-expiring", 100, 101), true);
-});
-
-Deno.test("a callback carrying the matching binding cookie is accepted", async () => {
-  const value = "browser-binding-value";
-  const bind = await hashBinding(value);
-  assertEquals(await bindingMatches(`__Host-trex_federation=${value}`, bind, true), true);
-  // The unprefixed name is what a plain-HTTP deployment sets, and is accepted
-  // only on a non-secure request — local sign-in has to keep working.
-  assertEquals(await bindingMatches(`trex_federation=${value}; other=x`, bind, false), true);
-});
-
-Deno.test("a callback carrying the wrong binding cookie is refused", async () => {
-  const bind = await hashBinding("browser-binding-value");
-  assertEquals(await bindingMatches("__Host-trex_federation=someone-elses", bind, true), false);
-  // A near miss must not pass either: the comparison is over the hashes.
-  assertEquals(
-    await bindingMatches("__Host-trex_federation=browser-binding-valuf", bind, true),
+Deno.test("an identity asserting no address is provisioned with a flagged placeholder", async () => {
+  const c = provisionClient();
+  assertEquals(await provisionUser(c, anonymous("Alice.Example"), { id: "u-1" }), "u-1");
+  // Unverified and flagged. The flag is what every mail path tells a
+  // synthesised address by, and what resolve-user.ts's findCandidate excludes
+  // on;
+  // `"emailVerified"` false is a true statement about a row nobody asserted and
+  // protects nothing on its own, since decideLink reads the incoming identity.
+  assertEquals(c.inserts, [[
+    "u-1",
+    "Alice.Example",
+    `alice.example@${PLACEHOLDER_EMAIL_DOMAIN}`,
     false,
+    true,
+  ]]);
+});
+
+Deno.test("a subject that slugifies to nothing falls back to the user id", async () => {
+  const c = provisionClient();
+  await provisionUser(c, anonymous("###"), { id: "u-1" });
+  assertEquals(c.inserts[0][2], `u-1@${PLACEHOLDER_EMAIL_DOMAIN}`);
+});
+
+Deno.test("a placeholder whose slug is taken falls back to the user id", async () => {
+  const c = provisionClient([`alice.example@${PLACEHOLDER_EMAIL_DOMAIN}`]);
+  await provisionUser(c, anonymous("Alice.Example"), { id: "u-2" });
+  assertEquals(c.inserts[0][2], `u-2@${PLACEHOLDER_EMAIL_DOMAIN}`);
+});
+
+Deno.test("a placeholder with no address left is refused, never attached to one", async () => {
+  const c = provisionClient([
+    `alice.example@${PLACEHOLDER_EMAIL_DOMAIN}`,
+    `u-2@${PLACEHOLDER_EMAIL_DOMAIN}`,
+  ]);
+  await assertRejects(
+    () => provisionUser(c, anonymous("Alice.Example"), { id: "u-2" }),
+    Error,
+    "already taken",
   );
+  assertEquals(c.inserts, []);
 });
 
-// The victim in the login-CSRF attack: the attacker's callback URL opened in a
-// browser that never started a flow, so it holds no cookie at all.
-Deno.test("a callback with no binding cookie is refused", async () => {
-  const bind = await hashBinding("browser-binding-value");
-  assertEquals(await bindingMatches(undefined, bind, true), false);
-  assertEquals(await bindingMatches("", bind, true), false);
-  assertEquals(await bindingMatches("unrelated=1", bind, true), false);
-  // And a state carrying no binding at all can never be satisfied.
-  assertEquals(await bindingMatches("__Host-trex_federation=anything", "", true), false);
+Deno.test("a user id that slugifies to nothing is refused rather than given `@domain`", async () => {
+  const c = provisionClient();
+  await assertRejects(
+    () => provisionUser(c, anonymous("###"), { id: "!!!" }),
+    Error,
+    "no usable local part",
+  );
+  assertEquals(c.inserts, []);
 });
 
-// The cookie-shadowing attack the __Host- prefix exists to stop. The victim
-// holds no prefixed cookie — they never started a flow — so falling back to the
-// unprefixed name would hand the whole binding back: the attacker reads their
-// own binding value off their own Set-Cookie, plants it under the weak name
-// from a sibling subdomain or over plaintext for any sibling host, and the
-// victim's browser presents a value that matches.
-Deno.test("on a secure request the unprefixed cookie never satisfies the binding", async () => {
-  const value = "browser-binding-value";
-  const bind = await hashBinding(value);
-  assertEquals(await bindingMatches(`trex_federation=${value}`, bind, true), false);
-  // Not even alongside a prefixed cookie that does not match.
-  assertEquals(
-    await bindingMatches(`__Host-trex_federation=other; trex_federation=${value}`, bind, true),
+Deno.test("an identity that asserts an address is provisioned with it, verified and unflagged", async () => {
+  const c = provisionClient();
+  await provisionUser(
+    c,
+    { sub: "s-1", email: "jo@example.test", emailVerified: true },
+    { id: "u-1" },
+  );
+  assertEquals(c.inserts, [["u-1", "jo@example.test", "jo@example.test", true, false]]);
+});
+
+// An address IN the placeholder domain, supplied rather than synthesised. The
+// federation admin link cannot reach the synthesis branch at all —
+// parseLinkRequest requires an '@' — so a migration with no address to give
+// sends `<username>@<its configured domain>`, which at d2e's default is this
+// exact string. 66 of 69 rehearsed users landed here, unflagged, verified and
+// confirmed: link candidates again, and a lie to any mail path that reads the
+// flag.
+Deno.test("an asserted address in the placeholder domain is flagged like a synthesised one", async () => {
+  const c = provisionClient();
+  await provisionUser(
+    c,
+    { sub: "s-1", email: `alice@${PLACEHOLDER_EMAIL_DOMAIN}`, emailVerified: true },
+    { id: "u-1" },
+  );
+  // emailVerified false and the flag true — identical to the synthesis branch,
+  // which is the point: a row from either must be indistinguishable. The name
+  // is the existing fallback chain (name ?? email ?? sub) and is deliberately
+  // not part of this change: it is what an administrator's list shows, and the
+  // address is the only identifier this caller supplied.
+  assertEquals(c.inserts, [[
+    "u-1",
+    `alice@${PLACEHOLDER_EMAIL_DOMAIN}`,
+    `alice@${PLACEHOLDER_EMAIL_DOMAIN}`,
     false,
-  );
-  // And the converse, so a plain-HTTP deployment still signs in: there the
-  // unprefixed name is the one that was set, and the prefixed one is ignored.
-  assertEquals(await bindingMatches(`trex_federation=${value}`, bind, false), true);
-  assertEquals(await bindingMatches(`__Host-trex_federation=${value}`, bind, false), false);
+    true,
+  ]]);
 });
 
-Deno.test("the binding hash hides the cookie value and is stable", async () => {
-  const hash = await hashBinding("browser-binding-value");
-  assertEquals(hash, await hashBinding("browser-binding-value"));
-  assertNotEquals(hash, await hashBinding("browser-binding-valuf"));
-  assertEquals(hash.includes("browser-binding-value"), false);
-  // base64url: safe to carry in a URL-borne state and to log.
-  assertEquals(/^[A-Za-z0-9_-]+$/.test(hash), true);
+// Keyed on the domain, so case and subdomain are decided by emailDomain's rule
+// rather than by a substring test that `evil-d2e.local` would slip past.
+Deno.test("the placeholder domain is matched case-insensitively and exactly", async () => {
+  const upper = provisionClient();
+  await provisionUser(upper, { sub: "s-1", email: "alice@D2E.Local", emailVerified: true }, { id: "u-1" });
+  assertEquals(upper.inserts[0][4], true);
+
+  for (const notIt of ["alice@evil-d2e.local", "alice@d2e.local.evil.test", "alice@sub.d2e.local"]) {
+    const c = provisionClient();
+    await provisionUser(c, { sub: "s-1", email: notIt, emailVerified: true }, { id: "u-1" });
+    assertEquals(c.inserts[0][4], false, notIt);
+    assertEquals(c.inserts[0][3], true, notIt);
+  }
 });
 
-Deno.test("only the name this request's scheme mandates is read", () => {
-  const header = "trex_federation=plain; __Host-trex_federation=prefixed";
-  assertEquals(readBindingCookie(header, true), "prefixed");
-  assertEquals(readBindingCookie(header, false), "plain");
-  // A secure request sees nothing at all when only the weak name is present.
-  assertEquals(readBindingCookie("trex_federation=plain", true), null);
-  assertEquals(readBindingCookie("__Host-trex_federation=prefixed", false), null);
-  assertEquals(readBindingCookie(undefined, true), null);
+// Gated on DATABASE_URL like admin.test.ts's [db] block: the stubs above pin
+// which address is computed, but only a real database proves the row V17's
+// NOT NULL constraints will actually accept — which is the difference between
+// a placeholder and a 500 on the first sign-in of a username-only user.
+const provisionDbUrl = Deno.env.get("DATABASE_URL");
+
+Deno.test({
+  name: "[db] provisioning an address-less identity writes a row V17 accepts",
+  ignore: !provisionDbUrl,
+  fn: async () => {
+    const { Client } = await import("npm:pg");
+    const db = new Client({ connectionString: provisionDbUrl });
+    await db.connect();
+    const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+    try {
+      const id = await provisionUser(db, anonymous(`Sub ${run}`), { id: `p${run}` });
+      const { rows } = await db.query(
+        `SELECT email, "emailVerified", is_placeholder_email, email_confirmed_at
+           FROM trexdb."user" WHERE id = $1`,
+        [id],
+      );
+      assertEquals(rows, [{
+        email: `sub-${run}@${PLACEHOLDER_EMAIL_DOMAIN}`,
+        emailVerified: false,
+        is_placeholder_email: true,
+        email_confirmed_at: null,
+      }]);
+    } finally {
+      await db.query(`DELETE FROM trexdb."user" WHERE id LIKE $1`, [`p${run}%`]);
+      await db.end();
+    }
+  },
 });
 
-Deno.test("authorizationEndpointFor uses discovery when no override is set", () => {
-  assertEquals(
-    authorizationEndpointFor({ authorizationEndpoint: null }, {
-      authorization_endpoint: "https://idp.internal:3001/oidc/auth",
-    }),
-    "https://idp.internal:3001/oidc/auth",
-  );
-});
+// The two db cases that used to sit here — "an upstream cannot claim an account
+// through its placeholder address" and "a migrated user with a placeholder
+// address still signs in through its link" — drove findLinkCandidateByEmail and
+// resolveFederatedUser, which are gone. Both moved to resolve-user.test.ts, with
+// their rows and their decoy intact, where they run against the real adapter
+// that actually makes the decision now.
 
-Deno.test("authorizationEndpointFor prefers the configured browser-facing URL", () => {
-  assertEquals(
-    authorizationEndpointFor({ authorizationEndpoint: "https://d2e.example/oidc/auth" }, {
-      authorization_endpoint: "https://idp.internal:3001/oidc/auth",
-    }),
-    "https://d2e.example/oidc/auth",
-  );
-});
+// The exclusion is only correct while the address is still synthesised. V17's
+// column comment defines the flag as "the address is synthesised, not a contact
+// address", so an address the account holder supplied has to clear it — and
+// PUT /user is the one route that writes a caller-supplied address. Without the
+// clear, closing the takeover path would have made every placeholder user
+// permanently unlinkable: a provider asserting the address they had just set
+// would get `no_account`, or, under auto-provision, a UNIQUE violation on
+// user_email_key surfacing as a 500 out of /callback.
+//
+// Driven through the real route rather than an UPDATE of its own: what is being
+// pinned is that the handler clears the flag, which a hand-written statement
+// would assert about itself.
+Deno.test({
+  name: "[db] a placeholder user who sets a real address becomes linkable again",
+  ignore: !provisionDbUrl,
+  // ../db.ts owns a pool that deliberately outlives the test, as in
+  // auth-router.contract.test.ts.
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const { Client } = await import("npm:pg");
+    const express = (await import("express")).default;
+    const { authRouter } = await import("../auth-router.ts");
+    const { _resetJwtSecretCache, signAccessToken } = await import("../jwt.ts");
+    const { _resetRootKeyCache } = await import("../keys.ts");
 
-Deno.test("authorizationEndpointFor ignores a blank override", () => {
-  assertEquals(
-    authorizationEndpointFor({ authorizationEndpoint: "   " }, {
-      authorization_endpoint: "https://idp.internal:3001/oidc/auth",
-    }),
-    "https://idp.internal:3001/oidc/auth",
-  );
-});
+    _resetRootKeyCache();
+    _resetJwtSecretCache();
+    Deno.env.set("TREX_ROOT_KEY", btoa(String.fromCharCode(...new Uint8Array(32).map((_, i) => i))));
 
-Deno.test("loadProviders maps authorization_endpoint, absent meaning null", async () => {
-  const row = (over: Record<string, unknown>) => ({
-    id: "logto", displayName: "Logto", clientId: "c", clientSecret: "s",
-    issuer: "https://logto.test/oidc", discovery_url: null,
-    scopes: "openid profile email", claim_map: {}, groups_source: "none",
-    groups_claim: null, link_policy: "verified_email", auto_provision: false, ...over,
-  });
-  const load = async (over: Record<string, unknown>) =>
-    (await loadProviders({ query: () => Promise.resolve({ rows: [row(over)] }) })).get("logto")!;
+    const db = new Client({ connectionString: provisionDbUrl });
+    await db.connect();
+    const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+    const chosen = `chosen-${run}@example.test`;
+    const app = express();
+    app.use("/trex/auth/v1", authRouter);
+    const server = app.listen(0, "127.0.0.1");
+    await new Promise<void>((r) => server.once("listening", () => r()));
+    const { port } = server.address() as { port: number };
+    try {
+      const id = await provisionUser(db, anonymous(`Sub ${run}`), { id: `p${run}` });
+      const token = await signAccessToken({ id, email: null, role: "user" }, crypto.randomUUID());
 
-  assertEquals((await load({ authorization_endpoint: "https://d2e.test/oidc/auth" })).authorizationEndpoint,
-    "https://d2e.test/oidc/auth");
-  assertEquals((await load({})).authorizationEndpoint, null);
-});
+      const res = await fetch(`http://127.0.0.1:${port}/trex/auth/v1/user`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ email: chosen }),
+      });
+      assertEquals(res.status, 200);
+      await res.body?.cancel();
 
-Deno.test("the weak cookie name is announced once, not per request", () => {
-  _resetInsecureBindingWarning();
-  const said: string[] = [];
-  warnIfInsecureBinding(false, (m) => said.push(m));
-  warnIfInsecureBinding(false, (m) => said.push(m));
-  warnIfInsecureBinding(false, (m) => said.push(m));
-  assertEquals(said.length, 1);
-  // An operator has to be able to act on it, so it names the remedy.
-  assertEquals(said[0].includes("TREX_FORCE_SECURE_COOKIES=1"), true);
-  assertEquals(said[0].includes("X-Forwarded-Proto"), true);
+      const { rows } = await db.query(
+        `SELECT email, is_placeholder_email FROM trexdb."user" WHERE id = $1`,
+        [id],
+      );
+      assertEquals(rows, [{ email: chosen, is_placeholder_email: false }]);
 
-  // A secure deployment hears nothing.
-  _resetInsecureBindingWarning();
-  const quiet: string[] = [];
-  warnIfInsecureBinding(true, (m) => quiet.push(m));
-  assertEquals(quiet.length, 0);
-  _resetInsecureBindingWarning();
-});
-
-Deno.test("__Host- is used only where the cookie can carry Secure", () => {
-  assertEquals(bindingCookieName(true), "__Host-trex_federation");
-  assertEquals(bindingCookieName(false), "trex_federation");
-  // The third argument is pinned for the same reason callbackUri's is.
-  assertEquals(isSecureRequest({ protocol: "https", headers: {} }, ""), true);
-  assertEquals(isSecureRequest({ headers: { "x-forwarded-proto": "https, http" } }, ""), true);
-  assertEquals(isSecureRequest({ headers: {} }, ""), false);
-  assertEquals(isSecureRequest({ headers: {} }, "1"), true);
-});
-
-Deno.test("refusalRedirect sends the browser to the login page with the code and return path", () => {
-  const url = new URL(refusalRedirect("https://d2e.test/d2e-login/", "no_account", "/trex/oidc/authorize?x=1")!);
-  assertEquals(url.origin + url.pathname, "https://d2e.test/d2e-login/");
-  assertEquals(url.searchParams.get("error"), "no_account");
-  assertEquals(url.searchParams.get("return_to"), "/trex/oidc/authorize?x=1");
-});
-
-Deno.test("refusalRedirect keeps a login URL's own query parameters", () => {
-  const url = new URL(refusalRedirect("https://d2e.test/login?theme=dark", "account_disabled", "/")!);
-  assertEquals(url.searchParams.get("theme"), "dark");
-  assertEquals(url.searchParams.get("error"), "account_disabled");
-});
-
-Deno.test("refusalRedirect never forwards an off-site return path", () => {
-  const url = new URL(refusalRedirect("https://d2e.test/d2e-login/", "no_account", "//evil.test/")!);
-  assertEquals(url.searchParams.get("return_to"), "/");
-});
-
-Deno.test("refusalRedirect is null without a login URL, so callers keep the JSON response", () => {
-  assertEquals(refusalRedirect(null, "no_account", "/"), null);
+      // The other half of the clear — that a provider asserting the address they
+      // chose now links rather than refusing — is pinned where the decision is
+      // made, in resolve-user.test.ts's "[db] a placeholder-addressed user is
+      // not a candidate through the real adapter", which flips this same flag
+      // and signs the identity in. Asserting it here would mean rebuilding
+      // Better Auth's adapter beside a raw pg client to reach a resolver that
+      // needs one.
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+      await db.query(`DELETE FROM trexdb."user" WHERE id LIKE $1`, [`p${run}%`]);
+      await db.end();
+    }
+  },
 });
