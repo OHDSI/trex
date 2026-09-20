@@ -718,3 +718,91 @@ corrected.
   values (verified by re-reading the row).
 - One leftover: `admin@d2e.local` still holds the `ALP_SYSTEM_ADMIN` role row
   granted in §6 to make `roles` non-empty.
+
+---
+
+# Closing the blocker — measurements from the fix
+
+Appended after §17. Same stack, same gateway. The stack was brought onto this
+branch's core by `docker cp`-ing the changed files into `/usr/src/core/server`
+and re-bundling in place with the image's own
+`trex bundle ./core/server/index.ts ./core/server/index.eszip` (`Dockerfile:326`),
+then restarting the container — so boot, the seeder and the eszip are all the
+real ones. §0's release-engineering gap is unchanged and still owed.
+
+## 18. `requirePKCE: false` still honours a PKCE that is supplied
+
+This is the premise the whole of §5's fix rests on, so it was measured before
+anything was built, on the running stack, with the row set to
+`requirePKCE=false` / `client_secret_basic`:
+
+| probe | observed |
+|---|---|
+| authorize, **WebAPI's exact shape** (no `code_challenge`, `nonce` present) | **302, code issued** |
+| token, `client_secret_basic`, no `code_verifier` | **200** |
+| authorize, **portal shape** (`code_challenge` + `S256`) | 302, code issued |
+| token, **correct** `code_verifier` | 200 |
+| token, **wrong** `code_verifier` | **401** `{"error_description":"code verification failed","error":"invalid_request"}` |
+| token, `code_verifier` **omitted** | **401** `{"error_description":"code_verifier required because PKCE was used in authorization","error":"invalid_request"}` |
+| token, `client_secret_post` against the basic row | **400** `client registered for client_secret_basic cannot use client_secret_post` |
+
+The package says the same thing, and says it in one place. The column is read
+only by `isPKCERequired` (`dist/utils-CWjOhEQb.mjs:836-844`), which decides
+whether a challenge is **demanded**. Whether a supplied one is **honoured** is
+decided twice, by branches that never read it:
+
+- `/oauth2/authorize`: `if (query.code_challenge || query.code_challenge_method)`
+  — both required, `S256` only (`dist/authorize-riRRCSbC.mjs:5594-5596`) — and
+  the challenge is stored on the code.
+- `/oauth2/token`: `pkceUsedInAuth = !!verificationValue.query?.code_challenge`,
+  then a missing verifier is refused and a wrong one is S256-compared
+  (`dist/introspect-njKASm3q.mjs:1996-2009`).
+
+So §5's blocker is resolvable on **one** row, and the portal loses nothing.
+
+Note also what `isPKCERequired` still demands regardless of the column: PKCE for
+any **public** client (`tokenEndpointAuthMethod === "none"`, `:837`), and PKCE
+**or** an OIDC nonce for any request carrying `offline_access` (`:842`). WebAPI
+sends a nonce, so it clears the second; the row above is the whole reason the
+first is not weakened.
+
+## 19. Both relying parties sign in, at once, on one client row
+
+The seeder now writes `requirePKCE=false` / `client_secret_basic`, and the d2e
+`/oauth/token` proxy sends Basic when `D2E_IDP=trex` (only then — Logto refuses
+a request presenting client auth twice). One run, the row read either side of
+it:
+
+```
+CLIENT ROW BEFORE:  d2e-webapi | f | client_secret_basic
+
+/WebAPI/user/login/openid            302 -> /trex/oidc/oauth2/authorize?…   (no code_challenge)
+/trex/oidc/oauth2/authorize          302 -> /WebAPI/user/oauth/callback/openid?code=…&state=…&iss=…
+/WebAPI/user/oauth/callback/openid   302 -> /atlas/#/welcome?code=…
+GET /WebAPI/user/login/otc           200 {"login":"casuqjzdgzw9abykasofshhnfeupp2rg","message":"OTC redeemed successfully.","jwt":"eyJhbGciOiJI…"}
+  WebAPI log: OIDC: Authenticated user sub=casuqjzdgzw9abykasofshhnfeupp2rg
+              LoginService: onSuccess: … (origin: OIDC)
+
+portal /oauth2/authorize (PKCE)      302, code
+portal POST /d2e/oauth/token         200, 3-segment access token, refresh token, roles ["ALP_SYSTEM_ADMIN"]
+GET /d2e/usermgmt/api/user           200
+GET /d2e/system-portal/dataset/list  200
+portal silent renewal                200, rotated refresh token
+
+CLIENT ROW AFTER:   d2e-webapi | f | client_secret_basic
+```
+
+§5c's table can be closed: there is now a third row in it, and it is the one
+that ships.
+
+| `tokenEndpointAuthMethod` | `requirePKCE` | WebAPI sign-in | portal |
+|---|---|---|---|
+| `client_secret_post` (as seeded before) | true | fails at /authorize | works |
+| `client_secret_basic` | true | fails at /authorize | fails at /token |
+| **`client_secret_basic`** | **false** | **works** | **works** |
+
+The proxy's own log line shows the secret has left the body:
+
+```
+[d2e-compat] /oauth/token: auth=client_secret_basic secret_present=true len=30 keys=grant_type,client_id,redirect_uri,code,code_verifier,resource
+```
