@@ -196,6 +196,16 @@ dbTest("the plugin resolves a provider row by providerId", async ({ auth, pool }
   // makes the two agree, and the adapter read below is the one the plugin
   // actually makes.
   const id = `task4_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+  // A second row, shaped like the provider the one installation that matters
+  // actually carries. The minimal row reaches none of the three expressions
+  // that installation depends on — its issuer has no trailing slash, its
+  // claim_map is empty and its authorization_endpoint is NULL — so the
+  // trailing-slash trim, the claim_map lookup and the override could each be
+  // deleted from the migration with every assertion below still passing. That
+  // is the "the fixture never reaches the branch" hole, and it has to be closed
+  // here rather than in a manual rehearsal, because the migration runs once,
+  // against that installation.
+  const d2eId = `task4d_${crypto.randomUUID().replace(/-/g, "").slice(0, 11)}`;
   const migration = await Deno.readTextFile(MIGRATION);
   // The row has to be genuinely legacy-shaped — providerId, domain and
   // oidcConfig all NULL, which is what a pre-V20 database holds. The mirror
@@ -217,14 +227,42 @@ dbTest("the plugin resolves a provider row by providerId", async ({ auth, pool }
                'https://idp.example.test/oidc', NULL)`,
       [id],
     );
+    await pool.query(
+      `INSERT INTO trexdb.sso_provider
+         (id, "displayName", "clientId", "clientSecret", enabled, issuer, discovery_url,
+          scopes, claim_map, authorization_endpoint)
+       VALUES ($1, 'Task 4 d2e-shaped probe', 'd2e', 'sec', true,
+               -- Trailing slashes and mixed case, because d2e's Logto issuer
+               -- has them and because both are load-bearing: one feeds the trim
+               -- that builds discoveryEndpoint, the other the lower() that
+               -- builds domain.
+               'https://Proj-Logto-1.d2e.local:3001/oidc///', NULL,
+               -- A double space, so the empty element array_remove drops is
+               -- present rather than assumed absent.
+               'openid  profile email',
+               '{"email":"username","name":"display_name"}'::jsonb,
+               -- V13's whole reason for existing: Logto serves discovery over
+               -- an internal hostname but names an authorize URL no browser can
+               -- resolve.
+               'https://logto.example.test/oidc/auth')`,
+      [d2eId],
+    );
     const legacy = await pool.query(
-      `SELECT "providerId", domain, "oidcConfig" FROM trexdb.sso_provider WHERE id = $1`,
-      [id],
+      `SELECT id, "providerId", domain, "oidcConfig"
+         FROM trexdb.sso_provider WHERE id = ANY($1) ORDER BY id`,
+      [[id, d2eId].sort()],
     );
     assertEquals(
-      legacy.rows[0],
-      { providerId: null, domain: null, oidcConfig: null },
-      "the row was not legacy-shaped, so the backfill below proves nothing",
+      legacy.rows.map((r: Record<string, unknown>) => ({
+        providerId: r.providerId,
+        domain: r.domain,
+        oidcConfig: r.oidcConfig,
+      })),
+      [
+        { providerId: null, domain: null, oidcConfig: null },
+        { providerId: null, domain: null, oidcConfig: null },
+      ],
+      "a row was not legacy-shaped, so the backfill below proves nothing",
     );
 
     await pool.query(migration);
@@ -254,11 +292,46 @@ dbTest("the plugin resolves a provider row by providerId", async ({ auth, pool }
     assertEquals(config.mapping.email, "sub");
     assertEquals(config.tokenEndpointAuthentication, "client_secret_post");
     assertEquals(config.overrideUserInfo, false);
+    // jsonb_strip_nulls has to drop the key, not store a literal null: a null
+    // would pass a presence check written as `"authorizationEndpoint" in config`.
+    assertEquals("authorizationEndpoint" in config, false);
     // Declared by the plugin's model but with no source value in trex. They
     // must be present as columns and are legitimately NULL.
     assertEquals(row!.samlConfig, null);
     assertEquals(row!.userId, null);
     assertEquals(row!.organizationId, null);
+
+    const d2eRow = await ctx.adapter.findOne({
+      model: "ssoProvider",
+      where: [{ field: "providerId", value: d2eId }],
+    }) as Record<string, unknown> | null;
+    assertNotEquals(d2eRow, null, "the plugin cannot find the d2e-shaped row");
+    // Lowercased: hostnames are case-insensitive and the plugin compares this
+    // column as text. The port belongs to the host and stays.
+    assertEquals(d2eRow!.domain, "proj-logto-1.d2e.local:3001");
+    const d2e = JSON.parse(d2eRow!.oidcConfig as string);
+    // The issuer itself is preserved verbatim, case and trailing slashes
+    // included — it is compared against the `iss` claim, so the migration must
+    // not normalise it.
+    assertEquals(d2e.issuer, "https://Proj-Logto-1.d2e.local:3001/oidc///");
+    // ...but the URL derived from it must be trimmed, or discovery is fetched
+    // from an issuer//.well-known path the upstream does not serve.
+    assertEquals(
+      d2e.discoveryEndpoint,
+      "https://Proj-Logto-1.d2e.local:3001/oidc/.well-known/openid-configuration",
+    );
+    // The override, carried through rather than dropped. Without it the browser
+    // is sent to an internal hostname it cannot resolve.
+    assertEquals(d2e.authorizationEndpoint, "https://logto.example.test/oidc/auth");
+    // The lever the whole phase's GO verdict rests on: mapping.email names a
+    // claim, and for a username-only upstream naming the wrong one refuses
+    // every identity at dist/index.mjs:3938. claim_map's entry must win over
+    // the 'sub' fallback, and an unmapped field must still fall back.
+    assertEquals(d2e.mapping.email, "username");
+    assertEquals(d2e.mapping.name, "display_name");
+    assertEquals(d2e.mapping.emailVerified, "email_verified");
+    // The double space in `scopes` must not become an empty scope.
+    assertEquals(d2e.scopes, ["openid", "profile", "email"]);
 
     // The replay must also have restored the two guards it dropped above, or
     // the next row written the pre-V20 way is invisible again.
@@ -273,8 +346,8 @@ dbTest("the plugin resolves a provider row by providerId", async ({ auth, pool }
     );
     assertEquals(guards.rows[0], { not_null: true, mirrored: true });
   } finally {
-    await pool.query(`DELETE FROM trexdb.sso_provider WHERE id = $1`, [id]);
-    // Whatever happened above, the table must not be left without the trigger
+    await pool.query(`DELETE FROM trexdb.sso_provider WHERE id = ANY($1)`, [[id, d2eId]]);
+    // Whatever happened above, the table must not be left without the guards
     // the migration installs.
     await pool.query(migration);
   }
