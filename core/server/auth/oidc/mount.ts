@@ -14,6 +14,14 @@ import {
   trustedProxies,
 } from "./config.ts";
 import { createFailureBudget, isUserInfoRefusal } from "./userinfo-limit.ts";
+import {
+  annotateLogoutConfirmation,
+  type HintVerdict,
+  hintFromRequest,
+  logoutHintDiagnosis,
+  logoutHintWasRejected,
+} from "./logout-hint.ts";
+import { compactVerify, createLocalJWKSet } from "npm:jose";
 // Better Auth's own resolver, re-exported by better-auth/api, so this keys on
 // exactly the address its rate limiter would have keyed on — including the
 // trusted-proxy walk and the single-token rule.
@@ -109,6 +117,34 @@ function userInfoKey(request: Request): string {
   return `${ip ?? "no-trusted-ip"}|/oauth2/userinfo|failed`;
 }
 
+/**
+ * Verifies the hint against trex's OWN key set, read locally.
+ *
+ * This is the whole diagnostic: the same token, the same keys, without the HTTP
+ * round trip the provider makes. If it verifies here and not there, the fetch
+ * is the only difference between them — which is a one-line reproduction of the
+ * bug instead of a guess about certificates.
+ *
+ * Signature only, deliberately. The provider's own claim checks (iss, aud, sid,
+ * sub) run after its verification and are not what fails here; re-implementing
+ * them would create a second, drifting definition of a valid hint.
+ */
+async function verifyHintLocally(hint: string): Promise<HintVerdict> {
+  try {
+    const jwks = await auth.api.getJwks();
+    await compactVerify(hint, createLocalJWKSet(jwks as Parameters<typeof createLocalJWKSet>[0]));
+    return "signature-valid";
+  } catch (e) {
+    // Distinguish "the token is bad" from "trex could not look", because the
+    // two point at completely different people.
+    const name = (e as Error)?.name ?? "";
+    if (name.startsWith("JWS") || name.startsWith("JWK") || name === "JOSEError") {
+      return "signature-invalid";
+    }
+    return "unverifiable";
+  }
+}
+
 export function oidcHandler(): express.RequestHandler {
   return async (req, res) => {
     const path = new URL(req.originalUrl, "http://localhost").pathname.slice(MOUNT_PATH.length);
@@ -159,6 +195,7 @@ export function oidcHandler(): express.RequestHandler {
       return;
     }
 
+    let rejectedHintVerdict: HintVerdict | null = null;
     const response = await auth.handler(request);
 
     // Charged only on a refusal. A successful sign-in's call is a 200 and costs
@@ -171,8 +208,23 @@ export function oidcHandler(): express.RequestHandler {
     // not Better Auth's, and /auth/v1/logout — the only other place it is
     // cleared — is not on this path. Without it a browser that logs out through
     // the relying party keeps a bearer that same-origin iframes still read.
-    if (path.startsWith("/oauth2/end-session")) {
+    const isEndSession = path.startsWith("/oauth2/end-session");
+    if (isEndSession) {
       res.clearCookie("sb-access-token", { path: "/" });
+    }
+
+    // A hint the provider could not verify is otherwise SILENT: to a browser it
+    // produces the same "Confirm logout" page as no hint at all, so a user who
+    // should have been returned to their application just sees a button, and an
+    // operator sees nothing. logout-hint.ts carries the cause and why no
+    // configuration fixes it.
+    const hint = isEndSession ? hintFromRequest(req.originalUrl, body) : null;
+    if (hint && logoutHintWasRejected(response.status, response.headers.getSetCookie())) {
+      const verdict = await verifyHintLocally(hint);
+      console.error(`[oidc] end-session: id_token_hint rejected — ${logoutHintDiagnosis(verdict)}`);
+      // For a programmatic caller, which never sees the page.
+      res.setHeader("X-Trex-Logout-Hint", `rejected; local-verification=${verdict}`);
+      rejectedHintVerdict = verdict;
     }
 
     res.status(response.status);
@@ -185,7 +237,18 @@ export function oidcHandler(): express.RequestHandler {
       if (key.toLowerCase() === "set-cookie") return;
       res.setHeader(key, value);
     });
-    res.send(Buffer.from(await response.arrayBuffer()));
+    const payload = Buffer.from(await response.arrayBuffer());
+    if (
+      rejectedHintVerdict &&
+      (response.headers.get("content-type") ?? "").includes("text/html")
+    ) {
+      const annotated = annotateLogoutConfirmation(payload.toString("utf8"), rejectedHintVerdict);
+      // Content-Length was set from the original body by the header copy above.
+      res.setHeader("Content-Length", String(Buffer.byteLength(annotated)));
+      res.send(annotated);
+      return;
+    }
+    res.send(payload);
   };
 }
 
