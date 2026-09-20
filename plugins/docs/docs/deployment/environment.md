@@ -31,7 +31,7 @@ plugin loaders.
 | `PLUGINS_BASE_PATH` | `/plugins` | URL prefix for plugin-mounted routes. |
 | `BETTER_AUTH_URL` | `http://localhost:8000` | Public URL used for auth callbacks and CLI login. |
 | `BETTER_AUTH_SECRET` | — | **Deprecated / removed.** No longer read (only a legacy comment remains at `core/server/index.ts:1306`). The JWT signing key now derives from `TREX_ROOT_KEY` via HKDF — see [Secret Rotation](../operations/secret-rotation). |
-| `BETTER_AUTH_TRUSTED_ORIGINS` | `http://localhost:5173` | Comma-separated CORS-trusted origins. |
+| `BETTER_AUTH_TRUSTED_ORIGINS` | `http://localhost:5173` | Comma-separated trusted origins. Used for CORS **and**, since federation moved to `@better-auth/sso`, as the allow-list for every outbound OIDC fetch — see [Upstream federation](#upstream-federation). |
 | `STUDIO_INTERNAL_URL` | — | Internal URL of the Studio sidecar (`http://studio:3000` in the default compose). Used to proxy `/plugins/trex/studio/**`. |
 | `EDGE_FUNCTIONS_MANAGEMENT_FOLDER` | — | Shared folder where Studio's deploy writes edge functions and trex reads them (`/app/edge-functions` in the default compose). |
 | `EXTERNAL_DB_URL` | — | Externally-reachable Postgres URL. Preferred when generating CLI/pooler config. |
@@ -60,6 +60,39 @@ plugin loaders.
 
 Database-driven SSO providers configured via `trex.sso_provider` take precedence
 over env vars. Apple is supported via DB-driven config only.
+
+### Upstream federation
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TREX_FEDERATION_ENABLED` | `false` | Mounts `${BASE_PATH}/auth/v1/{authorize,callback}`. Only `true` or `1` enable it. |
+| `TREX_FEDERATION_REDIRECT_URI` | — | The `redirect_uri` registered at every upstream, e.g. `https://trex.example.com/trex/auth/v1/callback`. Required when federating: one fixed value is taken at startup and cannot be derived per request. |
+| `TREX_NATIVE_PASSWORD_LOGIN_ENABLED` | `true` | Turn off where the federated directory holds passwordless accounts. |
+| `TREX_OIDC_LOGIN_URL` | — | Where a refused federated sign-in is sent, with `?error=<code>&return_to=<path>` appended. Without it a refusal is a `403` JSON body. |
+
+:::danger Upgrading an existing federated deployment
+
+**Every enabled provider's issuer origin must be listed in
+`BETTER_AUTH_TRUSTED_ORIGINS`.** This is new: before the move to
+`@better-auth/sso`, trex fetched discovery, tokens and JWKS with no allow-list
+at all, so an upgraded deployment that does not add them federates fine
+up to the redirect and then fails at discovery — which reads as an upstream
+outage, not as a missing setting.
+
+Take the origins straight out of the table:
+
+```sql
+SELECT DISTINCT split_part(issuer, '/', 1) || '//' || split_part(issuer, '/', 3)
+  FROM trexdb.sso_provider WHERE enabled AND issuer IS NOT NULL;
+```
+
+and append them, comma-separated, to whatever the variable already holds. The
+server checks this at startup and logs
+`[federation] MISCONFIGURED: BETTER_AUTH_TRUSTED_ORIGINS does not contain the
+issuer origin of ...`, naming each provider and the exact origin to add, so a
+missed one is visible in the boot log rather than only in a failed sign-in.
+
+:::
 
 ## Plugins
 

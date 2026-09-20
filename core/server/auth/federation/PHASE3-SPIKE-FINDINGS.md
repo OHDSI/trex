@@ -665,6 +665,39 @@ carry: if no provider maps `sub`, this is documentation; if one does, it is a
 V21 that rewrites `trexdb.account."accountId"` for that provider. **Assigned to
 Task 8**, whose job is the audit of live `claim_map` rows.
 
+#### 9.2a Task 8's audit: **no live row maps `sub`. No V21.**
+
+Every `trexdb.sso_provider` row reachable from this machine, read 2026-09-20:
+
+| database | rows | `claim_map` values |
+|---|---|---|
+| `trex-task2-pg/trex_reh2` | 7 | six `{}`, one `{"name":"display_name","email":"username"}` |
+| `trex-task2-pg/trex_rev6` | 6 | five `{"email":"username"}`, one `{"email":"email"}` |
+| `trex-task2-pg/{trex,trex_task4b,trex_task5,trex_task6,trex_v19_tpl}` | 0 | — |
+| `trex-task10b-pg/trex` | 0 | — |
+
+No row carries a `sub` key, and none carries `email_verified` either. d2e ships
+no provider row at all: `grep -r sso_provider` over that repository's SQL, Helm
+values and TypeScript returns nothing, so its Logto row is created through
+`/admin/federation`.
+
+That last point is what makes the audit hold beyond the databases listed. The
+admin writer **cannot produce** a `sub` mapping: `ProviderUpsert` has no
+`claim_map` field, `upsertProviderRow` never names the column, and
+`admin.test.ts:767` pins exactly that. A row mapping `sub` can therefore only
+come from hand-written SQL against the table. So this stays documentation, and
+a V21 would have been speculative.
+
+**If a deployment is later found with `claim_map ? 'sub'`**, the repair is
+still the one above — a migration rewriting `trexdb.account."accountId"` from
+the mapped claim's value to the upstream `sub` for that provider — and it
+cannot be done in code for the reason this section gives.
+
+The one thing this leaves standing: `applyClaimMap` honours `sub` and the
+plugin does not, so the column's documented meaning is now narrower than it
+reads. `config.ts`'s comment naming Entra's `oid` describes behaviour that
+ended at the cutover.
+
 ### 9.3 `claim_map.email_verified` is dropped too, and that one is cheap
 
 `oidcConfigFor` does write it, as `mapping.emailVerified` — but the plugin only
@@ -680,3 +713,19 @@ than taken with Task 7 because it decides **who may link** under
 `link_policy = 'verified_email'`, which is Task 5's guard; changing a link
 decision from inside a metadata task is the wrong place for it. **Assigned to
 Task 8** with §9.2, which is where the live rows are already being read.
+
+#### 9.3a Task 8: taken, and the rows were not the reason
+
+No live row maps this key either (§9.2a), so the fix changes nothing anybody is
+running today. It was taken anyway, because the argument is not about the rows:
+`applyClaimMap` reads the flag through `claim_map.email_verified` **today**, so
+leaving the plugin's hard-coded `claims.email_verified` in place would have been
+a behaviour change shipped by the cutover rather than a feature not carried
+over. A provider that named its own claim would have started reporting every
+address unverified and linking nobody under `verified_email`, silently.
+
+`resolve-user.ts` now reads `claims[claim_map.email_verified ?? "email_verified"]`,
+with a blank or non-string mapping falling back to the standard name. No
+migration: unlike `claim_map.email`, V20 does not re-purpose this key — it only
+copies it into `mapping.emailVerified`, which nothing reads while
+`trustEmailVerified` is off.
