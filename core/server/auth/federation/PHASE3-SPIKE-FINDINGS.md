@@ -729,3 +729,58 @@ with a blank or non-string mapping falling back to the standard name. No
 migration: unlike `claim_map.email`, V20 does not re-purpose this key — it only
 copies it into `mapping.emailVerified`, which nothing reads while
 `trustEmailVerified` is off.
+
+---
+
+## 10. Addendum (Task 8): two id_token checks the cutover gives up
+
+Both were enforced by `federation/verify.ts`, which Task 8 deleted, and neither
+has an equivalent in `@better-auth/sso` 1.7.5. They are recorded here because
+they were **accepted**, not overlooked: the plugin exposes no option for either
+and reimplementing one would mean re-verifying the token after the plugin has
+already acted on it, which is worse than the gap. Six tests went with them.
+
+### 10.1 The OIDC `nonce` is gone
+
+`grep -c nonce node_modules/@better-auth/sso/dist/index.mjs` → **0**. The
+authorization URL the plugin builds carries no `nonce` parameter, and
+`validateOIDCIdToken` checks the signature, `issuer`, `audience` and `azp` and
+nothing else. `verify.ts:54-59` required a caller-supplied nonce to be present,
+non-empty and equal to the claim — deliberately strict, so that a token
+carrying no `nonce` could not verify against an absent one.
+
+**Why accepting it is defensible.** OIDC Core makes `nonce` OPTIONAL for the
+authorization-code flow (it is REQUIRED only for the implicit and hybrid flows),
+and what it defends there is covered twice over here: PKCE S256 is on per
+provider, so an intercepted code cannot be redeemed without the verifier, and
+the `state` is single-use, database-backed and bound to a signed browser cookie,
+so an id_token cannot be replayed into a session through a flow the victim did
+not start. What is genuinely lost is the narrow case of an id_token minted for
+one authorization request being injected into another *by the same browser*,
+which the state cookie already makes uninteresting.
+
+**What would have to change to get it back:** the plugin would have to send
+`nonce` on the authorization URL, persist it in the state payload, and check it
+in `validateOIDCIdToken`. That is an upstream change, not a configuration one.
+`router.test.ts` pins the absence, so a version that adds it is visible rather
+than silently ignored.
+
+### 10.2 The signing algorithm is no longer restricted to what the provider advertises
+
+`verify.ts:51` passed `algorithms: doc.id_token_signing_alg_values_supported`.
+The plugin passes no `algorithms` at all.
+
+**Narrower than it sounds, and still a reduction.** `createRemoteJWKSet`
+resolves a key by the header's `alg`/`kid`, so a downgrade to `none` or to an
+HMAC is not available — there is no symmetric key in an upstream's JWKS to
+resolve to. What is lost is the *pinning*: an upstream whose discovery document
+advertises only `RS256` but whose JWKS also serves, say, an EC key will now have
+an `ES256`-signed token accepted. The document is no longer the authority on
+which of its own keys may sign.
+
+### 10.3 Both belong in the d2e PR notes
+
+Alongside the refusal-vocabulary change (the plugin's own codes —
+`invalid_provider`, `discovery_failed`, `missing_user_info` — can now reach
+d2e's login page as `?error=`), these are the three behaviour changes a d2e
+reviewer cannot see from the diff.

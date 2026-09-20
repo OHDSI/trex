@@ -675,6 +675,35 @@ dbTest("a callback presenting no state cookie is refused", async (l) => {
   }
 });
 
+dbTest("the authorization URL carries no nonce, which is a known accepted loss", async (l) => {
+  // NOT an assertion that this is good. federation/verify.ts:54-59 required the
+  // id_token's `nonce` to be present, non-empty and equal to the one the
+  // authorization request sent; @better-auth/sso 1.7.5 has no concept of it
+  // (`grep -c nonce dist/index.mjs` is 0) and validateOIDCIdToken checks
+  // signature, issuer, audience and azp only. PHASE3-SPIKE-FINDINGS.md §10.1
+  // carries the argument for accepting that — PKCE plus a single-use,
+  // cookie-bound state covers what nonce defends in the code flow, and OIDC
+  // Core makes it OPTIONAL here.
+  //
+  // This test exists so the decision is revisited rather than inherited. If a
+  // later @better-auth/sso sends a nonce, this fails, and whoever sees it
+  // should delete §10.1 and this case instead of adjusting the assertion.
+  const id = slug();
+  try {
+    await seedProvider(l, id, l.trusted.origin);
+    const res = await authorize(l, id);
+    await res.body?.cancel();
+    const url = new URL(res.headers.get("location")!);
+    assertEquals(url.searchParams.get("nonce"), null);
+    // The two that do the work in its place, so this case cannot pass by the
+    // authorization URL being empty.
+    assertEquals(url.searchParams.get("code_challenge_method"), "S256");
+    assertNotEquals(url.searchParams.get("state"), null);
+  } finally {
+    await cleanUp(l, id);
+  }
+});
+
 dbTest("skipStateCookieCheck is not set anywhere", async (l) => {
   // It would switch off the comparison at better-auth dist/state.mjs:132-136,
   // which is the whole of what replaces __Host-trex_federation. A default that
