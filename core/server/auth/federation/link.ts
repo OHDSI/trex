@@ -41,6 +41,13 @@ export interface ExistingUser {
 
 export type LinkDecision =
   | { action: "link"; userId: string }
+  // "provision" leaves the address to the caller and says nothing about what it
+  // will be. resolveFederatedUser's caller hands it to provisionUser, which
+  // synthesises <slug>@d2e.local for an address-less identity and flags the
+  // row; resolve-user.ts's caller hands it to Better Auth, which writes
+  // mapping.email's value instead — so that caller has its own guard. A future
+  // third caller owes one too: the branches below check isEngineAddressable
+  // against `identity.email`, not against whatever the caller will store.
   | { action: "provision" }
   // Fixed codes, never upstream text: they are returned to a browser.
   // "upstream_email_unverified" | "upstream_email_unusable" |

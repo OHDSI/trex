@@ -560,16 +560,63 @@ Deno.test("a first-time identity with no matching user and no auto-provision is 
   );
 });
 
-Deno.test("auto-provision returns continue so Better Auth creates the user", async () => {
+Deno.test("auto-provision returns continue only when the engine will store the judged address", async () => {
+  // continue hands the write to handleOAuthUserInfo, which uses
+  // providerUser.email — mapping.email's value. It is safe exactly when that
+  // value IS the address this function judged, which is the case a provider
+  // whose claim_map.email names a real address claim produces.
   const db = fakeDb({ ssoProvider: [{ ...PROVIDER, auto_provision: true }], user: [] });
   assertEquals(
     await resolve(
       input({
+        providerUser: { email: "Alice@Allowed.test", emailVerified: false, name: "Alice" },
         verifiedIdTokenClaims: { sub: "sub-1", email: "alice@allowed.test", email_verified: true },
       }),
       db,
     ),
     { action: "continue" },
+  );
+});
+
+Deno.test("auto-provision refuses when the engine would store the mapped claim", async () => {
+  // The defect this guard closes, measured on a real database before it
+  // existed: with claim_map {"email":"username"} the created row was
+  // email = 'alice', is_placeholder_email = false — a bare username in a
+  // UNIQUE NOT NULL address column, flagged as a legitimate link candidate,
+  // which is the row V17 spent a migration eliminating.
+  const db = fakeDb({ ssoProvider: [{ ...PROVIDER, auto_provision: true }], user: [] });
+  assertEquals(
+    await resolve(
+      input({
+        providerUser: { email: "alice-username", emailVerified: false, name: "Alice" },
+        verifiedIdTokenClaims: { sub: "sub-1", email: "alice@allowed.test", email_verified: true },
+      }),
+      db,
+    ),
+    { action: "reject", code: "upstream_email_unusable" },
+  );
+});
+
+Deno.test("the address checks are not vacuous: a judged address is not enough", async () => {
+  // The sharper half. Here the allowlist AND isEngineAddressable both passed,
+  // on a real verified address the id_token carries — and Better Auth would
+  // still have written 'alice'. So every check above this branch is vacuous
+  // unless the value the engine stores is the value that was checked. Hence
+  // equality, not mere addressability: a mapping naming some OTHER
+  // address-shaped claim would store an address the allowlist never saw.
+  const db = fakeDb({
+    ssoProvider: [{ ...PROVIDER, auto_provision: true, email_domain_allowlist: ["allowed.test"] }],
+    user: [],
+  });
+  assertEquals(
+    await resolve(
+      input({
+        providerUser: { email: "elsewhere@other.test", emailVerified: false, name: "Alice" },
+        verifiedIdTokenClaims: { sub: "sub-1", email: "alice@allowed.test", email_verified: true },
+      }),
+      db,
+    ),
+    { action: "reject", code: "upstream_email_unusable" },
   );
 });
 
@@ -589,11 +636,17 @@ Deno.test("auto-provision still refuses an address the engine cannot serve", asy
   );
 });
 
-Deno.test("an address-less identity provisions only where the provider allows it", async () => {
+Deno.test("an address-less identity is never provisioned through the plugin", async () => {
+  // decideLink's address-less branch means "provision a synthesised
+  // placeholder", which is provisionUser's job and something the plugin cannot
+  // do: is_placeholder_email is declared `input: false`, so a row created
+  // through the adapter would be written unflagged — an unclaimable address
+  // that is nonetheless a link candidate. Refused on both settings of
+  // auto_provision, for two different reasons, and the codes say which.
   const off = fakeDb({ ssoProvider: [PROVIDER] });
   assertEquals(await resolve(input(), off), { action: "reject", code: "no_account" });
   const on = fakeDb({ ssoProvider: [{ ...PROVIDER, auto_provision: true }] });
-  assertEquals(await resolve(input(), on), { action: "continue" });
+  assertEquals(await resolve(input(), on), { action: "reject", code: "upstream_email_unusable" });
 });
 
 Deno.test("auto_provision that is not exactly true is off", async () => {
