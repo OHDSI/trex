@@ -831,6 +831,12 @@ dbTest("a provider created through the admin API carries the columns the plugin 
   // that exists, is enabled, and that no sign-in can reach. V20's trigger would
   // fill it, but only because it fills a NULL; this pins that the statement
   // itself is complete.
+  //
+  // The seeded row is deleted first, so this is the VALUES list and not the ON
+  // CONFLICT clause. withDb pre-seeds ctx.providerId, so every other provider
+  // test in this file takes the update path — which means dropping domain from
+  // the insert list alone would have been invisible to all of them.
+  await db.query(`DELETE FROM trexdb.sso_provider WHERE id = $1`, [ctx.providerId]);
   await upsertProvider(db, parseProviderUpsert(ctx.providerId, upsertBody())!);
   const { rows } = await db.query(
     `SELECT "providerId", domain FROM trexdb.sso_provider WHERE id = $1`,
