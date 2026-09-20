@@ -286,7 +286,7 @@ export function trustedProxies(
  * `NODE_ENV=development` (which this container sets) or to null otherwise.
  * Either way every caller lands in ONE bucket per path, which is how 594
  * anonymous requests closed /oauth2/userinfo for the whole installation in 2.4
- * seconds (CUTOVER-REHEARSAL.md §7). Measured against the package:
+ * seconds during the cutover rehearsal. Measured against the package:
  *
  *   isValidIP("192.168.65.1:57097")              -> false
  *   getIP({x-forwarded-for: "192.168.65.1:57097"}) -> 127.0.0.1   (NODE_ENV=development)

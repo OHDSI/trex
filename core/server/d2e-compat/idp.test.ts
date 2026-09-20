@@ -104,7 +104,7 @@ Deno.test("trex: issuer, jwks and token endpoint come from the provider's own co
   // (auth/oidc/seed-client.ts) and this proxy is the side that moved. A row and
   // a proxy that disagree produce
   // `client registered for client_secret_basic cannot use client_secret_post`
-  // and break every portal call (CUTOVER-REHEARSAL.md §5c).
+  // and break every portal call.
   assertEquals(c.tokenEndpointAuthMethod, "client_secret_basic");
   assertEquals(c.audiences, ["https://trex.example/oidc", "d2e-portal"]);
   assertEquals(c.authorizePath, "oidc/oauth2/authorize");

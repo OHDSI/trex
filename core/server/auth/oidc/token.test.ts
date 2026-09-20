@@ -208,8 +208,7 @@ test("claims expire and are not issued in the past", async (m, flow) => {
     const [name, token, ttl] of [
       ["id_token", body.id_token as string, ID_TOKEN_TTL],
       // A JWT only because the exchange named a resource; without one the
-      // access token is opaque and there is nothing here to decode
-      // (see PHASE2-SPIKE-FINDINGS.md, the grant cutover).
+      // access token is opaque and there is nothing here to decode.
       ["access_token", body.access_token as string, ACCESS_TOKEN_TTL],
     ] as const
   ) {
@@ -240,8 +239,8 @@ test("claims expire and are not issued in the past", async (m, flow) => {
 
 test("a refreshed token is dated from the refresh, not from the first issue", async (_m, flow) => {
   // The plugin recomputes exp as iat + ttl on every rotation rather than
-  // carrying an absolute deadline (PHASE2-SPIKE-FINDINGS.md, fix round 1), so
-  // the renewed token must be dated from the renewal. Without this the test
+  // carrying an absolute deadline, so the renewed token must be dated from the
+  // renewal. Without this the test
   // above would pass against a provider that re-issued the original claims
   // verbatim, and a refresh would hand back a token already half spent.
   const first = await exchange(flow, "openid profile email offline_access");

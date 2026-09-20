@@ -128,9 +128,9 @@ export function resolveIdpConfig(
       // Basic, because there is exactly ONE seeded client row and WebAPI has to
       // be able to use it too. Spring Security authenticates
       // `client_secret_basic` and cannot be told otherwise, so a
-      // `client_secret_post` row 401s every WebAPI and Atlas sign-in
-      // (CUTOVER-REHEARSAL.md §5b). This proxy is the side that can move, so it
-      // moves; seed-client.ts registers the row to match.
+      // `client_secret_post` row 401s every WebAPI and Atlas sign-in. This
+      // proxy is the side that can move, so it moves; seed-client.ts registers
+      // the row to match.
       tokenEndpointAuthMethod: "client_secret_basic",
       // offline_access is not optional here: the plugin issues a refresh token
       // only when that scope was granted

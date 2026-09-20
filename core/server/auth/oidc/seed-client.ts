@@ -145,7 +145,7 @@ async function registerClient(
       // `response_type, client_id, scope, state, redirect_uri, nonce` — so
       // every WebAPI (and therefore every Atlas) sign-in is refused at
       // /authorize with `pkce is required for this client`. Measured on a real
-      // stack; see CUTOVER-REHEARSAL.md §5a and §18.
+      // stack.
       //
       // This gives up nothing for the clients that DO send PKCE. `requirePKCE`
       // only decides whether a challenge is *demanded*; it does not decide
@@ -156,8 +156,8 @@ async function registerClient(
       // authorization and the verifier is wrong or missing
       // (dist/introspect-njKASm3q.mjs:1996-2009) — both branches keyed on the
       // stored `code_challenge`, never on this column. Measured both ways on
-      // the running stack (CUTOVER-REHEARSAL.md §18), so the portal keeps its
-      // stolen-code protection in full.
+      // the running stack, so the portal keeps its stolen-code protection in
+      // full.
       //
       // `false` and not null: the plugin reads `client.requirePKCE ?? true`, so
       // leaving it unset would silently reinstate the blocker.
@@ -169,8 +169,8 @@ async function registerClient(
       //
       // Basic, because Spring Security's is not negotiable: WebAPI sends the
       // credentials as an Authorization header and the exchange 401s against a
-      // `client_secret_post` row (CUTOVER-REHEARSAL.md §5b). d2e's own
-      // /oauth/token proxy is code this repository owns, so it is the side that
+      // `client_secret_post` row. d2e's own /oauth/token proxy is code this
+      // repository owns, so it is the side that
       // moves — it now sends Basic when it is talking to trex's own provider
       // (d2e-compat/routes.ts).
       confidential ? "client_secret_basic" : "none",

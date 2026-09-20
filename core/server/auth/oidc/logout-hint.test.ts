@@ -1,10 +1,9 @@
 // RP-initiated logout with an id_token_hint fails on a local stack, and the
 // failure used to be invisible: the "Confirm logout" page a rejected hint
-// produces is byte-identical to the one no hint at all produces
-// (CUTOVER-REHEARSAL.md §8). These pin that it is no longer invisible, and that
-// the diagnosis is the right one — trex says "the token is genuine, the
-// provider's own JWKS fetch is what failed", not "your certificate is wrong",
-// which was the first guess and was wrong.
+// produces is byte-identical to the one no hint at all produces. These pin that
+// it is no longer invisible, and that the diagnosis is the right one — trex
+// says "the token is genuine, the provider's own JWKS fetch is what failed",
+// not "your certificate is wrong", which was the first guess and was wrong.
 import { assertEquals, assertNotEquals, assertStringIncludes } from "jsr:@std/assert";
 import {
   annotateLogoutConfirmation,

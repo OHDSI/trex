@@ -1,11 +1,11 @@
 // The availability fix, end to end, against the real mount on a real listener.
 //
-// §7 of CUTOVER-REHEARSAL.md: 594 requests with an invalid bearer closed
-// /oauth2/userinfo in 2.4 seconds, and a real WebAPI sign-in then failed with
-// `[invalid_user_info_response] … 429` — because one WebAPI sign-in makes an
-// authenticated /oauth2/userinfo call (§6) and both landed in the same bucket.
-// What must be true now is that a flood of REFUSALS from one caller leaves the
-// endpoint answering a caller with a real token.
+// Measured during the cutover rehearsal: 594 requests with an invalid bearer
+// closed /oauth2/userinfo in 2.4 seconds, and a real WebAPI sign-in then failed
+// with `[invalid_user_info_response] … 429` — because one WebAPI sign-in makes
+// an authenticated /oauth2/userinfo call of its own and both landed in the same
+// bucket. What must be true now is that a flood of REFUSALS from one caller
+// leaves the endpoint answering a caller with a real token.
 //
 // Driven through Express with a real access token, because neither half is
 // observable otherwise: the budget lives in the mount, and "a real sign-in is

@@ -174,8 +174,8 @@ export function oidcHandler(): express.RequestHandler {
 
     // The check is ahead of Better Auth so a refused caller never reaches its
     // rate limiter, which is the whole point: one WebAPI sign-in costs one
-    // /oauth2/userinfo call (CUTOVER-REHEARSAL.md §6), and that call must not
-    // be competing for budget with somebody else's failures.
+    // /oauth2/userinfo call, and that call must not be competing for budget
+    // with somebody else's failures.
     const isUserInfo = path.startsWith("/oauth2/userinfo");
     const budgetKey = isUserInfo ? userInfoKey(request) : "";
     if (isUserInfo && userInfoBudget().overBudget(budgetKey)) {

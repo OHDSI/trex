@@ -223,7 +223,7 @@ test("a challenge and a method are both required, or neither", async (_m, flow) 
 test("a confidential client may complete the flow without PKCE at all", async (_m, flow) => {
   // This is WebAPI's shape, exactly: Spring Security's authorize request is
   // `response_type, client_id, scope, state, redirect_uri, nonce` and carries
-  // no code_challenge (CUTOVER-REHEARSAL.md §5a). The plugin's own default —
+  // no code_challenge. The plugin's own default —
   // `client.requirePKCE ?? true` — refuses it with `pkce is required for this
   // client`, which made every WebAPI and Atlas sign-in impossible; the seeder
   // now registers a confidential client `requirePKCE: false`, which is the row

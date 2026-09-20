@@ -32,11 +32,12 @@ const ENV = {
 };
 
 /**
- * The options block PHASE2-SPIKE-FINDINGS.md records, so what this suite reads
- * the row back through is the same plugin configuration Task 6 will mount. It
- * exists for two reasons the seeder cannot serve on its own: its `init` seeds
- * `oauthResource`, which the link row's foreign key needs, and its adapter is
- * the only honest oracle for "can the plugin read what the seeder wrote".
+ * The plugin options block the Phase 2 spike settled on, so what this suite
+ * reads the row back through is the same plugin configuration Task 6 will
+ * mount. It exists for two reasons the seeder cannot serve on its own: its
+ * `init` seeds `oauthResource`, which the link row's foreign key needs, and its
+ * adapter is the only honest oracle for "can the plugin read what the seeder
+ * wrote".
  */
 const ISSUER = "https://localhost:8443/trex/oidc";
 
@@ -83,13 +84,13 @@ test("the seeded client never reaches a consent screen", async () => {
   //
   // requirePKCE MUST be false for a confidential client: Spring Security sends
   // no code_challenge, so `true` refuses every WebAPI and Atlas sign-in with
-  // `pkce is required for this client` (CUTOVER-REHEARSAL.md §5a). It costs the
-  // clients that DO send PKCE nothing — grants.test.ts pins that the supplied
-  // challenge is still bound and verified.
+  // `pkce is required for this client`. It costs the clients that DO send PKCE
+  // nothing — grants.test.ts pins that the supplied challenge is still bound
+  // and verified.
   //
   // client_secret_basic MUST be the method for the same reason from the other
   // end: Spring sends the credentials as an Authorization header and a
-  // client_secret_post row 401s the exchange (§5b). There is exactly one client
+  // client_secret_post row 401s the exchange. There is exactly one client
   // row and WebAPI cannot be told to use the other method, so this is the one
   // the d2e /oauth/token proxy was changed to match.
   assertEquals(row.requirePKCE, false);

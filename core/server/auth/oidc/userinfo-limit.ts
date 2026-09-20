@@ -1,12 +1,12 @@
 // A per-caller budget for /oauth2/userinfo requests that FAIL, spent in front
 // of Better Auth so a flood of them cannot spend the budget a sign-in needs.
 //
-// The hole, as measured (CUTOVER-REHEARSAL.md §6 and §7): every WebAPI sign-in
-// makes one authenticated /oauth2/userinfo call and fails outright if it does
-// not answer, and 594 requests with an invalid bearer filled that endpoint's
-// rate-limit bucket in 2.4 seconds — after which a real login failed with
-// `[invalid_user_info_response] … 429`. Any anonymous caller could deny sign-in
-// to the whole installation for fifteen minutes.
+// The hole, as measured on a real stack during the cutover rehearsal: every
+// WebAPI sign-in makes one authenticated /oauth2/userinfo call and fails
+// outright if it does not answer, and 594 requests with an invalid bearer
+// filled that endpoint's rate-limit bucket in 2.4 seconds — after which a real
+// login failed with `[invalid_user_info_response] … 429`. Any anonymous caller
+// could deny sign-in to the whole installation for fifteen minutes.
 //
 // Why this cannot be a Better Auth rate-limit rule. Its limiter keys on
 // `<ip>|<path>` (createRateLimitKey, @better-auth/core utils/ip.mjs) and

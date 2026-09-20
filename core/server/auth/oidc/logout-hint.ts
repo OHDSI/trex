@@ -14,8 +14,8 @@
 // process. :547 is the odd one out, and the round trip it makes is the whole
 // failure: on a local stack the issuer is `https://localhost:41100/...`, which
 // from inside the container is the container's own loopback, so the fetch is
-// refused before TLS is even reached (CUTOVER-REHEARSAL.md §8). `extra_hosts`
-// cannot redirect it, because glibc special-cases `localhost` (RFC 6761).
+// refused before TLS is even reached. `extra_hosts` cannot redirect it,
+// because glibc special-cases `localhost` (RFC 6761).
 //
 // AND THE OBVIOUS WORKAROUND IS A TRAP. `jwks.remoteUrl` is what :547 prefers,
 // so pointing it at a container-local address would make the hint verifiable —
@@ -89,7 +89,10 @@ export function logoutHintDiagnosis(verdict: HintVerdict): string {
         "has since been rotated out.";
     case "unverifiable":
       return "trex could not check the id_token_hint itself, so the cause is undetermined. " +
-        "See CUTOVER-REHEARSAL.md §8 for the failure this usually is.";
+        "The usual cause is the provider's own JWKS fetch: it resolves the key set over HTTP " +
+        "from the public issuer, so a deployment whose issuer names a host the container " +
+        "cannot reach itself — `localhost`, or a public FQDN with no route from inside — has " +
+        "that fetch refused before TLS is reached, and every id_token_hint is rejected.";
   }
 }
 

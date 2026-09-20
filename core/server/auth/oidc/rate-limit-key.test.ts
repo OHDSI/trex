@@ -1,7 +1,7 @@
 // The availability hole the cutover rehearsal demonstrated, and the two things
 // that close it.
 //
-// §7 of CUTOVER-REHEARSAL.md: 594 unauthenticated requests took
+// Measured during that rehearsal: 594 unauthenticated requests took
 // /oauth2/userinfo down in 2.4 seconds, and a real WebAPI login then failed
 // with `[invalid_user_info_response] … 429`. Two independent causes, one test
 // file each half:

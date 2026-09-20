@@ -680,14 +680,13 @@ dbTest("the authorization URL carries no nonce, which is a known accepted loss",
   // id_token's `nonce` to be present, non-empty and equal to the one the
   // authorization request sent; @better-auth/sso 1.7.5 has no concept of it
   // (`grep -c nonce dist/index.mjs` is 0) and validateOIDCIdToken checks
-  // signature, issuer, audience and azp only. PHASE3-SPIKE-FINDINGS.md §10.1
-  // carries the argument for accepting that — PKCE plus a single-use,
-  // cookie-bound state covers what nonce defends in the code flow, and OIDC
-  // Core makes it OPTIONAL here.
+  // signature, issuer, audience and azp only. The argument for accepting that:
+  // PKCE plus a single-use, cookie-bound state covers what nonce defends in the
+  // code flow, and OIDC Core makes it OPTIONAL here.
   //
   // This test exists so the decision is revisited rather than inherited. If a
   // later @better-auth/sso sends a nonce, this fails, and whoever sees it
-  // should delete §10.1 and this case instead of adjusting the assertion.
+  // should delete this case instead of adjusting the assertion.
   const id = slug();
   try {
     await seedProvider(l, id, l.trusted.origin);
