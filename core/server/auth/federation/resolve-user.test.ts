@@ -223,6 +223,83 @@ Deno.test("the account is looked up by this provider's own subject", async () =>
   assertEquals(await resolve(input(), db), { action: "reject", code: "no_account" });
 });
 
+// Moved from federation.test.ts, where it pinned resolveFederatedUser's
+// ordering. The order IS the policy, and the plugin has none of it: the account
+// lookup is `reads[1]`, and nothing may ask the address question after it hits.
+Deno.test("an established link wins over a different address, which is never looked up", async () => {
+  // The upstream changed the address, and somebody else now holds the one it
+  // asserts. The link is the identity, so the sign-in lands on the linked user
+  // — and not merely outranks the other row: the email question is never asked,
+  // which is what stops an administrator editing a federated user's trex
+  // address re-targeting the link.
+  const db = fakeDb({
+    ssoProvider: [PROVIDER],
+    account: [{ providerId: "logto", accountId: "sub-1", userId: "u-linked" }],
+    user: [
+      { id: "u-linked", email: "old@allowed.test", role: "user" },
+      { id: "u-someone-else", email: "changed@allowed.test", role: "user" },
+    ],
+  });
+  assertEquals(
+    await resolve(
+      input({
+        verifiedIdTokenClaims: {
+          sub: "sub-1",
+          email: "changed@allowed.test",
+          email_verified: true,
+        },
+      }),
+      db,
+    ),
+    { action: "link", userId: "u-linked", profile: "preserve" },
+  );
+  // ssoProvider, account, then the linked user — and nothing else. A candidate
+  // lookup would appear here as a fourth read against `user` keyed on email.
+  assertEquals(db.reads, ["ssoProvider:id=logto", "account:providerId=logto,accountId=sub-1", "user:id=u-linked"]);
+});
+
+// The whole point of the two additive guards: they gate the FIRST link only.
+Deno.test("an established link to an elevated user still signs in under an allowlist", async () => {
+  // Restrictive on both counts, and neither is consulted: this identity was
+  // linked already, so no linking decision is being made. Losing this would
+  // lock every administrator out of an installation that later tightened its
+  // allowlist, with no error naming the reason.
+  const db = fakeDb({
+    ssoProvider: [{ ...PROVIDER, email_domain_allowlist: ["corp.test"] }],
+    account: [{ providerId: "logto", accountId: "sub-1", userId: "u-admin" }],
+    user: [{ id: "u-admin", email: "root@elsewhere.test", role: "admin" }],
+  });
+  assertEquals(
+    await resolve(
+      input({
+        verifiedIdTokenClaims: {
+          sub: "sub-1",
+          email: "root@elsewhere.test",
+          email_verified: true,
+        },
+      }),
+      db,
+    ),
+    { action: "link", userId: "u-admin", profile: "preserve" },
+  );
+});
+
+Deno.test("with no link and no address, no candidate is looked up at all", async () => {
+  // Nothing to look one up by. The query is skipped rather than run with null
+  // and left to match whatever `lower(NULL)` would — or, through the adapter,
+  // whatever `String(undefined)` would. A user row is seeded precisely so a
+  // resolver that asked anyway would link to it and fail here.
+  const db = fakeDb({
+    ssoProvider: [{ ...PROVIDER, auto_provision: true }],
+    user: [{ id: "u-anyone", email: "alice-username", role: "user" }],
+  });
+  assertEquals(
+    await resolve(input({ verifiedIdTokenClaims: { sub: "sub-1" } }), db),
+    { action: "reject", code: "upstream_email_unusable" },
+  );
+  assertEquals(db.reads, ["ssoProvider:id=logto", "account:providerId=logto,accountId=sub-1"]);
+});
+
 Deno.test("a first-time identity with an unverified address never links", async () => {
   // A provider that lets someone set an address they do not control would
   // otherwise be a takeover path into any existing account with that address.
@@ -578,6 +655,88 @@ Deno.test("a user who has replaced their placeholder address is a candidate agai
     ),
     { action: "link", userId: "u9", profile: "preserve" },
   );
+});
+
+// Moved from auth/email-case.test.ts, which pinned these against
+// findLinkCandidateByEmail's `lower(email) = lower($1)`. An address identifies a
+// mailbox, not a spelling, and the takeover that motivated V16's index was an
+// attacker registering the victim's address in another case.
+Deno.test("the upstream address is matched case-insensitively", async () => {
+  const db = fakeDb({
+    ssoProvider: [PROVIDER],
+    user: [{ id: "u-victim", email: "victim@allowed.test", role: "user" }],
+  });
+  assertEquals(
+    await resolve(
+      input({
+        verifiedIdTokenClaims: {
+          sub: "sub-1",
+          email: "VICTIM@Allowed.Test",
+          email_verified: true,
+        },
+      }),
+      db,
+    ),
+    { action: "link", userId: "u-victim", profile: "preserve" },
+  );
+});
+
+Deno.test("a STORED address in mixed case is not matched, and that is fail-closed", async () => {
+  // The honest half of the divergence, pinned rather than left to be discovered.
+  // trex's own SQL asked `lower(email) = lower($1)`, which also matched a row
+  // stored in mixed case; the adapter has no way to say that, so findCandidate
+  // lower-cases the incoming address and compares exactly — identical to the
+  // lookup Better Auth itself would make next (internal-adapter.mjs:572, :620)
+  // and to what createUser writes (:126, :145).
+  //
+  // A miss here refuses or provisions; it never links to the wrong row, which is
+  // why the divergence is acceptable. V16's unique index on lower(email) plus
+  // V17's backfill mean such a row can only predate them, and this test is what
+  // makes that a known limit rather than a surprise.
+  const db = fakeDb({
+    ssoProvider: [PROVIDER],
+    user: [{ id: "u-victim", email: "Victim@Allowed.test", role: "user" }],
+  });
+  assertEquals(
+    await resolve(
+      input({
+        verifiedIdTokenClaims: {
+          sub: "sub-1",
+          email: "victim@allowed.test",
+          email_verified: true,
+        },
+      }),
+      db,
+    ),
+    { action: "reject", code: "no_account" },
+  );
+});
+
+// Moved from federation.test.ts's "the email lookup carries the role the
+// elevated guard needs": the candidate carries its role, and a NULL one (the
+// column is nullable, defaulting to 'user') reaches isElevatedRole as null
+// rather than as undefined, so the guard decides rather than the absence.
+Deno.test("the candidate's role reaches the elevated guard, NULL included", async () => {
+  const withRole = (role: unknown) =>
+    fakeDb({
+      ssoProvider: [PROVIDER],
+      user: [{ id: "u9", email: "alice@allowed.test", role }],
+    });
+  const claims = {
+    verifiedIdTokenClaims: { sub: "sub-1", email: "alice@allowed.test", email_verified: true },
+  };
+  assertEquals(
+    await resolve(input(claims), withRole("admin")),
+    { action: "reject", code: "elevated_account_link_refused" },
+  );
+  // NULL and the default role are both ordinary, and neither is elevated.
+  for (const role of [null, undefined, "user"]) {
+    assertEquals(
+      await resolve(input(claims), withRole(role)),
+      { action: "link", userId: "u9", profile: "preserve" },
+      `role=${JSON.stringify(role)} must not be treated as elevated`,
+    );
+  }
 });
 
 Deno.test("a soft-deleted or banned holder of the address is not resurrected", async () => {
@@ -974,6 +1133,56 @@ dbTest("a placeholder-addressed user is not a candidate through the real adapter
       ),
       { action: "reject", code: "no_account" },
     );
+  } finally {
+    await pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [uid]);
+    await pool.query(`DELETE FROM trexdb.sso_provider WHERE id = $1`, [id]);
+  }
+});
+
+dbTest("an upstream address in another case still resolves through the real adapter", async ({ auth, pool }) => {
+  // Moved from auth/email-case.test.ts, where it drove findLinkCandidateByEmail
+  // against a real database. The takeover it stands against: an attacker
+  // registers the victim's address in another case, and the victim's next
+  // federated sign-in matches onto the attacker's row. V16's unique index on
+  // lower(email) stops the second row existing; this is the lookup half, and it
+  // has to be shown against Postgres because `=` on a text column is what the
+  // adapter actually emits — the fake's `===` cannot tell a case-folding
+  // resolver from one that got lucky.
+  const id = slug();
+  const uid = slug();
+  await seedProvider(pool, id, { auto_provision: false });
+  const stored = `${uid}@allowed.test`;
+  await pool.query(
+    `INSERT INTO trexdb."user" (id, name, email, "emailVerified", role, is_placeholder_email)
+     VALUES ($1,'probe',$2,true,'user',false)`,
+    [uid, stored],
+  );
+  try {
+    const ctx = await auth.$context;
+    const signIn = (email: string) =>
+      resolveSsoUser!(
+        input({
+          providerId: id,
+          providerReference: {
+            providerId: id,
+            source: { type: "persisted", recordId: id },
+            authenticationConfigurationFingerprint: "fp",
+          },
+          accountKey: { issuer: "https://up.test/oidc", accountId: "sub-new" },
+          providerUser: { email, emailVerified: false, name: "" },
+          verifiedIdTokenClaims: { sub: "sub-new", email, email_verified: true },
+        }),
+        // deno-lint-ignore no-explicit-any
+        { database: ctx.adapter as any },
+      );
+    assertEquals(await signIn(stored.toUpperCase()), {
+      action: "link",
+      userId: uid,
+      profile: "preserve",
+    });
+    // The exact spelling still works, so the fold is not the only thing being
+    // measured.
+    assertEquals(await signIn(stored), { action: "link", userId: uid, profile: "preserve" });
   } finally {
     await pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [uid]);
     await pool.query(`DELETE FROM trexdb.sso_provider WHERE id = $1`, [id]);
