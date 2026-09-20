@@ -478,3 +478,74 @@ The jwt plugin's `remoteUrl` is precisely what `verifyLogoutHint` prefers
 address (`http://${PROJECT_NAME}-trex:33001/trex/oidc/.well-known/jwks.json`)
 would make the hint verifiable without any certificate or DNS at all. Worth
 checking whether it also rewrites the advertised `jwks_uri` before adopting it.
+
+## 10. The retirement guards work end to end
+
+Against the real stack, same user, same live engine session, flipping only the
+column and then restoring it:
+
+| | `/oauth2/authorize` (live session cookie) | refresh grant | native `/auth/v1/token` |
+|---|---|---|---|
+| **`banned = true`** | 302 back to `/d2e-login/` — **no code** | `400 {"error":"invalid_request","error_description":"user not found"}` | `400 {"error":"user_banned","error_description":"User is banned"}` |
+| **`deletedAt` set** | 302 back to `/d2e-login/` — **no code** | `400 … "user not found"` | `400 {"error":"invalid_grant","error_description":"Invalid login credentials"}` |
+
+Both retirements are genuinely refused at every door, including the one the
+spike warned about: the *already-issued* refresh token stops working
+immediately, which is what `mount.ts`'s `findUserById` wrapper is for. The three
+Criticals Tasks 6/7 closed are closed in a real stack, not only in the harness.
+(`/oauth2/userinfo` answered 429 in this run because §7 had just exhausted its
+bucket — the other three columns are the measurement.)
+
+## 11. The three sign-in paths, and the one that could not be run
+
+| path | issues `better-auth.session_token`? |
+|---|---|
+| **native password** (`POST /trex/auth/v1/token?grant_type=password`) | **yes** — `__Secure-better-auth.session_token`, Max-Age 604800, alongside `sb-access-token` (Max-Age 3600) |
+| **`POST /trex/auth/v1/sync-cookie`** | **yes** — 204 with both cookies, *when the token arrives as `Authorization: Bearer`*. With the same token presented only as the `sb-access-token` cookie it answers `401 {"error":"not_authenticated"}`, which is the route's documented contract (`auth-router.ts:869-872`), not a defect |
+| **federated through Logto** | **NOT RUN.** `d2e init` writes `D2E_IDP_MODE=trex` and the local stack brings up no Logto service, so there is no upstream to federate with. Standing one up needs `docker-compose-logto-federation.yml`, a Logto application and its secret; out of reach here. **This confirmation is still owed.** |
+
+## 12. The stale return (question 6) — the Minor is real, and the SPA does not heal it
+
+Contrived by backdating **every** engine session row for the user by 8 days
+(`expiresAt` in the past, `createdAt`/`updatedAt` 8 days old), so both the
+7-day cookie and the row are stale:
+
+```
+/oauth2/authorize with the stale engine cookie          -> login page
+/oauth2/authorize with only sb-access-token             -> login page
+refresh grant, NO Cookie header    -> 200, Set-Cookie: sb-access-token         (only)
+   then /oauth2/authorize with that new token           -> login page          <- the loop
+refresh grant, WITH a Cookie header ("irrelevant=1")    -> 200, Set-Cookie: sb-access-token, __Secure-better-auth.session_token
+   then /oauth2/authorize                               -> CODE ISSUED
+POST /sync-cookie with the Bearer -> 204, both cookies
+   then /oauth2/authorize                               -> CODE ISSUED
+```
+
+So the guard at `auth-router.ts:855` (`if (req.headers?.cookie) await attachEngineSessionCookie(...)`)
+behaves exactly as Task 9 described, and **any** cookie at all — the value is
+never read — is enough to arm it.
+
+**Does the SPA's own flow self-heal via `/sync-cookie`? No.** `grep -rl sync-cookie`
+over the whole image finds it in exactly one client:
+`plugins/atlas/d2e-login/login.js:168`, the **sign-in page**, which calls it
+after a successful password sign-in. The portal bundle
+(`/usr/src/bundled-plugins/d2e-ui`) does not contain the string at all.
+
+What saves it is that the failure is not actually a loop. Measured:
+
+```
+GET /oauth2/authorize?prompt=none   (no session)
+302 …/d2e/portal/login-callback?error=login_required
+      &error_description=authentication+required&state=s&iss=…
+```
+
+A silent renewal gets a clean `login_required`, and a foreground navigation gets
+the sign-in page — which then calls `/sync-cookie` itself and resumes the
+original request through `return_to`. **So the Minor costs a stale returner one
+interactive sign-in, not an infinite loop.** Downgrade it to that rather than
+closing it: nothing re-arms the engine session without a password, and the
+portal has no code path that would.
+
+Incidental, worth someone's attention: `trexdb.session` had **21 rows** for the
+single test user after a morning of sign-ins. Every sign-in inserts a row and
+nothing in this rehearsal removed one.
