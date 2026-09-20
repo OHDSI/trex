@@ -17,7 +17,7 @@ import { trexOAuthProvider } from "./oidc/provider.ts";
 import { defaultServiceResource, refuseRetiredSubject } from "./oidc/hooks.ts";
 import { deriveSubkeyBase64, LABELS } from "./keys.ts";
 import { hashPassword, verifyPassword } from "./password.ts";
-import { nativePasswordLoginEnabled } from "./federation/config.ts";
+import { nativePasswordLoginEnabled } from "./federation/flags.ts";
 import { configuredFederationRedirectUri, ssoProviderSchema } from "./federation/sso-config.ts";
 import { resolveSsoUser } from "./federation/resolve-user.ts";
 import { accountTokenHooks } from "./federation/account-tokens.ts";

@@ -193,6 +193,34 @@ Deno.test("an explicit discovery_url and authorization_endpoint win", () => {
   assertEquals(config.authorizationEndpoint, "https://logto.example.test/oidc/auth");
 });
 
+Deno.test("a blank authorization_endpoint override means \"use discovery\"", () => {
+  // authorizationEndpointFor's third case, re-expressed: it read the column
+  // through `.trim()` so a blank or whitespace-only override fell back to the
+  // discovery document. Serializing "   " as authorizationEndpoint instead
+  // would point every browser at a URL that is not one, and the plugin's own
+  // `existingConfig?.X ?? doc.X` merge would never reach the real endpoint.
+  const config = (authorization_endpoint: string | null) =>
+    JSON.parse(oidcConfigFor({
+      clientId: "c",
+      clientSecret: "s",
+      issuer: "https://logto.example.test/oidc",
+      discovery_url: null,
+      authorization_endpoint,
+      scopes: "openid",
+      claim_map: {},
+      jwks_endpoint: null,
+    }));
+  for (const blank of ["", "   ", "\t\n"]) {
+    assertEquals("authorizationEndpoint" in config(blank), false, JSON.stringify(blank));
+  }
+  // And a real one still survives, with its surrounding whitespace removed
+  // rather than carried into the URL.
+  assertEquals(
+    config("  https://d2e.example/oidc/auth  ").authorizationEndpoint,
+    "https://d2e.example/oidc/auth",
+  );
+});
+
 Deno.test("the token endpoint authentication matches what federation/router.ts sends today", () => {
   // router.ts:193 posts client_secret in the body. Switching the cutover to
   // client_secret_basic at the same time would change how trex authenticates

@@ -163,11 +163,13 @@ export const resolveSsoUser = async (
   // the provider's policy.
   const claims = input.verifiedIdTokenClaims;
   const rawEmail = claims.email;
-  // claim_map.email_verified, honoured. applyClaimMap (config.ts:57) reads the
-  // verification flag through this key today, so dropping it at the cutover
-  // would be a behaviour change and not merely a feature not carried over: a
-  // provider that names its own claim would silently start reporting every
-  // address unverified and would stop linking anybody under `verified_email`.
+  // claim_map.email_verified, honoured. The pre-cutover applyClaimMap read the
+  // verification flag through this key (federation/config.ts, deleted in Task
+  // 10), so dropping it at the cutover would have been a behaviour change and
+  // not merely a feature not carried over: a provider that names its own claim
+  // would silently start reporting every address unverified and would stop
+  // linking anybody under `verified_email`. This is now that rule's only
+  // implementation and its only test.
   //
   // Unlike claim_map.email, V20 did not re-purpose this key. It copies it into
   // `mapping.emailVerified`, which the plugin reads only when the deprecated
@@ -192,11 +194,11 @@ export const resolveSsoUser = async (
     // lookup, and a trex user whose address happened to equal it would be
     // signed into by whoever holds that username upstream.
     //
-    // This is a deliberate divergence from applyClaimMap, which reads the
-    // address through claim_map.email: V20 re-purposed that same column as
-    // `mapping.email`, so post-cutover its value names the stand-in claim
-    // rather than the address claim, and the two readings cannot both be had
-    // from one column.
+    // This is a deliberate divergence from the deleted applyClaimMap, which
+    // read the address through claim_map.email: V20 re-purposed that same
+    // column as `mapping.email`, so post-cutover its value names the stand-in
+    // claim rather than the address claim, and the two readings cannot both be
+    // had from one column.
     email: typeof rawEmail === "string" && rawEmail.length > 0 ? rawEmail : null,
     // providerUser.emailVerified is hard-coded false unless the deprecated
     // trustEmailVerified is on (dist/index.mjs:3922, :3933), so the claim is

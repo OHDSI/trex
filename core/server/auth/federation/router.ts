@@ -41,7 +41,7 @@ import { authLimiter } from "../../middleware/rate-limit.ts";
 import { auth } from "../better-auth.ts";
 import { createTokenResponse } from "../auth-router.ts";
 import { loginUrl } from "../oidc/config.ts";
-import { federationEnabled } from "./config.ts";
+import { federationEnabled } from "./flags.ts";
 import { federationRedirectUri } from "./sso-config.ts";
 import { callbackUri, refusalRedirect, safeErrorCode, safeRedirectTo } from "./request.ts";
 

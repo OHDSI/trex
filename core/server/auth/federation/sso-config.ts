@@ -118,7 +118,18 @@ export function oidcConfigFor(row: SsoProviderRow): string {
     pkce: true,
     discoveryEndpoint: row.discovery_url ??
       row.issuer.replace(/\/+$/, "") + "/.well-known/openid-configuration",
-    ...(row.authorization_endpoint ? { authorizationEndpoint: row.authorization_endpoint } : {}),
+    // Trimmed, and a value left empty by the trim is treated as absent. This is
+    // authorizationEndpointFor's rule (federation/config.ts, deleted in Task 10)
+    // kept verbatim: a blank override means "use the discovery document's
+    // authorization_endpoint", which is what V13's column has always meant.
+    // parseProviderUpsert's str() already blanks-to-null on the way in, so this
+    // only bites a row written by hand-edited SQL — but that is exactly the row
+    // the old trim existed for, and V20's backfill (which cannot be edited)
+    // strips only NULL, so a whitespace-only column there is re-normalised the
+    // first time anything rewrites the configuration through here.
+    ...(row.authorization_endpoint?.trim()
+      ? { authorizationEndpoint: row.authorization_endpoint.trim() }
+      : {}),
     ...(row.jwks_endpoint ? { jwksEndpoint: row.jwks_endpoint } : {}),
     scopes: row.scopes.split(" ").filter((s) => s.length > 0),
     // What federation/router.ts:193 already does: the client secret goes in the

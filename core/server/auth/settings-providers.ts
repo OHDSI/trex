@@ -4,7 +4,7 @@
 // unit tested against an injected client, without pulling in the express
 // router or the database connection auth-router.ts (via ../db.ts) requires
 // at import time.
-import { federationEnabled, nativePasswordLoginEnabled } from "./federation/config.ts";
+import { federationEnabled, nativePasswordLoginEnabled } from "./federation/flags.ts";
 import { loadProviders } from "./federation/providers.ts";
 
 // deno-lint-ignore no-explicit-any

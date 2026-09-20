@@ -18,7 +18,7 @@ import { hashPassword } from "./password.ts";
 import { authLimiter, apiLimiter } from "../middleware/rate-limit.ts";
 import { isRefreshTokenExpired } from "./refresh-token-ttl.ts";
 import { loadExternalProviders } from "./settings-providers.ts";
-import { nativePasswordLoginEnabled } from "./federation/config.ts";
+import { nativePasswordLoginEnabled } from "./federation/flags.ts";
 import { requireAdmin } from "./require-admin.ts";
 import { IDP_METADATA_KEY } from "./oidc/claims.ts";
 import { revokeOidcTokensForSession, revokeOidcTokensForUser } from "./oidc/revoke.ts";

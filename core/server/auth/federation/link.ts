@@ -21,9 +21,9 @@
 //     a deployment should make on purpose, not a default.
 //
 // And one guard that applies only to provisioning: the address has to be one
-// the authentication engine can serve. applyClaimMap takes the upstream `email`
-// claim verbatim — it has to, since it is an identifier and not trex's to
-// rewrite — so an IdP asserting `alice@localhost` with auto_provision on would
+// the authentication engine can serve. The upstream's `email` claim is taken
+// verbatim — it has to be, since it is an identifier and not trex's to rewrite
+// — so an IdP asserting `alice@localhost` with auto_provision on would
 // otherwise create exactly the row V17 refuses to migrate, after V17 has run.
 // See isEngineAddressable for the other five routes that ask the same rule.
 import type { ProviderConfig, UpstreamIdentity } from "./types.ts";

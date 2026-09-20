@@ -292,9 +292,10 @@ Deno.test("an email_verified claim that is not exactly true is unverified", asyn
 
 Deno.test("claim_map.email_verified names the claim the link policy reads", async () => {
   // The whole point of the column: Entra and friends do not all call it
-  // `email_verified`. applyClaimMap honours this key today, so a resolver that
-  // ignored it would change behaviour at the cutover — the provider below would
-  // report every address unverified and link nobody under `verified_email`.
+  // `email_verified`. The pre-cutover applyClaimMap honoured this key, so a
+  // resolver that ignored it would change behaviour at the cutover — the
+  // provider below would report every address unverified and link nobody under
+  // `verified_email`. applyClaimMap is gone; this is the rule's only test.
   //
   // The canonical name is present and FALSE in the same id_token, so a resolver
   // reading the hard-coded name cannot pass by accident.

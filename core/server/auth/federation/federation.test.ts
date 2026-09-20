@@ -1,11 +1,6 @@
 import { assertEquals, assertNotEquals, assertRejects, assertStringIncludes, assertThrows } from "jsr:@std/assert";
 import { _resetDekCache, _setDekForTests, decryptWithDek } from "../dek.ts";
-import {
-  applyClaimMap,
-  authorizationEndpointFor,
-  federationEnabled,
-  nativePasswordLoginEnabled,
-} from "./config.ts";
+import { federationEnabled, nativePasswordLoginEnabled } from "./flags.ts";
 import { decideLink, emailDomain, emailDomainAllowed, isElevatedRole } from "./link.ts";
 import { resolveGroups } from "./groups.ts";
 import {
@@ -41,60 +36,6 @@ Deno.test("nativePasswordLoginEnabled is on unless explicitly turned off", () =>
   // installation they would need to reach to correct it.
   assertEquals(nativePasswordLoginEnabled("FALSE"), true);
   assertEquals(nativePasswordLoginEnabled("no"), true);
-});
-
-Deno.test("applyClaimMap renames upstream claims onto canonical fields", () => {
-  const identity = applyClaimMap(
-    { oid: "abc-123", upn: "jo@example.test", name: "Jo", email_verified: true },
-    { sub: "oid", email: "upn", name: "name", email_verified: "email_verified" },
-  );
-  assertEquals(identity, {
-    sub: "abc-123",
-    email: "jo@example.test",
-    name: "Jo",
-    emailVerified: true,
-  });
-});
-
-Deno.test("applyClaimMap falls back to standard claim names when unmapped", () => {
-  const identity = applyClaimMap(
-    { sub: "s-1", email: "a@b.test", email_verified: false },
-    {},
-  );
-  assertEquals(identity.sub, "s-1");
-  assertEquals(identity.email, "a@b.test");
-  assertEquals(identity.emailVerified, false);
-});
-
-Deno.test("applyClaimMap rejects a missing subject", () => {
-  assertThrows(
-    () => applyClaimMap({ email: "a@b.test" }, {}),
-    Error,
-    "subject",
-  );
-});
-
-// A username-only upstream account (64 of 69 on the d2e installation this was
-// written for) asserts no address. The subject alone is a complete identity.
-Deno.test("applyClaimMap accepts an id_token carrying no email", () => {
-  assertEquals(applyClaimMap({ sub: "s-1" }, {}), {
-    sub: "s-1",
-    email: null,
-    emailVerified: false,
-  });
-  // An empty string is no address either, not an address of length zero.
-  assertEquals(applyClaimMap({ sub: "s-1", email: "" }, {}).email, null);
-  // A mapped-but-absent claim behaves the same as an unmapped one.
-  assertEquals(applyClaimMap({ sub: "s-1" }, { email: "upn" }).email, null);
-});
-
-Deno.test("applyClaimMap still requires a subject when there is no email either", () => {
-  assertThrows(() => applyClaimMap({}, {}), Error, "subject");
-});
-
-Deno.test("applyClaimMap treats a missing email_verified as unverified", () => {
-  const identity = applyClaimMap({ sub: "s-1", email: "a@b.test" }, {});
-  assertEquals(identity.emailVerified, false);
 });
 
 const provider = (over: Partial<ProviderConfig> = {}): ProviderConfig => ({
@@ -142,10 +83,11 @@ Deno.test("verified email, no user, auto-provision on provisions", () => {
 
 // ── An upstream address the engine cannot serve ─────────────────────────────
 //
-// applyClaimMap takes the `email` claim verbatim, so an IdP is free to assert
-// one V17 would have refused to migrate. auto_provision then writes it, after
-// V17 has run, with no administrator in the loop — the only one of the six
-// address-writing routes (see isEngineAddressable) that needs none.
+// The upstream's `email` claim is taken verbatim — it is an identifier and not
+// trex's to rewrite — so an IdP is free to assert one V17 would have refused to
+// migrate. auto_provision then writes it, after V17 has run, with no
+// administrator in the loop: the only one of the six address-writing routes
+// (see isEngineAddressable) that needs none.
 
 const unusable = (over: Partial<UpstreamIdentity> = {}): UpstreamIdentity => ({
   sub: "s-1", email: "alice@localhost", emailVerified: true, ...over,
@@ -856,33 +798,6 @@ Deno.test("callback URI falls back to the forwarded origin", () => {
       "",
     ),
     "https://trex.test/trex/auth/v1/callback",
-  );
-});
-
-Deno.test("authorizationEndpointFor uses discovery when no override is set", () => {
-  assertEquals(
-    authorizationEndpointFor({ authorizationEndpoint: null }, {
-      authorization_endpoint: "https://idp.internal:3001/oidc/auth",
-    }),
-    "https://idp.internal:3001/oidc/auth",
-  );
-});
-
-Deno.test("authorizationEndpointFor prefers the configured browser-facing URL", () => {
-  assertEquals(
-    authorizationEndpointFor({ authorizationEndpoint: "https://d2e.example/oidc/auth" }, {
-      authorization_endpoint: "https://idp.internal:3001/oidc/auth",
-    }),
-    "https://d2e.example/oidc/auth",
-  );
-});
-
-Deno.test("authorizationEndpointFor ignores a blank override", () => {
-  assertEquals(
-    authorizationEndpointFor({ authorizationEndpoint: "   " }, {
-      authorization_endpoint: "https://idp.internal:3001/oidc/auth",
-    }),
-    "https://idp.internal:3001/oidc/auth",
   );
 });
 
