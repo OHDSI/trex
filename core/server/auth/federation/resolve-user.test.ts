@@ -411,6 +411,33 @@ Deno.test("a first-time identity matching an elevated account is refused by defa
   );
 });
 
+Deno.test("allow_elevated_auto_link that is not exactly true is off", async () => {
+  // The column arrived in V12; a row written before it, or a database that has
+  // not got it, reads as null or undefined. `!== false` would read both as
+  // permission to hand a federated identity an administrator's account, which
+  // is the one decision that must never default on.
+  for (const flag of [null, undefined, "", 0, "false"]) {
+    const db = fakeDb({
+      ssoProvider: [{ ...PROVIDER, allow_elevated_auto_link: flag }],
+      user: [{ id: "u9", email: "root@allowed.test", role: "admin" }],
+    });
+    assertEquals(
+      await resolve(
+        input({
+          verifiedIdTokenClaims: {
+            sub: "sub-1",
+            email: "root@allowed.test",
+            email_verified: true,
+          },
+        }),
+        db,
+      ),
+      { action: "reject", code: "elevated_account_link_refused" },
+      `allow_elevated_auto_link=${JSON.stringify(flag)} must not link an admin`,
+    );
+  }
+});
+
 Deno.test("the elevated-account guard can be opted out of per provider", async () => {
   const db = fakeDb({
     ssoProvider: [{ ...PROVIDER, allow_elevated_auto_link: true }],
