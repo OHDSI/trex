@@ -635,29 +635,122 @@ dbTest("the four refresh-token shapes an upstream can send, measured on the row"
     assertEquals((await signIn(engine, l.auth.options.baseURL, id)).error, null);
     assertEquals(await refreshColumn(), seeded);
 
-    // 3. null. An ordinary JSON shape, and it reaches the column: null is not
-    //    undefined, so Better Auth's filter keeps it.
+    // 3. null. An ordinary JSON shape, and it reaches the hook: null is not
+    //    undefined, so Better Auth's filter keeps it. The hook writes NULL —
+    //    and V21's trigger then puts the stored ciphertext back, because an
+    //    upstream that stops sending a refresh token means "unchanged", not
+    //    "revoked". Measured before V21: this column went to NULL and the
+    //    installation's offline access was gone with it.
     tokenExtra = { refresh_token: null };
     assertEquals((await signIn(engine, l.auth.options.baseURL, id)).error, null);
-    assertEquals(await refreshColumn(), null);
+    assertEquals(await refreshColumn(), seeded);
 
-    // 4. "". The empty string is a string, so only a length test stands between
-    //    it and the column. NULL is what it has to become: null-ness is the one
-    //    property every reader tests, and "" is not a token.
+    // 4. "". A string, so only a length test stands between it and the column,
+    //    and because the hook's patch is MERGED, declining to seal it would
+    //    write "" verbatim over a live token. NULL from the hook, preserved by
+    //    the trigger.
     tokenExtra = { refresh_token: "" };
     assertEquals((await signIn(engine, l.auth.options.baseURL, id)).error, null);
-    assertEquals(await refreshColumn(), null);
+    assertEquals(await refreshColumn(), seeded);
 
     // 5. A number, from a non-conformant IdP. This is the one that mattered:
     //    before the fix the column held the string "12345" in CLEAR TEXT and
-    //    readAccountTokens then threw on the row for good. NULL, like every
-    //    other unusable value, and the reader still works.
+    //    readAccountTokens then threw on that row for good.
     tokenExtra = { refresh_token: 12345 };
     assertEquals((await signIn(engine, l.auth.options.baseURL, id)).error, null);
-    assertEquals(await refreshColumn(), null);
+    assertNotEquals(await refreshColumn(), "12345");
+    assertEquals(await refreshColumn(), seeded);
+
+    // After all five, the token the first sign-in stored is still the token the
+    // sanctioned reader returns. That is the property, and it is read from the
+    // table rather than from anything the hook returned.
     const tokens = await (await import("./providers.ts")).readAccountTokens(l.pool, id, sub);
-    assertEquals(tokens!.refreshToken, null);
+    assertEquals(tokens!.refreshToken, "seed-refresh-token");
     assertEquals(tokens!.accessToken, "stub-access-token");
+  } finally {
+    await cleanUp(l.pool, id);
+    await l.pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [sub]);
+    await up.close();
+  }
+});
+
+dbTest("a refresh token the upstream DOES send replaces the stored one", async (l) => {
+  // The other half of V21, without which "preserve on NULL" is satisfied by a
+  // trigger that simply pins the column forever. Two sign-ins, two different
+  // refresh tokens, and the second must win — the trigger's WHEN clause is what
+  // keeps it out of this write entirely.
+  const id = slug();
+  const sub = `${id}-subject`;
+  let tokenExtra: Record<string, unknown> = { refresh_token: "first-refresh-token" };
+  const up = await startUpstream(() => ({ sub, username: "alice" }), undefined, () => tokenExtra);
+  try {
+    await seedProvider(l, id, up.origin);
+    await l.pool.query(
+      `INSERT INTO trexdb."user" (id, name, email, "emailVerified", role)
+       VALUES ($1,'Alice',$2,false,'user')`,
+      [sub, `${sub}@d2e.local`],
+    );
+    await l.pool.query(
+      `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId")
+       VALUES ($1,$2,$3,$4)`,
+      [crypto.randomUUID(), sub, sub, id],
+    );
+    const engine = engineTrusting(l.auth, up.origin);
+
+    assertEquals((await signIn(engine, l.auth.options.baseURL, id)).error, null);
+    const first = (await storedTokens(l.pool, id))[0].refreshToken;
+    assertEquals(await decryptWithDek(first), "first-refresh-token");
+
+    tokenExtra = { refresh_token: "second-refresh-token" };
+    assertEquals((await signIn(engine, l.auth.options.baseURL, id)).error, null);
+    const second = (await storedTokens(l.pool, id))[0].refreshToken;
+    assertNotEquals(second, first);
+    assertEquals(await decryptWithDek(second), "second-refresh-token");
+  } finally {
+    await cleanUp(l.pool, id);
+    await l.pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [sub]);
+    await up.close();
+  }
+});
+
+dbTest("the access token and the id_token are NOT preserved across a sign-in", async (l) => {
+  // V21 covers refreshToken alone. An access token is expected to rotate and is
+  // written alongside a fresh accessTokenExpiresAt, so preserving a stale one
+  // would pair a dead credential with a live-looking expiry; an id_token
+  // describes one authentication event and must not be carried into another.
+  // Both therefore go to NULL when a sign-in does not bring them, and this is
+  // the test that would redden if the trigger were widened to all three.
+  const id = slug();
+  const sub = `${id}-subject`;
+  const up = await startUpstream(() => ({ sub, username: "alice" }));
+  try {
+    await seedProvider(l, id, up.origin);
+    await l.pool.query(
+      `INSERT INTO trexdb."user" (id, name, email, "emailVerified", role)
+       VALUES ($1,'Alice',$2,false,'user')`,
+      [sub, `${sub}@d2e.local`],
+    );
+    await l.pool.query(
+      `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId")
+       VALUES ($1,$2,$3,$4)`,
+      [crypto.randomUUID(), sub, sub, id],
+    );
+    assertEquals(
+      (await signIn(engineTrusting(l.auth, up.origin), l.auth.options.baseURL, id)).error,
+      null,
+    );
+    const stored = (await storedTokens(l.pool, id))[0];
+    assertEquals(await decryptWithDek(stored.accessToken), "stub-access-token");
+
+    // Now clear both directly, the way an update that did not carry them would.
+    // The trigger must not resurrect either.
+    await l.pool.query(
+      `UPDATE trexdb.account SET "accessToken" = NULL, "idToken" = NULL WHERE "providerId" = $1`,
+      [id],
+    );
+    const after = (await storedTokens(l.pool, id))[0];
+    assertEquals(after.accessToken, null);
+    assertEquals(after.idToken, null);
   } finally {
     await cleanUp(l.pool, id);
     await l.pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [sub]);

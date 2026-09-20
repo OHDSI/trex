@@ -89,6 +89,64 @@ function dbTest(name: string, fn: (l: NonNullable<typeof loaded>) => Promise<voi
 
 /** The migration under test, replayed the way core/schema is applied. */
 const MIGRATION = new URL("../../../schema/V20__sso_provider_better_auth.sql", import.meta.url);
+const V21 = new URL("../../../schema/V21__account_preserve_refresh_token.sql", import.meta.url);
+
+dbTest("V21 is re-runnable and does not disturb the rows already there", async ({ pool }) => {
+  // The ledger refuses an edited migration (plugins/migration/src/lib.rs:340-345),
+  // so a migration that is not safe to replay is a migration that can only be
+  // fixed by adding another one. Replayed here against a database that already
+  // has an account row carrying a token, because "re-runnable" on an empty
+  // schema is the easy half.
+  const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+  const userId = `v21_${run}`;
+  try {
+    await pool.query(
+      `INSERT INTO trexdb."user" (id, name, email, "emailVerified", role)
+       VALUES ($1,'V21',$2,false,'user')`,
+      [userId, `${userId}@d2e.local`],
+    );
+    await pool.query(
+      `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId", "refreshToken")
+       VALUES ($1,$2,$2,$3,'sealed-value-standing-in-for-ciphertext')`,
+      [crypto.randomUUID(), userId, `v21prov_${run}`],
+    );
+
+    const sql = await Deno.readTextFile(V21);
+    await pool.query(sql);
+    await pool.query(sql);
+
+    // One trigger, not two, and the row is untouched by the replay itself.
+    const { rows: triggers } = await pool.query(
+      `SELECT count(*)::int AS n FROM pg_trigger
+        WHERE tgrelid = 'trexdb.account'::regclass AND NOT tgisinternal
+          AND tgname = 'trg_account_preserve_refresh_token'`,
+    );
+    assertEquals(triggers[0].n, 1);
+    const stored = async () =>
+      (await pool.query(`SELECT "refreshToken" AS t FROM trexdb.account WHERE "userId" = $1`, [
+        userId,
+      ])).rows[0].t;
+    assertEquals(await stored(), "sealed-value-standing-in-for-ciphertext");
+
+    // And it still does its job after the replay. Asserted with a direct UPDATE
+    // rather than a callback because this test is about the migration file;
+    // sso-callback.test.ts is what proves the behaviour on a real sign-in.
+    await pool.query(`UPDATE trexdb.account SET "refreshToken" = NULL WHERE "userId" = $1`, [
+      userId,
+    ]);
+    assertEquals(await stored(), "sealed-value-standing-in-for-ciphertext");
+
+    // Narrowness: a real new value must still replace it, or "preserved" would
+    // be satisfied by a column nothing can ever write.
+    await pool.query(`UPDATE trexdb.account SET "refreshToken" = 'replacement' WHERE "userId" = $1`, [
+      userId,
+    ]);
+    assertEquals(await stored(), "replacement");
+  } finally {
+    await pool.query(`DELETE FROM trexdb.account WHERE "userId" = $1`, [userId]);
+    await pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [userId]);
+  }
+});
 
 dbTest("the engine with sso() mounted has no outstanding schema migration", async ({ auth }) => {
   // The plugin declares issuer, oidcConfig, samlConfig, userId, providerId,
