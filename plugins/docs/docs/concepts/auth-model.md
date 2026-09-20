@@ -354,6 +354,19 @@ capability a deployment could be relying on today.
   installation maps it, and the admin API cannot write one (`ProviderUpsert` has
   no `claim_map` field), so the repair is a migration rewriting
   `trexdb.account."accountId"` for that provider — not a code change.
+- **`claim_map.email` no longer selects which claim carries the address.** The
+  linking path reads the id_token's literal `email` claim. V20 re-purposed that
+  same column as `oidcConfig.mapping.email` — the stand-in claim that gets a
+  username-only account past the plugin's "no email, no sign-in" check — and one
+  column cannot carry both readings. The consequence for a deployment whose
+  upstream emits the address under another name (`mail`, Entra's `upn`), with
+  the row set to `claim_map {"email": "mail"}`: the resolver sees no address at
+  all, the existing-user lookup is skipped, and **every first-time federated
+  sign-in is refused** — `no_account`, or `upstream_email_unusable` where
+  `auto_provision` is on. Users already linked are unaffected, because the link
+  and not the address is what identifies them. Such an upstream now needs to
+  emit `email`, or its users need pre-linking through
+  `PUT /admin/federation/links`.
 - **The OIDC `nonce` is gone.** The plugin sends none and checks none. PKCE S256
   is on per provider and the `state` is single-use, database-backed and bound to
   a signed browser cookie, which is what `nonce` defends in the
