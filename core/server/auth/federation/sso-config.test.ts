@@ -180,16 +180,16 @@ Deno.test("an explicit discovery_url and authorization_endpoint win", () => {
     clientId: "c",
     clientSecret: "s",
     issuer: "https://logto.internal:3001/oidc",
-    discovery_url: "https://logto.internal:3001/oidc/.well-known/openid-configuration",
+    // Deliberately NOT the URL the issuer would derive: an explicit
+    // discovery_url that happened to equal the derived one would make this
+    // test pass whether the column is consulted or ignored.
+    discovery_url: "https://logto.internal:3001/oidc/discovery",
     authorization_endpoint: "https://logto.example.test/oidc/auth",
     scopes: "openid",
     claim_map: {},
     jwks_endpoint: null,
   }));
-  assertEquals(
-    config.discoveryEndpoint,
-    "https://logto.internal:3001/oidc/.well-known/openid-configuration",
-  );
+  assertEquals(config.discoveryEndpoint, "https://logto.internal:3001/oidc/discovery");
   assertEquals(config.authorizationEndpoint, "https://logto.example.test/oidc/auth");
 });
 
