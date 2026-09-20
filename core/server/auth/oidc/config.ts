@@ -273,3 +273,87 @@ export function trustedProxies(
 ): string[] {
   return (raw ?? "").split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
 }
+
+/**
+ * Strips a transport port from every token of an `X-Forwarded-For` value.
+ *
+ * This is the whole reason per-IP rate limiting does not work in a d2e stack,
+ * and it is a formatting mismatch rather than a policy one. d2e's Caddyfile
+ * sends `header_up X-Forwarded-For {remote}`, and Caddy's `{remote}` is the
+ * peer's `host:port`, not its host — so the header arrives as
+ * `192.168.65.1:57097`. Better Auth's `isValidIP` refuses that, `getIPFromHeader`
+ * returns null, and `getIP` then falls back to `127.0.0.1` under
+ * `NODE_ENV=development` (which this container sets) or to null otherwise.
+ * Either way every caller lands in ONE bucket per path, which is how 594
+ * anonymous requests closed /oauth2/userinfo for the whole installation in 2.4
+ * seconds (CUTOVER-REHEARSAL.md §7). Measured against the package:
+ *
+ *   isValidIP("192.168.65.1:57097")              -> false
+ *   getIP({x-forwarded-for: "192.168.65.1:57097"}) -> 127.0.0.1   (NODE_ENV=development)
+ *                                                -> null         (otherwise)
+ *   getIP({x-forwarded-for: "192.168.65.1"})     -> 192.168.65.1
+ *
+ * `TREX_TRUSTED_PROXIES` cannot fix it: the trusted-proxy path parses the same
+ * malformed token with the same `ipToBytes` and gives up on the same value.
+ * Normalising the header is the only lever trex holds, and it is the right one
+ * — it makes the resolution work for ANY front door that forwards the peer in
+ * Go/Caddy's `host:port` spelling, not just for a Caddyfile this repository
+ * does not own.
+ *
+ * It adds no spoofing surface. Better Auth already honours a single-token
+ * header from an untrusted peer; this only changes the spelling of a token that
+ * was going to be accepted or rejected on its own merits. A header carrying
+ * more than one token still resolves to null without `TREX_TRUSTED_PROXIES`,
+ * exactly as before.
+ *
+ * Conservative by construction: a token is rewritten only when what remains is
+ * unambiguous — `[v6]:port` and a `v4:port` with exactly one colon. A bare IPv6
+ * address (many colons, no brackets) is left alone, because `2001:db8::1` and
+ * `2001:db8::1:443` are indistinguishable and guessing would silently rewrite a
+ * real address into a different one.
+ */
+export function normalizeForwardedFor(value: string): string {
+  return value
+    .split(",")
+    .map((raw) => {
+      const token = raw.trim();
+      // [2001:db8::1]:443 -> 2001:db8::1. Also covers the bracketed form with
+      // no port, which is equally unparseable to isValidIP.
+      const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(token);
+      if (bracketed) return bracketed[1];
+      // 192.168.65.1:57097 -> 192.168.65.1. Exactly one colon, so a bare IPv6
+      // address can never match.
+      const first = token.indexOf(":");
+      if (first !== -1 && first === token.lastIndexOf(":") && /^\d+$/.test(token.slice(first + 1))) {
+        return token.slice(0, first);
+      }
+      return token;
+    })
+    .join(", ");
+}
+
+/**
+ * How many /oauth2/userinfo requests one caller may have REFUSED per window
+ * before the endpoint stops answering it at all.
+ *
+ * Separate from TREX_OIDC_RATE_LIMIT_MAX, and deliberately far smaller, because
+ * the two count different things. That one is a ceiling on traffic; this is a
+ * ceiling on failure, and a /oauth2/userinfo request that answers 401 has no
+ * legitimate volume — a real sign-in's call answers 200 and is never counted
+ * here. 60 leaves ample room for a client with a stale token retrying and no
+ * room at all for the 594 requests that took the endpoint down in 2.4 seconds.
+ *
+ * This is what makes the FAILURE mode safe when the client IP cannot be
+ * resolved. Better Auth's own limiter keys on `<ip>|<path>` with no hook to
+ * change the key, so a tighter `customRules` entry would still share a counter
+ * with the authenticated requests — an attacker would fill it and WebAPI's
+ * sign-in would read it as full. Refusing the flood BEFORE it reaches Better
+ * Auth is the only way the two budgets can be independent, and the mount is the
+ * only place that can do it.
+ */
+export function userInfoFailureBudget(
+  raw: string | undefined = Deno.env.get("TREX_OIDC_USERINFO_FAILURE_MAX"),
+): number {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : 60;
+}

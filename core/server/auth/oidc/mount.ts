@@ -6,7 +6,18 @@
 import express from "express";
 import { BASE_PATH } from "../../config.ts";
 import { auth } from "../better-auth.ts";
-import { oidcIssuer } from "./config.ts";
+import {
+  userInfoFailureBudget,
+  normalizeForwardedFor,
+  OIDC_RATE_LIMIT_WINDOW,
+  oidcIssuer,
+  trustedProxies,
+} from "./config.ts";
+import { createFailureBudget, isUserInfoRefusal } from "./userinfo-limit.ts";
+// Better Auth's own resolver, re-exported by better-auth/api, so this keys on
+// exactly the address its rate limiter would have keyed on — including the
+// trusted-proxy walk and the single-token rule.
+import { getIP } from "better-auth/api";
 
 const MOUNT_PATH = `${BASE_PATH}/oidc`;
 
@@ -50,10 +61,52 @@ function toHeaders(req: express.Request): Headers {
   const headers = new Headers();
   for (const [name, value] of Object.entries(req.headers)) {
     if (value === undefined) continue;
-    if (Array.isArray(value)) for (const v of value) headers.append(name, v);
-    else headers.append(name, value);
+    // x-forwarded-for is rewritten on the way in rather than anywhere further
+    // down, because this is the last place trex holds the request before Better
+    // Auth reads the header to key its rate limiter. config.ts's
+    // normalizeForwardedFor carries the reasoning and the measurement.
+    const norm = name.toLowerCase() === "x-forwarded-for" ? normalizeForwardedFor : (v: string) => v;
+    if (Array.isArray(value)) for (const v of value) headers.append(name, norm(v));
+    else headers.append(name, norm(value));
   }
   return headers;
+}
+
+/**
+ * The budget a caller's FAILED /oauth2/userinfo requests draw on, which is not
+ * the one a sign-in draws on. See userinfo-limit.ts for why it cannot be
+ * expressed as a Better Auth rate-limit rule.
+ *
+ * Module scope so it survives between requests; built lazily so the environment
+ * is read after boot has set it, and so a test can observe a fresh one.
+ */
+let userInfoFailures: ReturnType<typeof createFailureBudget> | null = null;
+function userInfoBudget(): ReturnType<typeof createFailureBudget> {
+  userInfoFailures ??= createFailureBudget(
+    userInfoFailureBudget(),
+    OIDC_RATE_LIMIT_WINDOW * 1000,
+  );
+  return userInfoFailures;
+}
+
+/** Test seam: drops the accumulated windows and re-reads the environment. */
+export function _resetUserInfoBudget(): void {
+  userInfoFailures = null;
+}
+
+/**
+ * The key a caller's failures are counted under.
+ *
+ * Better Auth's own resolver, so this is the same address its rate limiter
+ * keys on — and, with the header normalisation above, behind a Caddy that
+ * forwards the peer there now IS one. Where there is not, every caller shares
+ * one key, and that is the point rather than a shortfall: the shared bucket
+ * that an attacker can exhaust is then the FAILURE bucket, and the successful
+ * /oauth2/userinfo call every WebAPI sign-in makes never touches it.
+ */
+function userInfoKey(request: Request): string {
+  const ip = getIP(request, { advanced: { ipAddress: { trustedProxies: trustedProxies() } } } as never);
+  return `${ip ?? "no-trusted-ip"}|/oauth2/userinfo|failed`;
 }
 
 export function oidcHandler(): express.RequestHandler {
@@ -83,7 +136,34 @@ export function oidcHandler(): express.RequestHandler {
       { method: req.method, headers: toHeaders(req), body },
     );
 
+    // The check is ahead of Better Auth so a refused caller never reaches its
+    // rate limiter, which is the whole point: one WebAPI sign-in costs one
+    // /oauth2/userinfo call (CUTOVER-REHEARSAL.md §6), and that call must not
+    // be competing for budget with somebody else's failures.
+    const isUserInfo = path.startsWith("/oauth2/userinfo");
+    const budgetKey = isUserInfo ? userInfoKey(request) : "";
+    if (isUserInfo && userInfoBudget().overBudget(budgetKey)) {
+      const retryAfter = userInfoBudget().retryAfter(budgetKey);
+      if (retryAfter > 0) res.setHeader("Retry-After", String(retryAfter));
+      // Counted, so a caller that keeps hammering stays refused for the whole
+      // window instead of being forgiven by the refusal itself.
+      userInfoBudget().record(budgetKey);
+      // The endpoint's own OAuth error shape rather than Better Auth's
+      // `{"message":…}`, so a relying party can tell throttling from a bad
+      // token.
+      res.status(429).json({
+        error: "invalid_request",
+        error_description:
+          "Too many failed userinfo requests from this client. Retry later.",
+      });
+      return;
+    }
+
     const response = await auth.handler(request);
+
+    // Charged only on a refusal. A successful sign-in's call is a 200 and costs
+    // nothing, so no amount of real traffic can throttle real traffic.
+    if (isUserInfo && isUserInfoRefusal(response.status)) userInfoBudget().record(budgetKey);
 
     // RP-initiated logout clears trex's own cookie as well. The deleted
     // router.ts did this unconditionally on its end-session route
