@@ -36,10 +36,13 @@
 //   - getAccessToken would hand the ciphertext to a caller as if it were a
 //     token, because with encryptOAuthTokens false its decryptOAuthToken is a
 //     pass-through. That is disclosure of a useless value, and a bug report.
-//   - api/routes/account.mjs:369-379 reads the stored columns and feeds them
-//     back into updateAccount, which would run them through this hook a second
-//     time and store the ciphertext of the ciphertext. That one is corruption,
-//     not disclosure: the original token is then unrecoverable.
+//   - api/routes/account.mjs:374 and :376 feed the STORED columns back into
+//     updateAccount unchanged when the upstream's refresh did not replace them
+//     (`: account.refreshToken`, `|| account.idToken`). Those values are already
+//     ciphertext, so they would run through this hook a second time and the
+//     column would hold the ciphertext of the ciphertext. That one is
+//     corruption, not disclosure: the original token is unrecoverable, and
+//     readAccountTokens would return base64 instead of a token.
 import { encryptWithDek } from "../dek.ts";
 
 const TOKEN_FIELDS = ["accessToken", "refreshToken", "idToken"] as const;
