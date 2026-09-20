@@ -529,3 +529,86 @@ lower-snake — `spike_username`, not `spike-username`.
   as a peer, so the two move together.
 - Run with `deno test --no-check --allow-all <file>`, not `deno task test`:
   the tree carries pre-existing type errors unrelated to this work.
+
+---
+
+## 8. Addendum (Task 3): the §4 blocker has a third way out, and it is free
+
+Measured 2026-09-20 against the same scratch Postgres at V19, with
+`@better-auth/sso@1.7.5` installed for real (`core/server/package.json`,
+pinned exactly).
+
+Three corrections and one result §4 did not have.
+
+### 8.1 It is not only the SSO sign-in path that throws — **sign-up throws**
+
+§4 says "a bare `adapter.findOne` only logs this at ERROR and returns the row;
+the SSO sign-in path throws". True, but the second half is narrower than
+reality. The enforcement point is `runWithTransaction`
+(`@better-auth/core/dist/context/transaction.mjs:59`), and
+`better-auth/dist/api/routes/sign-up.mjs:143` and
+`better-auth/dist/db/internal-adapter.mjs:121` both go through it. Measured:
+with `sso()` mounted at V19, `auth.api.signUpEmail` throws `BetterAuthError:
+Database schema mismatch`.
+
+The blast radius of mounting the plugin against an unmigrated table is
+therefore the whole engine, not federation. `sso()` must not be mounted before
+the migration lands.
+
+### 8.2 Declaring trex's columns *removes* the three "required columns"
+
+The check's own rule (`schema-diff.mjs:40-53`): a declared field is a column
+Better Auth writes, and only columns it does **not** write are reported as
+`unexpected-required-column`. Declaring `displayName`, `clientId` and
+`clientSecret` as `schema.ssoProvider.additionalFields` therefore settles them.
+Four runs, same database, same sign-up call:
+
+| `plugins` | `schema.ssoProvider` | sign-up at V19 | sign-up with the six plugin columns added |
+|---|---|---|---|
+| `[]` | — | **OK** | OK |
+| `[sso()]` | `modelName` only (the §6 block) | **throws**: 6 missing + 3 required | **throws**: 3 required |
+| `[sso()]` | `modelName` + trex's `additionalFields` | **throws**: 6 missing | **OK** |
+
+So §4's "two ways out" are not the only two. **Option 3: declare the columns.**
+It keeps `validateSchema` on for every table, needs no `ALTER ... DROP NOT NULL`
+on three columns trex's admin API depends on being NOT NULL, and it is work the
+plugin needed anyway (§3/Q3b: undeclared columns are dropped from every read).
+
+`auth/federation/sso-config.ts` carries the declaration. The migration task's
+remaining job is the six columns §4 already lists, and nothing else.
+
+### 8.3 A declared field with no column throws just as hard
+
+The same diff reports `missing-column` for a declared field the table has not
+got, and that is the same `SchemaMismatchError` on the same paths. So the model
+is a claim about the live schema in both directions.
+
+Consequence: **`jwks_endpoint` is not declared and does not need a column.**
+The resolved JWKS URL is written into the serialized `oidcConfig`, which is
+itself a persisted column, so nothing is lost. A `jwks_endpoint` column would
+only be one more `missing-column` for the migration to chase.
+
+### 8.4 `claim_map` is `type: "json"`, not `"string"`
+
+The column is `jsonb` (V11). Better Auth maps `json` onto jsonb and `string`
+onto text unconditionally — the same reason `user_metadata` and `app_metadata`
+are declared `json` in `better-auth.ts`.
+
+### 8.5 `redirectURI` cannot be resolved at module scope
+
+`federationRedirectUri()` throws when `TREX_FEDERATION_REDIRECT_URI` is unset,
+and `sso({ redirectURI: federationRedirectUri() })` evaluates at import. Wiring
+it that way makes the variable mandatory for every deployment, federating or
+not, and a missing one is an import-time crash of the whole engine rather than
+a federation that is switched off. Whoever mounts the plugin has to gate either
+the variable or the mount.
+
+### 8.6 Option names confirmed against the installed package
+
+`redirectURI`, `guardProviderMutation`, `resolveUser` and
+`schema.ssoProvider.additionalFields` all exist on `SSOOptions`
+(`dist/index-sM6JWXeV.d.mts:320-536`). `DBFieldType` admits `"string[]"`
+(`@better-auth/core/dist/db/type.d.mts:29`).
+`OIDCConfig.tokenEndpointAuthentication` admits only `client_secret_post`,
+`client_secret_basic` and `private_key_jwt`; `client_secret_post` is what
+`federation/router.ts:193` already sends.
