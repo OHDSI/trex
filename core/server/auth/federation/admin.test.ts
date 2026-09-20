@@ -248,12 +248,16 @@ Deno.test("upsertProvider writes every federation column in one statement", asyn
   const insert = c.ran.find((s) => s.includes("INSERT INTO trexdb.sso_provider"))!;
   assertEquals(insert.includes("ON CONFLICT (id) DO UPDATE"), true);
   assertEquals(insert.includes("authorization_endpoint"), true);
-  // The two the plugin needs on every row and that nothing else on this path
-  // fills. Asserted on the UPDATE side as well as the insert list: an edit that
-  // left them out would still produce a correct row on create and a stale one
-  // forever after, which is the harder failure to see.
-  assertEquals(insert.includes('"providerId" = EXCLUDED."providerId"'), true);
+  // domain on the UPDATE side as well as the insert list: an edit that left it
+  // out would still produce a correct row on create and a stale one forever
+  // after, which is the harder failure to see. Pinned behaviourally too, by
+  // "[db] moving a provider to another host rewrites domain rather than keeping
+  // the old one"; this text assertion is the cheap sibling, not the evidence.
   assertEquals(insert.includes("domain = EXCLUDED.domain"), true);
+  // providerId is NOT asserted as statement text here. It is pinned by
+  // "[db] the statement writes providerId itself, not V20's trigger", which
+  // disables the trigger and watches the NOT NULL constraint fire — evidence
+  // about the row rather than about the spelling of the clause that made it.
 });
 
 Deno.test("upsertProvider writes the row and its oidcConfig in one transaction", async () => {
@@ -870,6 +874,98 @@ dbTest("moving a provider to another host rewrites domain rather than keeping th
   // Lower-cased, and the path is gone: hostnames are case-insensitive and the
   // plugin compares this column as text.
   assertEquals(rows, [{ domain: "id.example.test" }]);
+});
+
+dbTest("the statement writes providerId itself, not V20's trigger", async (db, ctx) => {
+  // V20's BEFORE INSERT OR UPDATE trigger fills a NULL "providerId", so with it
+  // in place a statement that omitted the column would still produce a correct
+  // row and nothing would say so. Disabling the trigger makes the column's NOT
+  // NULL constraint the witness: the shipped statement writes $1 and inserts,
+  // and a version without it raises
+  //   null value in column "providerId" ... violates not-null constraint.
+  //
+  // Only the VALUES list is observable this way, and that is not a gap in the
+  // test — it is a fact about the ON CONFLICT half. Under
+  // sso_provider_provider_id_mirrors_id_check ("providerId" = id) a stored row
+  // already holds exactly what EXCLUDED."providerId" would assign, so the
+  // update-side assignment cannot change any row and no test of any kind could
+  // distinguish its presence. It is kept in the statement as a statement of
+  // intent for a future that decouples the two columns; it is not a guard.
+  //
+  // upsertProvider issues its own BEGIN/COMMIT, so the ALTER cannot be scoped
+  // to a transaction around it — that COMMIT would commit the ALTER too, and
+  // leave the trigger off for every later test in the file. Re-enabled in a
+  // finally instead.
+  await db.query(`DELETE FROM trexdb.sso_provider WHERE id = $1`, [ctx.providerId]);
+  await db.query(
+    `ALTER TABLE trexdb.sso_provider DISABLE TRIGGER trg_sso_provider_mirror_provider_id`,
+  );
+  try {
+    await upsertProvider(db, parseProviderUpsert(ctx.providerId, upsertBody())!);
+    const { rows } = await db.query(
+      `SELECT "providerId" FROM trexdb.sso_provider WHERE id = $1`,
+      [ctx.providerId],
+    );
+    assertEquals(rows, [{ providerId: ctx.providerId }]);
+  } finally {
+    await db.query(
+      `ALTER TABLE trexdb.sso_provider ENABLE TRIGGER trg_sso_provider_mirror_provider_id`,
+    );
+  }
+});
+
+dbTest("an edit leaves the three link-policy columns exactly as it found them", async (db, ctx) => {
+  // The columns upsertProviderRow must NOT touch, and until this test nothing
+  // said so: a reviewer added `email_domain_allowlist = NULL,
+  // allow_elevated_auto_link = true` to the ON CONFLICT clause and every test
+  // in auth/federation/ — and the frozen wire contract — stayed green, while
+  // every PUT to /admin/federation/providers/:id silently dropped a
+  // deployment's domain restriction and opened auto-linking onto administrator
+  // accounts.
+  //
+  // This statement is the designated place a new provider column gets added,
+  // which is exactly why the omission is worth pinning here rather than
+  // anywhere else: the mistake is one line, it is invisible on the wire, and
+  // allow_elevated_auto_link is the flag deciding whether a federated identity
+  // may take over an admin account.
+  //
+  // ProviderUpsert has no field for any of the three, so there is no payload
+  // that could carry them in and no route that could put them back: an edit is
+  // the only way to lose them and there is no way to restore them but SQL.
+  await db.query(
+    `UPDATE trexdb.sso_provider
+        SET email_domain_allowlist = ARRAY['corp.test','subsidiary.test'],
+            allow_elevated_auto_link = true,
+            link_policy = 'verified_email'
+      WHERE id = $1`,
+    [ctx.providerId],
+  );
+  // A real edit, changing everything the payload CAN change, so this is not
+  // passing merely because the statement did nothing.
+  await upsertProvider(
+    db,
+    parseProviderUpsert(ctx.providerId, upsertBody({
+      clientSecret: "rotated",
+      issuer: "https://logto.internal:3001/oidc2",
+      autoProvision: true,
+      enabled: false,
+    }))!,
+  );
+  const { rows } = await db.query(
+    `SELECT email_domain_allowlist, allow_elevated_auto_link, link_policy,
+            auto_provision, enabled
+       FROM trexdb.sso_provider WHERE id = $1`,
+    [ctx.providerId],
+  );
+  assertEquals(rows, [{
+    email_domain_allowlist: ["corp.test", "subsidiary.test"],
+    allow_elevated_auto_link: true,
+    link_policy: "verified_email",
+    // The control: the two columns the payload DOES carry did change, so the
+    // three above were left alone rather than the whole statement being inert.
+    auto_provision: true,
+    enabled: false,
+  }]);
 });
 
 dbTest("an issuer that is not a URL is stored rather than refused", async (db, ctx) => {
