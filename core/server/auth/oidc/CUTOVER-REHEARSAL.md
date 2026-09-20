@@ -549,3 +549,63 @@ portal has no code path that would.
 Incidental, worth someone's attention: `trexdb.session` had **21 rows** for the
 single test user after a morning of sign-ins. Every sign-in inserts a row and
 nothing in this rehearsal removed one.
+
+## 13. The portal cannot reach the provider at all — `TREX_OIDC_INTERNAL_BASE`
+
+Step 5's checks, run in order. The token side is perfect:
+
+- access token is a **3-segment JWT**, header `{"typ":"at+jwt","alg":"RS256","kid":"kD4gt7…"}`
+- `accessTokenPayload.roles` is **populated** once the user has any:
+  `["ALP_SYSTEM_ADMIN"]`, so `OidcLoginSilent.tsx:48`'s re-login guard does not trip
+- **silent renewal works**: `grant_type=refresh_token` → 200, a fresh 3-segment
+  access token with `roles` intact, **the refresh token is rotated**, and
+  replaying the old one answers
+  `400 {"error":"invalid_grant","error_description":"invalid refresh token"}`.
+  `expires_in` is 3600, so the portal's 180 s-before-expiry renewal fires ~57
+  minutes in.
+
+And then every portal API call fails:
+
+```
+GET /d2e/usermgmt/api/user      Authorization: Bearer <that RS256 JWT>
+  -> 401 "Authentication Token not valid"
+GET /d2e/system-portal/dataset/list -> 401   GET /d2e/gateway/api/db -> 401
+trex log: [d2e-compat] verifyIdpToken: invalid token: TypeError: fetch failed
+```
+
+and so does the portal's own code exchange, repeatedly, from boot:
+
+```
+[d2e-compat] /oauth/token: exchange code
+[d2e-compat] /oauth/token: secret_present=true len=30 keys=grant_type,client_id,client_secret,resource
+[d2e-compat] /oauth/token: IdP unreachable, retrying in 500ms: fetch failed
+[d2e-compat] /oauth/token: IdP unreachable, retrying in 1000ms: fetch failed   … 2000 … 4000 …
+```
+
+**Cause.** `d2e-compat/idp.ts:77-79`:
+
+```ts
+const internalBase = env.TREX_OIDC_INTERNAL_BASE
+  ? issuerUrl(env.TREX_OIDC_INTERNAL_BASE, `${basePath}/oidc`)
+  : issuer;
+```
+
+`TREX_OIDC_INTERNAL_BASE` is **unset**, so `internalBase` falls back to the
+**public issuer** — and it is what both `jwksUri` (`:99`) and `tokenUrl`
+(`:130`) are built from. Both are therefore
+`https://localhost:41100/trex/oidc/…`, fetched **from inside the container**,
+where `localhost` is the container's own loopback (§8): `fetch failed`, every
+time, for every portal request.
+
+**This contradicts Task 12 head-on.** Its checklist says
+`TREX_OIDC_INTERNAL_BASE` is one of the variables that "have correct defaults
+for this deployment" and must NOT be set. The default is correct only where the
+container can reach the public FQDN — never on a local stack, and not on any
+install whose gateway address is not resolvable from inside the network.
+`docker-compose.yml` already computes exactly the right value for WebAPI one
+line away: `SECURITY_AUTH_OIDC_INTERNALURL: http://${PROJECT_NAME}-trex:33001/trex/oidc`.
+
+Note this is a **different** failure from the earlier `JOSEAlgNotAllowed` line
+in the same log, which came from an HS256 `sb-access-token` presented to the
+same middleware; the RS256 provider token never gets as far as an algorithm
+check, because the key set cannot be fetched.
