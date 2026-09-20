@@ -79,18 +79,38 @@ at all, so an upgraded deployment that does not add them federates fine
 up to the redirect and then fails at discovery — which reads as an upstream
 outage, not as a missing setting.
 
-Take the origins straight out of the table:
+Take the origins straight out of the table. Not just `issuer`: a row may carry
+its own `discovery_url`, and its `oidcConfig` may name an authorization, token,
+UserInfo or JWKS endpoint on a different host — an internal IdP commonly does —
+and every one of those origins is checked before it is fetched.
 
 ```sql
-SELECT DISTINCT split_part(issuer, '/', 1) || '//' || split_part(issuer, '/', 3)
-  FROM trexdb.sso_provider WHERE enabled AND issuer IS NOT NULL;
+SELECT DISTINCT regexp_replace(url, '^([a-z]+://[^/]+).*$', '\\1') AS origin
+  FROM trexdb.sso_provider p
+ CROSS JOIN LATERAL (
+   SELECT unnest(ARRAY[
+     COALESCE(p.discovery_url, rtrim(p.issuer, '/') || '/.well-known/openid-configuration'),
+     p."oidcConfig"::json ->> 'authorizationEndpoint',
+     p."oidcConfig"::json ->> 'tokenEndpoint',
+     p."oidcConfig"::json ->> 'userInfoEndpoint',
+     p."oidcConfig"::json ->> 'jwksEndpoint'
+   ]) AS url
+ ) e
+ WHERE p.enabled AND p.issuer IS NOT NULL AND url IS NOT NULL
+ ORDER BY 1;
 ```
 
 and append them, comma-separated, to whatever the variable already holds. The
-server checks this at startup and logs
+server runs the same check at startup and logs
 `[federation] MISCONFIGURED: BETTER_AUTH_TRUSTED_ORIGINS does not contain the
 issuer origin of ...`, naming each provider and the exact origin to add, so a
 missed one is visible in the boot log rather than only in a failed sign-in.
+
+One endpoint neither the query nor the startup check can see: one that exists
+**only** in the upstream's live discovery document and nowhere in the row.
+Resolving those at boot would mean every configured upstream had to be reachable
+for trex to start, which is the worse trade. If a sign-in still fails at
+discovery with every origin above listed, that is where to look.
 
 :::
 

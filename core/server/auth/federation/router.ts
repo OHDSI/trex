@@ -346,6 +346,9 @@ export function registerFederationRoutes(
   // Fired rather than awaited: registerFederationRoutes is called from index.ts
   // on the synchronous boot path, and nothing about serving the routes depends
   // on the answer. A failure to run the audit must not take the server down.
+  void auth.$context
+    .then((ctx) => warnIfStateCookieInsecure(ctx.baseURL))
+    .catch(() => {});
   void auditTrustedIssuerOrigins(pool).catch((err) => {
     console.warn(
       "[federation] could not check issuer origins against BETTER_AUTH_TRUSTED_ORIGINS:",
@@ -386,27 +389,73 @@ export async function untrustedIssuerOrigins(
     predicate = (url: string) => ctx.isTrustedOrigin(url);
   }
   const { rows } = await pool.query(
-    `SELECT id, issuer, discovery_url FROM trexdb.sso_provider
+    `SELECT id, issuer, discovery_url, "oidcConfig" FROM trexdb.sso_provider
       WHERE enabled = true AND issuer IS NOT NULL`,
   );
   const out: { id: string; url: string; origin: string }[] = [];
   for (const row of rows) {
-    // The same URL oidcConfigFor serialises as discoveryEndpoint, because that
-    // is the one the plugin fetches first and the one every later endpoint is
-    // normalised against.
-    const url = row.discovery_url ??
-      String(row.issuer).replace(/\/+$/, "") + "/.well-known/openid-configuration";
-    let origin: string;
-    try {
-      origin = new URL(url).origin;
-    } catch {
-      // A row whose issuer is not a URL is broken in a way this check is not
-      // about, and it fails loudly at its first sign-in anyway.
-      continue;
+    for (const url of checkableEndpoints(row)) {
+      let origin: string;
+      try {
+        origin = new URL(url).origin;
+      } catch {
+        // A row carrying something that is not a URL is broken in a way this
+        // check is not about, and it fails loudly at its first sign-in anyway.
+        continue;
+      }
+      if (!predicate(url)) out.push({ id: String(row.id), url, origin });
     }
-    if (!predicate(url)) out.push({ id: String(row.id), url, origin });
   }
   return out;
+}
+
+/**
+ * Every URL of a provider row whose origin the plugin will demand be trusted,
+ * as far as the row itself can say.
+ *
+ * Not just discovery. `assertServerFetchedOIDCEndpointsAllowed`
+ * (@better-auth/sso dist/index.mjs:513-521) runs the same trusted-origin test
+ * over the token, UserInfo and JWKS endpoints, and an internal IdP is perfectly
+ * entitled to publish those on a different host from the one that serves its
+ * discovery document. Auditing the discovery origin alone therefore passed such
+ * a deployment at boot and let it fail at sign-in — the exact outcome the audit
+ * exists to prevent, one endpoint further on.
+ *
+ * "As far as the row itself can say" is the honest limit and it is deliberate.
+ * An endpoint that exists only in the upstream's discovery document is not
+ * knowable here without fetching it, and making boot depend on every configured
+ * upstream being reachable would trade a silent misconfiguration for a node
+ * that will not start when somebody else's IdP is down. What IS knowable is
+ * whatever `oidcConfigFor` persisted, which for a row written through
+ * /admin/federation is the authorization endpoint and, once resolved, the JWKS
+ * endpoint.
+ */
+// deno-lint-ignore no-explicit-any
+function checkableEndpoints(row: any): string[] {
+  const urls = new Set<string>();
+  // The same URL oidcConfigFor serialises as discoveryEndpoint, because that is
+  // the one the plugin fetches first and the one every later endpoint is
+  // normalised against.
+  urls.add(
+    row.discovery_url ??
+      String(row.issuer).replace(/\/+$/, "") + "/.well-known/openid-configuration",
+  );
+  // The column is TEXT holding JSON. A row whose configuration has not been
+  // written yet, or that holds something unparseable, contributes nothing
+  // rather than throwing: this is a warning, not a gate.
+  let config: Record<string, unknown> | undefined;
+  try {
+    const raw = row.oidcConfig;
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (parsed && typeof parsed === "object") config = parsed as Record<string, unknown>;
+  } catch {
+    config = undefined;
+  }
+  for (const key of ["authorizationEndpoint", "tokenEndpoint", "userInfoEndpoint", "jwksEndpoint"]) {
+    const value = config?.[key];
+    if (typeof value === "string" && value.length > 0) urls.add(value);
+  }
+  return [...urls];
 }
 
 /** The audit above, said out loud. Separate so a test can drive either half. */
@@ -426,5 +475,53 @@ export async function auditTrustedIssuerOrigins(
       "Every federated sign-in through them will fail at discovery with a " +
       "generic 400 that looks like an upstream outage. Add these origins to " +
       `BETTER_AUTH_TRUSTED_ORIGINS (comma-separated): ${origins.join(",")}`,
+  );
+}
+
+/**
+ * What is left of warnIfInsecureBinding, moved to boot because the thing it
+ * warned about is no longer a per-request decision.
+ *
+ * The browser binding used to be trex's own cookie, named `__Host-` or not
+ * according to THIS request's scheme, with a warning the first time the weak
+ * name was issued. The binding is now the plugin's signed `state` cookie, whose
+ * Secure flag and `__Secure-` prefix come from `options.baseURL` once, at
+ * construction (better-auth cookies/index.mjs:23) — so there is nothing to
+ * decide per request and nothing to notice per request either.
+ *
+ * The failure it still catches is the same one, and it is the common one: a
+ * TLS-terminating proxy in front of a trex configured with an http issuer.
+ * Nothing about a request looks wrong, the sign-in works, and the cookie that
+ * binds the flow to the browser is one any sibling host — or anyone injecting
+ * over plaintext for one — can write.
+ *
+ * Loopback is exempt: a developer's http://localhost is not a weakened
+ * deployment, and a warning there is how an operator learns to filter the line
+ * out before it ever means anything.
+ */
+export function warnIfStateCookieInsecure(
+  baseURL: string,
+  log: (msg: string) => void = console.warn,
+): void {
+  let url: URL;
+  try {
+    url = new URL(baseURL);
+  } catch {
+    return;
+  }
+  if (url.protocol === "https:") return;
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (
+    host === "localhost" || host.endsWith(".localhost") || host === "::1" ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
+  ) return;
+  log(
+    `[federation] WARNING: the engine's base URL is ${baseURL}, which is not ` +
+      "https, so @better-auth/sso's `state` cookie is issued without Secure " +
+      "and without the __Secure- prefix. That cookie is the browser binding on " +
+      "the federated callback: without the prefix a sibling subdomain, or " +
+      "anyone injecting over plaintext for one, can write it, which weakens " +
+      "the login-CSRF protection. If TLS is terminated by a proxy, set " +
+      "TREX_OIDC_ISSUER to the https URL browsers actually use.",
   );
 }

@@ -724,9 +724,9 @@ Deno.test("the audit names every enabled provider whose issuer origin is untrust
     query: () =>
       Promise.resolve({
         rows: [
-          { id: "logto", issuer: "https://logto.example.test/oidc", discovery_url: null },
-          { id: "entra", issuer: "https://login.entra.test", discovery_url: null },
-          { id: "odd", issuer: "https://a.test", discovery_url: "https://disc.test/c" },
+          { id: "logto", issuer: "https://logto.example.test/oidc", discovery_url: null, oidcConfig: null },
+          { id: "entra", issuer: "https://login.entra.test", discovery_url: null, oidcConfig: null },
+          { id: "odd", issuer: "https://a.test", discovery_url: "https://disc.test/c", oidcConfig: null },
         ],
       }),
   };
@@ -755,12 +755,92 @@ Deno.test("the audit names every enabled provider whose issuer origin is untrust
   assertEquals(said[0].includes("logto"), false);
 });
 
+Deno.test("the audit reaches the endpoints discovery does not serve", async () => {
+  // An internal IdP may publish its token and JWKS endpoints on a different
+  // host from the one serving its discovery document, and
+  // assertServerFetchedOIDCEndpointsAllowed applies the same trusted-origin
+  // test to every one of them (dist/index.mjs:513-521). Auditing the discovery
+  // origin alone passed such a deployment at boot and let it fail at sign-in.
+  const pool = {
+    query: () =>
+      Promise.resolve({
+        rows: [{
+          id: "internal",
+          issuer: "https://idp.corp.test",
+          discovery_url: null,
+          // The shape oidcConfigFor writes: a string of JSON, not an object.
+          oidcConfig: JSON.stringify({
+            authorizationEndpoint: "https://login.corp.test/authorize",
+            jwksEndpoint: "https://keys.corp.test/jwks",
+            tokenEndpoint: "https://idp.corp.test/token",
+          }),
+        }],
+      }),
+  };
+  const { untrustedIssuerOrigins } = await import("./router.ts");
+  const trusted = (url: string) => new URL(url).origin === "https://idp.corp.test";
+  assertEquals(
+    (await untrustedIssuerOrigins(pool, trusted)).map((m: { origin: string }) => m.origin),
+    ["https://login.corp.test", "https://keys.corp.test"],
+    "discovery and the token endpoint are trusted; the other two are not and must be named",
+  );
+});
+
+Deno.test("an unwritten or unparseable oidcConfig contributes nothing rather than throwing", async () => {
+  // A provider created but not yet configured has oidcConfig NULL, and the
+  // audit is a warning rather than a gate — it must not be the reason a node
+  // fails to boot.
+  const { untrustedIssuerOrigins } = await import("./router.ts");
+  for (const oidcConfig of [null, undefined, "not json", "[]", '"a string"']) {
+    const pool = {
+      query: () =>
+        Promise.resolve({
+          rows: [{ id: "x", issuer: "https://bad.test", discovery_url: null, oidcConfig }],
+        }),
+    };
+    assertEquals(
+      (await untrustedIssuerOrigins(pool, () => false)).map((m: { url: string }) => m.url),
+      ["https://bad.test/.well-known/openid-configuration"],
+      `oidcConfig=${JSON.stringify(oidcConfig)} must leave the discovery check standing`,
+    );
+  }
+});
+
+Deno.test("a non-https base URL is announced, and a loopback one is not", async () => {
+  // warnIfInsecureBinding's successor. The binding cookie is the plugin's now
+  // and its Secure flag is decided once, from baseURL, so the warning moved
+  // from the first weak request to boot. The exempt cases matter as much as the
+  // warned one: a line that fires on every developer's machine is a line
+  // nobody reads on the deployment that needs it.
+  const { warnIfStateCookieInsecure } = await import("./router.ts");
+  const said: string[] = [];
+  const log = (m: string) => said.push(m);
+
+  for (const quiet of [
+    "https://trex.example.test/trex/oidc",
+    "http://localhost:33001/trex/oidc",
+    "http://127.0.0.1:33001/trex/oidc",
+    "http://trex.localhost/trex/oidc",
+    "not a url",
+  ]) {
+    warnIfStateCookieInsecure(quiet, log);
+    assertEquals(said, [], `${quiet} must not warn`);
+  }
+
+  warnIfStateCookieInsecure("http://trex.example.test/trex/oidc", log);
+  assertEquals(said.length, 1);
+  assertStringIncludes(said[0], "__Secure-");
+  assertStringIncludes(said[0], "TREX_OIDC_ISSUER");
+});
+
 Deno.test("the audit says nothing when every issuer origin is trusted", async () => {
   // A boot line that appeared for a correct deployment would be filtered out
   // within a week, and then the misconfigured one would be too.
   const pool = {
     query: () =>
-      Promise.resolve({ rows: [{ id: "logto", issuer: "https://ok.test", discovery_url: null }] }),
+      Promise.resolve({
+        rows: [{ id: "logto", issuer: "https://ok.test", discovery_url: null, oidcConfig: null }],
+      }),
   };
   const said: string[] = [];
   const { auditTrustedIssuerOrigins } = await import("./router.ts");
