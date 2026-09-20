@@ -79,7 +79,7 @@ export function emailDomain(email: string): string | null {
  * The domain every synthesised address sits under.
  *
  * Identical to the `placeholder_domain` constant in
- * core/schema/V17__better_auth_canonical_tables.sql, and it has to stay that
+ * core/schema/V17__better_auth.sql, and it has to stay that
  * way: V17 backfilled the users that existed when Better Auth took the tables
  * over, federation's provisionUser mints the ones that arrive afterwards, and a
  * row from either must be indistinguishable from a row from the other. It cannot be

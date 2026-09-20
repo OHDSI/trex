@@ -23,10 +23,7 @@
 import { assert, assertEquals, assertMatch } from "jsr:@std/assert";
 import { PLACEHOLDER_EMAIL_DOMAIN, placeholderLocalPart } from "./providers.ts";
 
-const V17_PATH = new URL(
-  "../../../schema/V17__better_auth_canonical_tables.sql",
-  import.meta.url,
-);
+const V17_PATH = new URL("../../../schema/V17__better_auth.sql", import.meta.url);
 
 const v17 = await Deno.readTextFile(V17_PATH);
 

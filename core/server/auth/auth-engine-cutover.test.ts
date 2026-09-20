@@ -595,7 +595,7 @@ cutoverTest("signup refuses an address the engine could never resolve", async ({
  */
 async function v17AddressExpression(): Promise<string> {
   const sql = await Deno.readTextFile(
-    new URL("../../schema/V17__better_auth_canonical_tables.sql", import.meta.url),
+    new URL("../../schema/V17__better_auth.sql", import.meta.url),
   );
   const match = sql.match(/AND email !~ '(.+)';/);
   if (!match) throw new Error("V17 no longer carries an `AND email !~ '…';` line");

@@ -4,7 +4,7 @@ sidebar_position: 2
 
 # Upgrading to the Better Auth Engine
 
-`V17__better_auth_canonical_tables.sql` hands `trexdb.user`, `session`,
+`V17__better_auth.sql` hands `trexdb.user`, `session`,
 `account` and `verification` to Better Auth, and the `/trex/auth/v1` router
 stops verifying passwords itself. See
 [Concepts → Auth & Authorization](../concepts/auth-model) for what the engine
@@ -37,10 +37,12 @@ HINT:   Better Auth validates the address before it looks a user up, so each
 
 **The refusal leaves nothing behind — if the whole file is one transaction.**
 V17 contains no explicit `BEGIN`/`COMMIT` of its own, and the check above comes
-*after* five mutating statements: the credential move into `trexdb.account`
-(`V17:13`, `V17:22`), the two `ALTER TABLE`s that add `session."impersonatedBy"`
-and `user.is_placeholder_email` (`V17:31`, `V17:38`), and the placeholder
-backfill block (`V17:41`). What discards them is the runner submitting the file
+*after* five mutating statements: the two halves of the credential move into
+`trexdb.account` (the `INSERT ... SELECT` and the `UPDATE ... SET password`),
+the two `ALTER TABLE`s that add `session."impersonatedBy"` and
+`user.is_placeholder_email`, and the placeholder backfill `DO` block. They are
+named rather than cited by line, because line numbers into a migration drift
+every time a comment is added to it. What discards them is the runner submitting the file
 as one simple query, leaving atomicity to Postgres's implicit transaction over
 it: `execute_migrations_in_schema`'s Postgres branch
 (`plugins/migration/src/lib.rs:829-845`) issues no `BEGIN` — see its comment,
@@ -55,13 +57,13 @@ row.
 > line numbers are here.
 
 **Re-running it by hand does not get that for free.** `psql -f
-core/schema/V17__better_auth_canonical_tables.sql` runs each statement in its
+core/schema/V17__better_auth.sql` runs each statement in its
 own implicit transaction, so a refusal would leave the five statements above it
 committed. Pass `--single-transaction`:
 
 ```sh
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction \
-  -f core/schema/V17__better_auth_canonical_tables.sql
+  -f core/schema/V17__better_auth.sql
 ```
 
 Fix the addresses and re-run.

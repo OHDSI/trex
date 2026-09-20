@@ -6,6 +6,11 @@
 // database at V16, seed the shapes an installation really holds, run V17 as one
 // simple query (the way the migration runner submits it), and read the result.
 //
+// V17 is the WHOLE cutover: the five phases were folded into one
+// V17__better_auth.sql, so what goes in here is what a real installation
+// applies, in one transaction, rather than the first fifth of it. schemaFiles()
+// finds it by version like any other, so nothing below had to change.
+//
 // Gated on DATABASE_URL. Creates and drops its own database per test, named
 // after the run, so it never touches the one the rest of the suite uses.
 import { assertEquals } from "jsr:@std/assert";

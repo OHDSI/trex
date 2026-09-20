@@ -87,9 +87,58 @@ function dbTest(name: string, fn: (l: NonNullable<typeof loaded>) => Promise<voi
   });
 }
 
-/** The migration under test, replayed the way core/schema is applied. */
-const MIGRATION = new URL("../../../schema/V20__sso_provider_better_auth.sql", import.meta.url);
-const V21 = new URL("../../../schema/V21__account_preserve_refresh_token.sql", import.meta.url);
+/**
+ * The migration under test, sliced out of the file it now lives in.
+ *
+ * The five phases of the cutover were folded into one V17__better_auth.sql, so
+ * the sso_provider work and the account trigger are SECTION 4 and SECTION 5 of
+ * it rather than files of their own. The tests below replay their statements
+ * against the SHARED database this suite runs on, and that is why they take a
+ * slice rather than the whole file: SECTION 1 sweeps every address in
+ * trexdb."user" — lower-casing it, re-flagging every placeholder, and raising
+ * outright on any address the engine would not accept — so replaying the whole
+ * migration here would rewrite rows belonging to every other test in the suite
+ * and could abort on one of them. The slice is exactly what each test is about.
+ *
+ * Whole-file re-runnability is a different claim and is checked where it is
+ * meaningful: against a clean database carrying nothing but the schema.
+ *
+ * Read from the file, never restated, so an edit to the migration changes what
+ * these tests replay.
+ */
+const SCHEMA = new URL("../../../schema/V17__better_auth.sql", import.meta.url);
+
+/**
+ * One `-- SECTION n —` block of the folded migration, without its banner.
+ *
+ * Fails loudly rather than silently returning the wrong text: a slice that
+ * quietly came back empty would leave every assertion below passing against a
+ * migration that never ran.
+ */
+async function section(n: number): Promise<string> {
+  const sql = await Deno.readTextFile(SCHEMA);
+  const start = sql.match(new RegExp(`^-- SECTION ${n} \\u2014.*$`, "m"));
+  if (!start) {
+    throw new Error(
+      `core/schema/V17__better_auth.sql no longer carries a "-- SECTION ${n} —" banner; ` +
+        `this test slices the migration on those banners, so re-point it rather than deleting it`,
+    );
+  }
+  const after = sql.slice(start.index! + start[0].length);
+  const end = after.search(/^-- -+\n-- SECTION \d+ /m);
+  const body = (end === -1 ? after : after.slice(0, end))
+    // Drop the rest of this section's own banner: the `-- Phase:` line and the
+    // closing rule, which are comments and would be harmless, but leaving them
+    // in would make the failure mode above indistinguishable from a hit.
+    .replace(/^-- Phase:.*\n-- -+\n/m, "");
+  if (!body.trim()) throw new Error(`SECTION ${n} of the folded migration is empty`);
+  return body;
+}
+
+/** The sso_provider migration (SECTION 4, written as V20). */
+const MIGRATION = () => section(4);
+/** The account refresh-token trigger (SECTION 5, written as V21). */
+const V21 = () => section(5);
 
 dbTest("V21 is re-runnable and does not disturb the rows already there", async ({ pool }) => {
   // The ledger refuses an edited migration (plugins/migration/src/lib.rs:340-345),
@@ -97,6 +146,10 @@ dbTest("V21 is re-runnable and does not disturb the rows already there", async (
   // fixed by adding another one. Replayed here against a database that already
   // has an account row carrying a token, because "re-runnable" on an empty
   // schema is the easy half.
+  //
+  // SECTION 5 of the folded migration, which is the part this claim is about:
+  // a CREATE OR REPLACE, a DROP ... IF EXISTS and a CREATE TRIGGER. Replaying
+  // the sections around it would touch rows this test does not own.
   const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
   const userId = `v21_${run}`;
   try {
@@ -111,7 +164,7 @@ dbTest("V21 is re-runnable and does not disturb the rows already there", async (
       [crypto.randomUUID(), userId, `v21prov_${run}`],
     );
 
-    const sql = await Deno.readTextFile(V21);
+    const sql = await V21();
     await pool.query(sql);
     await pool.query(sql);
 
@@ -264,7 +317,7 @@ dbTest("the plugin resolves a provider row by providerId", async ({ auth, pool }
   // here rather than in a manual rehearsal, because the migration runs once,
   // against that installation.
   const d2eId = `task4d_${crypto.randomUUID().replace(/-/g, "").slice(0, 11)}`;
-  const migration = await Deno.readTextFile(MIGRATION);
+  const migration = await MIGRATION();
   // The row has to be genuinely legacy-shaped — providerId, domain and
   // oidcConfig all NULL, which is what a pre-V20 database holds. The mirror
   // trigger and the NOT NULL the migration installs would otherwise fill or
@@ -444,7 +497,7 @@ dbTest("replaying the migration does not rewrite a row that already has a config
     [id],
   );
   try {
-    await pool.query(await Deno.readTextFile(MIGRATION));
+    await pool.query(await MIGRATION());
     const { rows } = await pool.query(
       `SELECT domain, "oidcConfig" FROM trexdb.sso_provider WHERE id = $1`,
       [id],
@@ -497,7 +550,7 @@ dbTest("providerId is unique, because the plugin declares it so", async ({ pool 
     // The rows have to go before the replay, or restoring the CHECK fails on
     // the very row this test created to violate it.
     await pool.query(`DELETE FROM trexdb.sso_provider WHERE id = ANY($1)`, [[a, b]]);
-    await pool.query(await Deno.readTextFile(MIGRATION));
+    await pool.query(await MIGRATION());
   }
 });
 
@@ -547,7 +600,7 @@ dbTest("the constraint guards key on the column, not on the constraint name", as
   // foreign key are both guarded on their column set instead; this drops one
   // and renames the other, replays, and asserts the migration reaches the right
   // conclusion about each.
-  const migration = await Deno.readTextFile(MIGRATION);
+  const migration = await MIGRATION();
   // The foreign key is dropped by looking it up on its column, not by its name
   // — an inline REFERENCES on ADD COLUMN produces `sso_provider_userId_fkey`
   // rather than the name the migration gives it, so a drop keyed on one name
