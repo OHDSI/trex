@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::os::raw::c_void;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use tracing::warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,7 +223,15 @@ pub fn session_execute_params_local(
     if sql_may_dirty_session(sql) {
         dirty.store(true, Ordering::Relaxed);
     }
+    let gate = match catalog_gate().enter(sql) {
+        Ok(g) => g,
+        Err(e) => {
+            return_conn(session_id, conn);
+            return Err(e);
+        }
+    };
     let result = panic::catch_unwind(AssertUnwindSafe(|| run_query(&conn, sql, params)));
+    drop(gate);
     // A failed statement can leave the leased DuckDB connection in an aborted
     // transaction; without clearing it, every later statement on this session
     // fails with "Current transaction is aborted (please ROLLBACK)". That turns
@@ -263,6 +271,138 @@ fn sql_may_dirty_session(sql: &str) -> bool {
         || upper.contains("USE ")
         || upper.contains("INSTALL")
         || upper.contains("LOAD")
+}
+
+/// Keeps `pg_clear_cache()` from running while another statement is walking
+/// an attached Postgres catalog.
+///
+/// postgres_scanner's `PostgresCatalogSet::Scan` hands out bare references to
+/// its cached entries without pinning them in the calling transaction, and
+/// `pg_clear_cache()` frees those entries. A catalog enumeration
+/// (`information_schema`, `duckdb_tables()`, `SHOW TABLES`, …) that overlaps a
+/// clear on another connection reads freed memory and DuckDB throws the
+/// INTERNAL "Unsupported type for CatalogEntry::GetInfo!" — which invalidates
+/// the whole database until the node restarts. d2e's cache flows and
+/// analytics-svc call `pg_clear_cache()` routinely, so under concurrent load
+/// this took the node down (duckdb-postgres#399, fixed upstream by #501 for
+/// DuckDB 1.5 only; the 1.4.4 build from extensions.duckdb.org still has it).
+///
+/// Only statements that enumerate the catalog take the gate. A lookup by name
+/// (`SELECT … FROM db.schema.tbl`) pins its entry and is safe, so long data
+/// copies never hold it and a clear never waits behind one. A waiting clear
+/// stops new scans from starting so a steady stream of short scans cannot
+/// starve it.
+struct CatalogGate {
+    state: Mutex<GateState>,
+    cv: Condvar,
+    clear_wait: std::time::Duration,
+}
+
+#[derive(Default)]
+struct GateState {
+    scans: usize,
+    pending_clears: usize,
+    clearing: bool,
+}
+
+/// What a statement holds while it runs. Dropping it releases the gate.
+enum GateGuard<'a> {
+    Scan(&'a CatalogGate),
+    Clear(&'a CatalogGate),
+}
+
+impl Drop for GateGuard<'_> {
+    fn drop(&mut self) {
+        let gate = match self {
+            GateGuard::Scan(g) | GateGuard::Clear(g) => *g,
+        };
+        let mut s = gate.state.lock().expect("catalog gate poisoned");
+        match self {
+            GateGuard::Scan(_) => s.scans -= 1,
+            GateGuard::Clear(_) => s.clearing = false,
+        }
+        gate.cv.notify_all();
+    }
+}
+
+impl CatalogGate {
+    fn new(clear_wait: std::time::Duration) -> Self {
+        Self {
+            state: Mutex::new(GateState::default()),
+            cv: Condvar::new(),
+            clear_wait,
+        }
+    }
+
+    /// Admit `sql`, waiting as its kind requires. `None` for statements that
+    /// neither clear nor scan the catalog. A clear that cannot get exclusive
+    /// access within `clear_wait` fails rather than risk the use-after-free.
+    fn enter(&self, sql: &str) -> Result<Option<GateGuard<'_>>, String> {
+        let lower = sql.to_lowercase();
+        if lower.contains("pg_clear_cache") {
+            let mut s = self.state.lock().expect("catalog gate poisoned");
+            s.pending_clears += 1;
+            let (mut s, timeout) = self
+                .cv
+                .wait_timeout_while(s, self.clear_wait, |s| s.clearing || s.scans > 0)
+                .expect("catalog gate poisoned");
+            s.pending_clears -= 1;
+            if timeout.timed_out() {
+                // Scans held back by this clear may proceed again.
+                self.cv.notify_all();
+                return Err(format!(
+                    "pg_clear_cache: {} catalog scan(s) still running after {:?}; not clearing \
+                     while they run (it would invalidate the database) — retry",
+                    s.scans, self.clear_wait
+                ));
+            }
+            s.clearing = true;
+            return Ok(Some(GateGuard::Clear(self)));
+        }
+        if scans_catalog(&lower) {
+            let mut s = self
+                .cv
+                .wait_while(self.state.lock().expect("catalog gate poisoned"), |s| {
+                    s.clearing || s.pending_clears > 0
+                })
+                .expect("catalog gate poisoned");
+            s.scans += 1;
+            return Ok(Some(GateGuard::Scan(self)));
+        }
+        Ok(None)
+    }
+}
+
+fn catalog_gate() -> &'static CatalogGate {
+    static GATE: OnceLock<CatalogGate> = OnceLock::new();
+    GATE.get_or_init(|| CatalogGate::new(std::time::Duration::from_secs(60)))
+}
+
+/// Coarse check, on lowercased SQL, for statements that enumerate catalog
+/// entries across every attached database. False positives only make a
+/// statement wait for a clear in progress; false negatives leave that
+/// statement exposed to the race, as it was before the gate existed.
+fn scans_catalog(lower_sql: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "information_schema",
+        "duckdb_",
+        "pg_catalog",
+        "pg_class",
+        "pg_namespace",
+        "pg_attribute",
+        "pg_attrdef",
+        "pg_tables",
+        "pg_views",
+        "pg_index",
+        "pg_constraint",
+        "pg_description",
+        "pg_type",
+        "pg_proc",
+        "show ",
+        "show\n",
+        "describe",
+    ];
+    MARKERS.iter().any(|m| lower_sql.contains(m))
 }
 
 /// Briefly take the Connection out of the SessionEntry so the SESSIONS lock
@@ -783,6 +923,89 @@ mod tests {
         ));
         assert!(!sql_may_dirty_session("COMMIT"));
         assert!(!sql_may_dirty_session("SELECT 1"));
+    }
+
+    // --- CatalogGate: pg_clear_cache() must never overlap a catalog scan ---
+
+    #[test]
+    fn scans_catalog_flags_enumerations_only() {
+        for sql in [
+            "SELECT column_name FROM information_schema.columns WHERE table_catalog = 'x'",
+            "SELECT * FROM duckdb_tables()",
+            "SHOW TABLES",
+            "show all tables",
+            "DESCRIBE",
+            "SELECT relname FROM pg_catalog.pg_class",
+            "SELECT nspname FROM pg_namespace",
+        ] {
+            assert!(scans_catalog(&sql.to_lowercase()), "expected scan for {sql:?}");
+        }
+        for sql in [
+            "SELECT COUNT(*) FROM demo__srcdb.cdm.person",
+            "INSERT INTO c.cdm.person SELECT * FROM demo__srcdb.cdm.person",
+            "BEGIN",
+            "CREATE SCHEMA IF NOT EXISTS \"c\".\"cdm\"",
+        ] {
+            assert!(!scans_catalog(&sql.to_lowercase()), "expected no scan for {sql:?}");
+        }
+    }
+
+    #[test]
+    fn catalog_gate_admits_unrelated_statements_without_a_guard() {
+        let gate = CatalogGate::new(std::time::Duration::from_secs(1));
+        assert!(gate.enter("SELECT 1").unwrap().is_none());
+        assert!(gate.enter("SELECT * FROM information_schema.tables").unwrap().is_some());
+        assert!(gate.enter("CALL pg_clear_cache();").unwrap().is_some());
+    }
+
+    #[test]
+    fn catalog_gate_clear_waits_for_running_scan() {
+        use std::sync::atomic::AtomicBool;
+        let gate = Arc::new(CatalogGate::new(std::time::Duration::from_secs(10)));
+        let scan = gate.enter("SELECT * FROM duckdb_tables()").unwrap();
+        let cleared = Arc::new(AtomicBool::new(false));
+
+        let (g, c) = (Arc::clone(&gate), Arc::clone(&cleared));
+        let clearer = std::thread::spawn(move || {
+            let _clear = g.enter("CALL pg_clear_cache()").expect("clear admitted");
+            c.store(true, Ordering::SeqCst);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!cleared.load(Ordering::SeqCst), "clear ran while a scan was in flight");
+
+        drop(scan);
+        clearer.join().unwrap();
+        assert!(cleared.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn catalog_gate_scan_waits_for_running_clear() {
+        use std::sync::atomic::AtomicBool;
+        let gate = Arc::new(CatalogGate::new(std::time::Duration::from_secs(10)));
+        let clear = gate.enter("CALL pg_clear_cache()").unwrap();
+        let scanned = Arc::new(AtomicBool::new(false));
+
+        let (g, s) = (Arc::clone(&gate), Arc::clone(&scanned));
+        let scanner = std::thread::spawn(move || {
+            let _scan = g.enter("SHOW TABLES").expect("scan admitted");
+            s.store(true, Ordering::SeqCst);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!scanned.load(Ordering::SeqCst), "scan ran during a clear");
+
+        drop(clear);
+        scanner.join().unwrap();
+        assert!(scanned.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn catalog_gate_clear_times_out_instead_of_racing_a_scan() {
+        let gate = CatalogGate::new(std::time::Duration::from_millis(50));
+        let _scan = gate.enter("SELECT * FROM information_schema.columns").unwrap();
+        let err = gate.enter("CALL pg_clear_cache()").err().expect("clear must not be admitted");
+        assert!(err.contains("pg_clear_cache"), "unexpected error: {err}");
+        // The timed-out clear must not keep holding back scans.
+        assert!(gate.enter("SHOW TABLES").unwrap().is_some());
     }
 
     // --- extract_panic_message: downcasts the three payload shapes ---
