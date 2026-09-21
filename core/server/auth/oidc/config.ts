@@ -18,7 +18,48 @@ export function issuerUrl(
   base: string | undefined = Deno.env.get("TREX_OIDC_ISSUER"),
   basePath = "",
 ): string {
-  return (base ?? "http://localhost:33001").replace(/\/+$/, "") + basePath;
+  return normalizeOrigin((base ?? "http://localhost:33001").replace(/\/+$/, "")) + basePath;
+}
+
+/**
+ * Drops a port that is already the scheme's default.
+ *
+ * `https://host:443` and `https://host` are the same origin, but they are not
+ * the same STRING — and an issuer is compared as a string. The two places that
+ * compare it disagree about which form to use:
+ *
+ * - the provider publishes `issuer` in its discovery document from
+ *   `new URL(ctx.context.baseURL).origin`, which omits a default port;
+ * - the jwt plugin stamps `iss` into every token from this value verbatim.
+ *
+ * So a deployment configured with an explicit `:443` — which is what an
+ * interpolated `https://${FQDN}:${PORT:-443}` produces, and therefore the
+ * ordinary case — issues tokens whose `iss` does not match its own discovery
+ * document. Spring Security rejects the id_token with `invalid_id_token ... The
+ * ID Token contains invalid claims: {iss=...}` and the sign-in fails; the
+ * provider's own end-session handler rejects every `id_token_hint` for the same
+ * reason, BEFORE it reaches the key set, which makes the failure look like a
+ * JWKS problem it is not. Both were measured on a real deployment.
+ *
+ * Normalising here rather than at the call sites because this function is the
+ * single place the issuer is built — `oidcIssuer()` and d2e-compat's
+ * `resolveIdpConfig` both come through it — so the value cannot drift between
+ * the token, the discovery document and the relying parties' configuration.
+ *
+ * A non-default port is left alone: `TREX_OIDC_INTERNAL_BASE` names
+ * `http://<host>:33001`, and that port is load-bearing.
+ */
+function normalizeOrigin(raw: string): string {
+  try {
+    const url = new URL(raw);
+    // `URL.origin` is what drops the default port; the path is preserved
+    // because a deployment may mount the engine under one.
+    return url.origin + url.pathname.replace(/\/+$/, "");
+  } catch {
+    // Not a URL at all. assertIssuerScheme reports that far better than a
+    // throw from here would.
+    return raw;
+  }
 }
 
 /**

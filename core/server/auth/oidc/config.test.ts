@@ -36,6 +36,38 @@ Deno.test("the issuer is taken from configuration, not from the request", () => 
   assertEquals(issuerUrl("https://example.test///", ""), "https://example.test");
 });
 
+// A default port makes `iss` differ from the provider's own discovery document,
+// which publishes the normalised origin. Spring rejects the id_token and the
+// end-session handler rejects every hint, both before any key set is consulted.
+Deno.test("a default port is dropped so `iss` matches the discovery document", () => {
+  assertEquals(
+    issuerUrl("https://example.test:443", "/trex/oidc"),
+    "https://example.test/trex/oidc",
+  );
+  // The shape an interpolated `https://${FQDN}:${PORT:-443}` actually produces.
+  assertEquals(issuerUrl("https://localhost:443", "/trex/oidc"), "https://localhost/trex/oidc");
+  assertEquals(issuerUrl("http://example.test:80", "/trex/oidc"), "http://example.test/trex/oidc");
+});
+
+// TREX_OIDC_INTERNAL_BASE names http://<host>:33001, and that port is the only
+// reason the value exists.
+Deno.test("a non-default port is preserved", () => {
+  assertEquals(
+    issuerUrl("http://alp-trex:33001", "/trex/oidc"),
+    "http://alp-trex:33001/trex/oidc",
+  );
+  assertEquals(issuerUrl("https://example.test:8443", ""), "https://example.test:8443");
+  // The default port of the OTHER scheme is not this scheme's default.
+  assertEquals(issuerUrl("https://example.test:80", ""), "https://example.test:80");
+  assertEquals(issuerUrl("http://example.test:443", ""), "http://example.test:443");
+});
+
+// Reported by assertIssuerScheme, which says what is wrong; throwing from the
+// normaliser would replace that with a TypeError.
+Deno.test("a value that is not a URL is passed through untouched", () => {
+  assertEquals(issuerUrl("not a url", "/trex/oidc"), "not a url/trex/oidc");
+});
+
 Deno.test("cookie reading picks the right value", () => {
   const header = "other=1; sb-access-token=abc.def.ghi; another=2";
   assertEquals(readCookie(header, "sb-access-token"), "abc.def.ghi");
