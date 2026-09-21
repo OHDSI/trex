@@ -289,6 +289,31 @@ async function fetchUserByEmail(email: string): Promise<DbUser | null> {
  * user model purely to be tested here. Without it a deleted account answers
  * GET /user, changes its own password and is visible to the admin block.
  */
+/**
+ * The same lookup, but a banned account is still visible.
+ *
+ * installSoftDeleteGuard (auth/oidc/mount.ts) makes `findUserById` return null
+ * for a banned user, which is right for the provider — a ban has to shut the
+ * OIDC session down — and wrong for the admin API, which is where a ban is
+ * LIFTED. With the guard in the way, `PUT /admin/users/:id {banned:false}`
+ * answered 404 for exactly the accounts it exists to reinstate, so deactivating
+ * a user was irreversible through the portal.
+ *
+ * Soft-deleted stays hidden: that is a retirement, not a state an admin toggles.
+ */
+async function fetchUserByIdIncludingBanned(id: string): Promise<DbUser | null> {
+  const adapter = await engineAdapter() as unknown as Record<string | symbol, unknown>;
+  const unguarded = adapter[Symbol.for("trex.auth.unguardedFindUserById")] as
+    | ((id: string) => Promise<unknown>)
+    | undefined;
+  const user = (unguarded
+    ? await unguarded(id)
+    : await (await engineAdapter()).findUserById(id)) as
+      | (DbUser & { deletedAt: Date | null })
+      | null;
+  return !user || user.deletedAt ? null : user;
+}
+
 async function fetchUserById(id: string): Promise<DbUser | null> {
   const user = await (await engineAdapter()).findUserById(id) as
     | (DbUser & { deletedAt: Date | null })
@@ -1594,7 +1619,8 @@ router.put("/admin/users/:id", apiLimiter, async (req, res) => {
       return;
     }
 
-    const user = await fetchUserById(req.params.id);
+    // Including banned: this is the endpoint that lifts a ban.
+    const user = await fetchUserByIdIncludingBanned(req.params.id);
     if (!user) {
       res.status(404).json({ error: "User not found" });
       return;

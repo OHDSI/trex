@@ -286,6 +286,13 @@ export function oidcHandler(): express.RequestHandler {
  */
 const GUARD_INSTALLED = Symbol.for("trex.oidc.softDeleteGuard");
 
+/**
+ * Where the guard publishes the adapter's original `findUserById`.
+ *
+ * `Symbol.for` so both sides name the same symbol without sharing an import.
+ */
+export const UNGUARDED_FIND_USER_BY_ID = Symbol.for("trex.auth.unguardedFindUserById");
+
 export async function installSoftDeleteGuard(): Promise<void> {
   const ctx = await auth.$context;
   const adapter = ctx.internalAdapter as unknown as Record<string | symbol, unknown>;
@@ -310,6 +317,14 @@ export async function installSoftDeleteGuard(): Promise<void> {
 
   const findUserById = ctx.internalAdapter.findUserById.bind(ctx.internalAdapter);
   const findSession = ctx.internalAdapter.findSession.bind(ctx.internalAdapter);
+
+  // The unguarded lookup, kept reachable for the one caller that must still see
+  // a banned account: the admin API that UNBANS it. Without this the guard is a
+  // one-way door — `PUT /admin/users/:id {banned:false}` answers 404 for
+  // precisely the users it exists to reinstate. Published under a global symbol
+  // rather than exported, so auth-router.ts can reach it without importing this
+  // module and closing an import cycle.
+  adapter[UNGUARDED_FIND_USER_BY_ID] = findUserById;
 
   adapter.findUserById = async (...args: Parameters<typeof findUserById>) => {
     const user = await findUserById(...args);
