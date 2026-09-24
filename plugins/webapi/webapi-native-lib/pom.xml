@@ -204,6 +204,37 @@
                  disable the deadlock watchdog so a slow phase isn't mistaken for a hang. -->
             <buildArg>-H:DeadlockWatchdogInterval=0</buildArg>
             <buildArg>-H:ConfigurationFileDirectories=${project.basedir}/../graalvm-config</buildArg>
+            <!-- The BigQuery JDBC driver's `all` jar relocates everything it bundles
+                 under com.google.bqjdbc.shaded (Google's gax/gRPC/Netty/protobuf; its
+                 own com.google.cloud.bigquery.jdbc API, okhttp, conscrypt and
+                 OpenTelemetry stay put). Its embedded META-INF/native-image metadata
+                 was NOT rewritten to match, so it still names the pre-shading classes.
+                 Most of that is inert: an unresolvable name in an initialize-at-*
+                 option is taken for a package prefix. A features= class that does
+                 not resolve is fatal, though, and the build died on the first one:
+
+                   Error: Feature com.google.api.gax.grpc.nativeimage.GrpcNettyFeature
+                   class not found on the classpath.
+
+                 So drop that jar's two gax properties files and re-add what they were
+                 for, under the names this artifact actually ships. The features
+                 themselves WERE relocated, and the shade plugin rewrote the class-name
+                 string constants inside them, so the relocated copies register the
+                 relocated Netty/gRPC classes correctly. Everything else the jar
+                 bundles (its netty/grpc json configs, okhttp, opentelemetry) is left
+                 alone. Revisit if upstream ships metadata matching the shaded jar. -->
+            <buildArg>--exclude-config</buildArg>
+            <buildArg>.*google-cloud-bigquery-jdbc.*\.jar</buildArg>
+            <buildArg>.*gax(-grpc)?/native-image\.properties</buildArg>
+            <buildArg>--features=com.google.bqjdbc.shaded.com.google.api.gax.grpc.nativeimage.GrpcNettyFeature,com.google.bqjdbc.shaded.com.google.api.gax.nativeimage.OpenCensusFeature,com.google.bqjdbc.shaded.com.google.api.gax.nativeimage.GoogleJsonClientFeature</buildArg>
+            <!-- Netty must not be initialized at build time (it would bake a seeded
+                 Random and platform state into the image heap). org.conscrypt is
+                 unrelocated in that jar, so it keeps its own name. -->
+            <buildArg>--initialize-at-run-time=org.conscrypt,com.google.bqjdbc.shaded.io.grpc.netty.shaded.io.netty,com.google.bqjdbc.shaded.io.grpc.netty.shaded.io.grpc.netty,com.google.bqjdbc.shaded.io.grpc.internal.RetriableStream</buildArg>
+            <buildArg>--initialize-at-build-time=com.google.bqjdbc.shaded.com.google.api.gax.core.GaxProperties,com.google.bqjdbc.shaded.com.google.common.base.Platform,com.google.bqjdbc.shaded.com.google.common.base.Platform$JdkPatternCompiler,com.google.bqjdbc.shaded.com.google.common.collect.ImmutableMapEntry,com.google.bqjdbc.shaded.com.google.common.collect.ImmutableMapEntry$NonTerminalImmutableMapEntry,com.google.bqjdbc.shaded.com.google.common.collect.RegularImmutableList,com.google.bqjdbc.shaded.com.google.common.collect.SingletonImmutableBiMap,com.google.bqjdbc.shaded.com.google.protobuf.RuntimeVersion,com.google.bqjdbc.shaded.com.google.protobuf.RuntimeVersion$RuntimeDomain</buildArg>
+            <buildArg>--enable-url-protocols=https,http</buildArg>
+            <buildArg>--add-opens=java.base/java.time=ALL-UNNAMED</buildArg>
+            <buildArg>--add-modules=jdk.httpserver</buildArg>
             <!-- BouncyCastle JCE provider for WebAPI's Jasypt source-credential encryption
                  (JASYPT_ENCRYPTOR_ENABLED uses BC's PBEWITHSHA256AND256BITAES-CBC-BC).
                  native-image refuses to use a JCE provider it didn't verify at build time
