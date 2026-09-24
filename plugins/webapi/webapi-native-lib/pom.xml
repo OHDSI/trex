@@ -81,6 +81,33 @@
       <version>${trexsql.version}</version>
     </dependency>
 
+    <!-- Google's BigQuery JDBC driver, so a BigQuery Source works in the native
+         image. WebAPI declares it in its `webapi-bigquery` profile, and a profile
+         is re-evaluated (not baked in) when WebAPI is consumed as a dependency, so
+         activating it during `mvn install` would not carry the driver through to
+         this build — it has to be declared here. Coordinates match WebAPI's profile
+         (OHDSI/WebAPI#2547, which replaced the classpath-provided Simba driver).
+
+         The `all` classifier is the shaded distribution; `*:*` excluded to match
+         WebAPI, since everything it needs is already inside that jar. It also ships
+         its own META-INF/native-image metadata for the gRPC/Netty/gax stack it
+         bundles, which native-image picks up automatically — only the driver class
+         itself is registered by hand, in graalvm-config/reflect-config.json, because
+         DataAccessConfig reaches it through Class.forName. -->
+    <dependency>
+      <groupId>com.google.cloud</groupId>
+      <artifactId>google-cloud-bigquery-jdbc</artifactId>
+      <version>1.5.0</version>
+      <classifier>all</classifier>
+      <scope>runtime</scope>
+      <exclusions>
+        <exclusion>
+          <groupId>*</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+
     <!-- @CEntryPoint compile visibility (provided; comes from WebAPI jar at runtime). -->
     <dependency>
       <groupId>org.graalvm.sdk</groupId>

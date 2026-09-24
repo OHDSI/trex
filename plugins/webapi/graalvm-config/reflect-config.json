@@ -985,6 +985,11 @@
     "allPublicConstructors": true
   },
   {
+    "name": "com.google.cloud.bigquery.jdbc.BigQueryDriver",
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
     "name": "crouton.html__init"
   },
   {
