@@ -199,7 +199,19 @@
           <buildArgs>
             <buildArg>--no-fallback</buildArg>
             <buildArg>-H:+ReportExceptionStackTraces</buildArg>
-            <buildArg>-J-Xmx8g</buildArg>
+            <!-- 8g was enough until the BigQuery JDBC driver joined the image: its
+                 `all` jar carries ~23.5k classes (a whole shaded gRPC/Netty/protobuf/
+                 guava/CEL stack), and points-to analysis over that on top of WebAPI +
+                 Spring + the Clojure runtime died at "[2/8] Performing analysis" with
+                 "GC overhead limit exceeded" on both arches.
+
+                 The job already frees disk and adds a 15G swap file for exactly this
+                 (see plugin-ci.yml: "native-image needs ~12-16 GB RAM"), and the
+                 runner reports 15.57GB, so 12g is within RAM+swap with room for the
+                 outer maven JVM and docker. Left explicit rather than removed: with
+                 no cap native-image takes 80% of RAM, which is about the same number
+                 but moves with whatever runner the job lands on. -->
+            <buildArg>-J-Xmx12g</buildArg>
             <!-- This image (WebAPI + trexsql + the whole Clojure runtime) compiles slowly;
                  disable the deadlock watchdog so a slow phase isn't mistaken for a hang. -->
             <buildArg>-H:DeadlockWatchdogInterval=0</buildArg>
