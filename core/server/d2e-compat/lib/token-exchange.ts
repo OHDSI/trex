@@ -86,6 +86,39 @@ async function redeemOneTimeCode(code: string): Promise<string | null> {
   return jwt;
 }
 
+/**
+ * Exchanges already running, keyed by token subject.
+ *
+ * WHY THIS IS NOT AN OPTIMISATION. `openidDirect` does not just mint a JWT --
+ * WebAPI rewrites the caller's roles as part of it, deleting their existing
+ * `webapi.SEC_USER_ROLE` rows and reinserting. Run two of those at once for the
+ * same user and the second deletes nothing, because the first already did:
+ *
+ *   HHH100501: Exception executing batch
+ *     StaleStateException: Batch update returned unexpected row count from
+ *     update [0]; actual row count: 0; expected: 1;
+ *     statement executed: delete from webapi.SEC_USER_ROLE ...
+ *   ObjectOptimisticLockingFailureException
+ *   [d2e-compat] Token exchange failed: 500
+ *
+ * Every /WebAPI call used to exchange for itself, so a page that fans out hit
+ * WebAPI with that many concurrent role rewrites. Atlas's data-source picker
+ * asks /vocabulary/{key}/info for every source at once: on develop that is 16
+ * parallel exchanges, one wins and the rest 500. The user sees no data sources
+ * at all, and the dataset they pick is discarded because none of them validate
+ * -- nothing that points at a role table.
+ *
+ * Sharing the in-flight promise makes those 16 into 1, which removes the race
+ * rather than narrowing it: with a single writer there is no second delete to
+ * lose. A plain result cache would NOT be enough -- the stampede happens before
+ * any call has returned, so there would be nothing cached yet to reuse.
+ *
+ * Deliberately not caching the JWT afterwards. The map holds a promise only
+ * while it is unresolved, so a later request always exchanges again and a role
+ * change takes effect on the next call, exactly as before this.
+ */
+const inflightExchanges = new Map<string, Promise<string | null>>();
+
 export async function getWebApiToken(logtoToken: string): Promise<string | null> {
   const subject = getTokenSubject(logtoToken);
   if (!subject) {
@@ -93,5 +126,20 @@ export async function getWebApiToken(logtoToken: string): Promise<string | null>
     return null;
   }
 
-  return await exchangeToken(logtoToken);
+  const running = inflightExchanges.get(subject);
+  if (running) return await running;
+
+  const exchange = exchangeToken(logtoToken).finally(() => {
+    // Cleared whatever the outcome: a failed exchange must not be latched as a
+    // rejected promise that every later caller re-throws without retrying.
+    inflightExchanges.delete(subject);
+  });
+  inflightExchanges.set(subject, exchange);
+
+  return await exchange;
+}
+
+/** Test seam: the map is module state and outlives a single test. */
+export function _resetInflightExchanges(): void {
+  inflightExchanges.clear();
 }

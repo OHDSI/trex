@@ -46,6 +46,7 @@ import { upsertDatabaseCredential } from "./db-credential.ts";
 import { decryptSecret } from "../auth/crypto.ts";
 import { type IdpConfig, resolveIdpConfig } from "./idp.ts";
 import { postToIdpToken } from "./lib/idp-token.ts";
+import { workerMemoryLimitMb, workerWallClockTimeoutMs } from "../worker-limits.ts";
 // The inverse of the decoder the provider runs on the header it receives, so
 // the two cannot disagree about RFC 6749 §2.3.1 form-url-encoding.
 import { encodeBasicCredentials } from "better-auth/oauth2";
@@ -356,8 +357,8 @@ export function mountD2eRoutes(app: Express): void {
     const webReq = await buildWebRequest(req);
 
     const createWorker = async () => {
-      const memoryLimitMb = 150;
-      const workerTimeoutMs = 5 * 60 * 1000;
+      const memoryLimitMb = workerMemoryLimitMb();
+      const workerTimeoutMs = workerWallClockTimeoutMs();
       const noModuleCache = false;
       const envVarsObj = Deno.env.toObject();
       const envVars = Object.keys(envVarsObj).map((k) => [k, envVarsObj[k]]);
