@@ -31,6 +31,7 @@ import { seedOAuthClientFromEnv } from "./auth/oidc/seed-client.ts";
 import { registerFederationRoutes } from "./auth/federation/router.ts";
 import { fnmap } from "./plugin/function.ts";
 import { apiLimiter } from "./middleware/rate-limit.ts";
+import { workerMemoryLimitMb } from "./worker-limits.ts";
 import { applyD2eCompat, applyD2eCompatEarly, assertD2eProvisioned, D2E_COMPAT, runD2eAtlasDbInit, runD2eBoot, syncD2ePlugins } from "./d2e-compat/index.ts";
 import { parseReadyPort, startBootstrapReadySignal } from "./d2e-compat/bootstrap-ready.ts";
 import { collectProvisionTargets, runProvisionTargets } from "./plugin/provision.ts";
@@ -1288,7 +1289,7 @@ async function invokeEdgeFunction(req: any, res: any) {
   const createWorker = async () => {
     const workerOpts: Record<string, unknown> = {
       servicePath,
-      memoryLimitMb: 150,
+      memoryLimitMb: workerMemoryLimitMb(),
       workerTimeoutMs: 5 * 60 * 1000,
       noModuleCache: _hotReload,
       envVars: await getSupabaseEnvVars(),
