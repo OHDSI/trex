@@ -42,3 +42,47 @@ export const workerMemoryLimitMb = (
   const n = Number(raw);
   return Number.isInteger(n) && n > 0 ? n : 512;
 };
+
+/**
+ * How long a user worker may live before the supervisor retires it.
+ *
+ * The same story as the memory ceiling, by the other trigger. trex-runtime
+ * raises a resource alert on the second wall-clock tick:
+ *
+ *   } else if state.wall_clock_alerts == 1 {
+ *     early_retire_fn();
+ *     error!("wall clock duration warning: isolate: {:?}", key);
+ *
+ * and `has_resource_alert()` counts `wall_clock_alerts == 2`, so once pending
+ * work drains the worker is dropped — reason `EarlyDrop`, exactly as for
+ * memory. At five minutes a d2e e2e run logged 46 of them, every one preceded
+ * by a wall-clock warning and none by a memory one.
+ *
+ * Each recycle leaves a window where a request arrives and no worker is ready.
+ * That is how the wizard-dashboard test fails on develop: not in the wizard at
+ * all, but on its first line, `page.goto('/d2e/portal')`, timing out after 60s
+ * because the portal had no worker at that moment.
+ *
+ * Thirty minutes keeps the limit — a worker that never ages out is how a slow
+ * leak becomes permanent — while making a recycle something that happens
+ * between runs rather than six times an hour.
+ *
+ * ZERO IS MEANINGFUL and is trex-runtime's own spelling for "no wall-clock
+ * limit" (`is_wall_clock_limit_disabled: worker_timeout_ms == 0`). It is
+ * accepted so a deployment can express that deliberately, which is why this
+ * parser admits 0 where the memory one does not.
+ */
+export const workerWallClockTimeoutMs = (
+  raw: string | undefined = Deno.env.get("TREX_WORKER_TIMEOUT_MS"),
+): number => {
+  // Blank is ABSENT, not zero. Number("") and Number("  ") are both 0, and 0
+  // here means "no wall-clock limit at all" -- so an env var that is present
+  // but empty, the ordinary result of `TREX_WORKER_TIMEOUT_MS=` in a compose
+  // file, would silently disable the limit instead of leaving the default.
+  // The memory parser cannot hit this because it requires n > 0.
+  const trimmed = (raw ?? "").trim();
+  if (trimmed === "") return 30 * 60 * 1000;
+
+  const n = Number(trimmed);
+  return Number.isInteger(n) && n >= 0 ? n : 30 * 60 * 1000;
+};

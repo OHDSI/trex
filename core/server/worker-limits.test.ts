@@ -20,3 +20,27 @@ for (const bad of ["", "   ", "abc", "0", "-1", "3.5", "512mb", "NaN", "Infinity
     assertEquals(workerMemoryLimitMb(bad), 512);
   });
 }
+
+import { workerWallClockTimeoutMs } from "./worker-limits.ts";
+
+// 46 EarlyDrops in one d2e e2e run, every one preceded by a wall-clock warning
+// and none by a memory one — so the ceiling alone would not have helped.
+Deno.test("wall-clock timeout defaults to 30 minutes, not 5", () => {
+  assertEquals(workerWallClockTimeoutMs(undefined), 30 * 60 * 1000);
+});
+
+Deno.test("an explicit wall-clock timeout wins", () => {
+  assertEquals(workerWallClockTimeoutMs("60000"), 60000);
+});
+
+// trex-runtime's own spelling for "no wall-clock limit", so it must survive the
+// parser rather than be corrected to the default.
+Deno.test("zero is accepted, because the runtime reads it as disabled", () => {
+  assertEquals(workerWallClockTimeoutMs("0"), 0);
+});
+
+for (const bad of ["", "  ", "abc", "-1", "2.5", "30m", "NaN", "Infinity"]) {
+  Deno.test(`wall-clock timeout falls back for ${JSON.stringify(bad)}`, () => {
+    assertEquals(workerWallClockTimeoutMs(bad), 30 * 60 * 1000);
+  });
+}
