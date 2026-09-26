@@ -933,6 +933,32 @@
   (let [source-key (:source-key path-params)]
     (handle-search-vocab db source-key query-params)))
 
+(def ^:private circe-temp-tables
+  "Temp tables the circe-generated SQL creates for itself.
+
+  Circe both creates and drops these, so in a run that completes they never
+  outlive the request. A run that fails part way through does not reach its own
+  trailing DROPs, and DuckDB temp tables live for the life of the CONNECTION,
+  not the request -- so on a pooled connection the leftovers are still there on
+  the next call, and every later request dies on the first CREATE:
+
+    prepare: Catalog Error: Table with name \"Codesets\" already exists!
+
+  which /cache/inclusion reports as 422 INVALID_EXPRESSION and /cache/count as
+  the same 422, blaming a cohort expression that is perfectly valid. One failed
+  request therefore breaks the endpoint until the process restarts: observed on
+  a deployment where every cohort live preview showed no counts at all.
+
+  Both handlers already drop the tables THEY create, for exactly this reason.
+  These are the ones circe owns, taken from the trailing DROP block of the SQL
+  it emits with generate-stats=true."
+  ["Codesets"
+   "qualified_events"
+   "inclusion_events"
+   "included_events"
+   "cohort_rows"
+   "final_cohort"])
+
 (defn- count-patients-handler
   [{:keys [db path-params body-params trex-config]}]
   (let [source-key (:source-key path-params)
@@ -978,7 +1004,8 @@
                   options-map (build-circe-options qualified-cdm qualified-cdm cohort-id temp-table false)
                   clj-options (circe/java-map->circe-options options-map)]
               (try
-                (db/execute! db (format "DROP TABLE IF EXISTS %s" temp-table))
+                (doseq [t (cons temp-table circe-temp-tables)]
+                  (db/execute! db (format "DROP TABLE IF EXISTS %s" t)))
                 (db/execute! db (format "CREATE TEMP TABLE %s (cohort_definition_id INT, subject_id BIGINT, cohort_start_date DATE, cohort_end_date DATE)" temp-table))
                 (let [circe-result (circe/execute-circe db expression-str clj-options)]
                   (if (:success circe-result)
@@ -1058,7 +1085,8 @@
                   censor-tbl "cohort_censor_stats"
                   options-map (build-circe-options qualified-cdm result-schema cohort-id cohort-tbl true)
                   clj-options (circe/java-map->circe-options options-map)
-                  temp-tables [cohort-tbl inc-result-tbl inc-stats-tbl summary-tbl censor-tbl]]
+                  temp-tables (into [cohort-tbl inc-result-tbl inc-stats-tbl summary-tbl censor-tbl]
+                                    circe-temp-tables)]
               (try
                 (doseq [t temp-tables]
                   (db/execute! db (format "DROP TABLE IF EXISTS %s" t)))
