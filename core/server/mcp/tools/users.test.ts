@@ -162,3 +162,48 @@ dbTest("user-create leaves an ordinary address genuine", async (db, run) => {
     unconfirmed: false,
   });
 });
+
+// ── Through createEngineUser ────────────────────────────────────────────────
+//
+// user-create now shares the engine helper with POST /admin/users, so it
+// picks up case-folding and real credential linking for free.
+
+const VALID_ROOT = btoa(String.fromCharCode(...new Uint8Array(32).map((_, i) => i)));
+
+dbTest("user-create stores the address case-folded and echoes it", async (db, run) => {
+  Deno.env.set("TREX_ROOT_KEY", VALID_ROOT);
+  const create = await userCreate();
+  const typed = `MCP-${run}@Example.COM`;
+
+  const res = await create({ name: "Jo", email: typed, password: "a-long-password" });
+  assertEquals(res.isError, undefined);
+  assertEquals(JSON.parse(res.content[0].text).email, typed.toLowerCase());
+  assertEquals((await rowsFor(db, typed.toLowerCase())).length, 1);
+});
+
+dbTest("user-create with a password signs in through the engine", async (_db, run) => {
+  Deno.env.set("TREX_ROOT_KEY", VALID_ROOT);
+  const create = await userCreate();
+  const email = `mcp-${run}@example.com`;
+  const res = await create({ name: "Jo", email, password: "a-long-password" });
+  const { id } = JSON.parse(res.content[0].text);
+
+  const { auth } = await import("../../auth/better-auth.ts");
+  const signedIn = await auth.api.signInEmail({ body: { email, password: "a-long-password" } });
+  assertEquals(signedIn.user.id, id);
+});
+
+dbTest("user-create for an address a soft-deleted row holds is an error and adds no row", async (db, run) => {
+  Deno.env.set("TREX_ROOT_KEY", VALID_ROOT);
+  const email = `mcp-${run}@example.com`;
+  await db.query(
+    `INSERT INTO trexdb."user" (id, name, email, role, "emailVerified", "deletedAt")
+     VALUES ($1, 'Old', $2, 'user', true, NOW())`,
+    [crypto.randomUUID(), email],
+  );
+  const create = await userCreate();
+  const res = await create({ name: "Jo", email, password: "a-long-password" });
+  assertEquals(res.isError, true);
+  const { rows } = await db.query(`SELECT count(*)::int AS n FROM trexdb."user" WHERE email = $1`, [email]);
+  assertEquals(rows[0].n, 1);
+});

@@ -1,8 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { pool } from "../../db.ts";
-import { hashPassword } from "../../auth/password.ts";
-import { isEngineAddressable, isPlaceholderAddress } from "../../auth/engine-address.ts";
+import { isEngineAddressable } from "../../auth/engine-address.ts";
+import { createEngineUser } from "../../auth/engine-users.ts";
 
 export function registerUserTools(server: McpServer) {
   server.tool(
@@ -101,40 +101,19 @@ export function registerUserTools(server: McpServer) {
           };
         }
 
-        const id = crypto.randomUUID();
-        const userRole = role || "user";
-        // Same rule as POST /admin/users, which this tool is the MCP twin of:
-        // an address on the placeholder domain is synthetic whoever typed it,
-        // so the row is flagged, unverified and unconfirmed rather than
-        // claiming an address nobody can receive mail at. See
-        // isPlaceholderAddress for why the domain and not the caller decides.
-        const synthetic = isPlaceholderAddress(email);
+        const created = await createEngineUser({
+          email,
+          password: password || undefined,
+          name,
+          role: role || "user",
+        });
 
-        if (password) {
-          const passwordHash = await hashPassword(password);
-          await pool.query(
-            `INSERT INTO trexdb."user" (id, name, email, role, "emailVerified", email_confirmed_at,
-                                        is_placeholder_email, password_hash)
-             VALUES ($1, $2, $3, $4, $5::boolean, CASE WHEN $5::boolean THEN NOW() END, $6::boolean, $7)`,
-            [id, name, email, userRole, !synthetic, synthetic, passwordHash],
-          );
-          // Also create account record for backward compat
-          await pool.query(
-            `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId", password)
-             VALUES ($1, $2, $2, 'credential', $3)
-             ON CONFLICT ("providerId", "accountId") DO NOTHING`,
-            [crypto.randomUUID(), id, passwordHash],
-          );
-        } else {
-          await pool.query(
-            `INSERT INTO trexdb."user" (id, name, email, role, "emailVerified", email_confirmed_at,
-                                        is_placeholder_email)
-             VALUES ($1, $2, $3, $4, $5::boolean, CASE WHEN $5::boolean THEN NOW() END, $6::boolean)`,
-            [id, name, email, userRole, !synthetic, synthetic],
-          );
-        }
-
-        return { content: [{ type: "text", text: JSON.stringify({ id, name, email, role: userRole }, null, 2) }] };
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ id: created.id, name, email: created.email, role: role || "user" }, null, 2),
+          }],
+        };
       } catch (err: any) {
         return { content: [{ type: "text", text: `Error: ${err.message}` }], isError: true };
       }
