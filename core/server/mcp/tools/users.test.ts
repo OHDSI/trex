@@ -12,6 +12,12 @@ import { assertEquals, assertStringIncludes } from "jsr:@std/assert";
 
 const dbUrl = Deno.env.get("DATABASE_URL");
 
+// user-create goes through createEngineUser, which dynamically imports
+// better-auth.ts and derives its secret from this at first use. Set once per
+// test here so the file doesn't depend on another file's tests running first
+// in the same process.
+const VALID_ROOT = btoa(String.fromCharCode(...new Uint8Array(32).map((_, i) => i)));
+
 // deno-lint-ignore no-explicit-any
 type Handler = (args: any) => Promise<any>;
 
@@ -38,6 +44,7 @@ async function withDb(fn: (db: PgTestClient, run: string) => Promise<void>) {
   const db = new Client({ connectionString: dbUrl });
   await db.connect();
   const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+  Deno.env.set("TREX_ROOT_KEY", VALID_ROOT);
   try {
     await fn(db, run);
   } finally {
@@ -168,10 +175,7 @@ dbTest("user-create leaves an ordinary address genuine", async (db, run) => {
 // user-create now shares the engine helper with POST /admin/users, so it
 // picks up case-folding and real credential linking for free.
 
-const VALID_ROOT = btoa(String.fromCharCode(...new Uint8Array(32).map((_, i) => i)));
-
 dbTest("user-create stores the address case-folded and echoes it", async (db, run) => {
-  Deno.env.set("TREX_ROOT_KEY", VALID_ROOT);
   const create = await userCreate();
   const typed = `MCP-${run}@Example.COM`;
 
@@ -182,7 +186,6 @@ dbTest("user-create stores the address case-folded and echoes it", async (db, ru
 });
 
 dbTest("user-create with a password signs in through the engine", async (_db, run) => {
-  Deno.env.set("TREX_ROOT_KEY", VALID_ROOT);
   const create = await userCreate();
   const email = `mcp-${run}@example.com`;
   const res = await create({ name: "Jo", email, password: "a-long-password" });
@@ -194,7 +197,6 @@ dbTest("user-create with a password signs in through the engine", async (_db, ru
 });
 
 dbTest("user-create for an address a soft-deleted row holds is an error and adds no row", async (db, run) => {
-  Deno.env.set("TREX_ROOT_KEY", VALID_ROOT);
   const email = `mcp-${run}@example.com`;
   await db.query(
     `INSERT INTO trexdb."user" (id, name, email, role, "emailVerified", "deletedAt")

@@ -101,17 +101,18 @@ export function registerUserTools(server: McpServer) {
           };
         }
 
+        const userRole = role || "user";
         const created = await createEngineUser({
           email,
           password: password || undefined,
           name,
-          role: role || "user",
+          role: userRole,
         });
 
         return {
           content: [{
             type: "text",
-            text: JSON.stringify({ id: created.id, name, email: created.email, role: role || "user" }, null, 2),
+            text: JSON.stringify({ id: created.id, name, email: created.email, role: userRole }, null, 2),
           }],
         };
       } catch (err: any) {
