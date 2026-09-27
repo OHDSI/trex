@@ -475,6 +475,7 @@ jobs:
                    auth/federation/placeholder-slug-parity.test.ts \
                    auth/email-case.test.ts \
                    auth/engine-users.test.ts \
+                   auth/revoke-on-retire.test.ts \
                    auth/v17-migration.test.ts \
                    auth/oidc/import-signing-key.test.ts \
                    auth/oidc/custom-claims.test.ts \

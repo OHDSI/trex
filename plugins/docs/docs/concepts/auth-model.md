@@ -158,6 +158,12 @@ Refresh tokens themselves are opaque random strings, hashed at rest. Rotation
 is mandatory — using a refresh token marks it `revoked = true` and issues a new
 one in the same session.
 
+Banning or soft-deleting a user, through any path — the GraphQL `updateUser`
+mutation, `soft_delete_user`, the federation pre-link, MCP, or plain SQL —
+revokes its refresh tokens and deletes its Better Auth sessions and OIDC
+tokens, via the `trg_user_revoke_on_retire` trigger (V22). Unbanning or
+restoring a user revokes nothing.
+
 ## The OIDC Provider
 
 Trex is also an OpenID Connect provider. Everything above is how *trex* knows
