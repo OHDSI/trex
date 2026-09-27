@@ -58,6 +58,7 @@ export function trexOAuthProvider() {
         "email",
         "email_verified",
         "name",
+        "username",
         "trex_role",
         "idp_groups",
         "idp_provider",
