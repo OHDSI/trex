@@ -148,6 +148,37 @@ test("email and name are emitted only under their own scopes", async (f) => {
   assertEquals(scoped.name, "A");
 });
 
+test("username rides the profile scope, and falls back to the address local part", async (f) => {
+  const unscoped = await mod!.claims.idTokenClaims({
+    user: user(f.withoutRoles),
+    scopes: ["openid"],
+  });
+  assertEquals("username" in unscoped, false);
+
+  const named = await mod!.claims.idTokenClaims({
+    user: user(f.withoutRoles),
+    scopes: ["openid", "profile"],
+  });
+  assertEquals(named.username, "A");
+
+  // No display name: the address local part, which is what accounts created
+  // through d2e carry (usermgmt sends only an email).
+  const unnamed = await mod!.claims.idTokenClaims({
+    user: user(f.withoutRoles, { name: null }),
+    scopes: ["openid", "profile"],
+  });
+  assertEquals(unnamed.username, "a");
+  assertEquals("name" in unnamed, false);
+});
+
+test("userinfo carries the same username as the id_token", async (f) => {
+  const info = await mod!.claims.userInfoClaims({
+    user: user(f.withoutRoles),
+    scopes: ["openid", "profile"],
+  });
+  assertEquals(info.username, "A");
+});
+
 test("idp claims are emitted only under the idp_groups scope and only for a federated session", async (f) => {
   const federated = user(f.withoutRoles, {
     app_metadata: { idp: { provider: "logto", groups: ["g1"] } },

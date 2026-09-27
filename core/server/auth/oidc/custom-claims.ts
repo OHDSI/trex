@@ -24,6 +24,23 @@ interface ClaimUser {
   app_metadata: unknown;
 }
 
+/**
+ * The account name a relying party shows, and looks for under this name.
+ *
+ * Emitted because consumers ask for `username` and, finding none, fall back to
+ * `name` on their own — Atlas3 does exactly that, and an implicit fallback is
+ * one nobody can see going wrong. Naming it makes the value explicit.
+ *
+ * NOT AN OWNERSHIP KEY. trex has no username column: this is its own display
+ * name, which for accounts created through d2e is the local part of the
+ * synthesised address (usermgmt sends only an email). d2e's usermgmt keeps the
+ * canonical account name, and the two already differ wherever that name holds
+ * an address — so a consumer matching saved work must still read usermgmt,
+ * not this claim.
+ */
+const usernameFor = (user: ClaimUser): string | undefined =>
+  user.name ?? (user.email ? user.email.split("@")[0] : undefined);
+
 export async function appRolesFor(userId: string): Promise<string[]> {
   const roles = await pool.query<{ name: string }>(
     `SELECT r.name
@@ -61,6 +78,10 @@ export async function idTokenClaims(
     claims.email_verified = Boolean(user.emailVerified);
   }
   if (scopes.has("profile") && user.name) claims.name = user.name;
+  if (scopes.has("profile")) {
+    const username = usernameFor(user);
+    if (username) claims.username = username;
+  }
 
   // Behind its own scope because group lists are large and only usermgmt needs
   // them, and gated on the provider as well so a native password login emits
@@ -141,5 +162,9 @@ export function userInfoClaims(
     claims.email_verified = Boolean(user.emailVerified);
   }
   if (scopes.has("profile") && user.name) claims.name = user.name;
+  if (scopes.has("profile")) {
+    const username = usernameFor(user);
+    if (username) claims.username = username;
+  }
   return Promise.resolve(claims);
 }
