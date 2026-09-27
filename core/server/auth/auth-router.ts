@@ -662,8 +662,6 @@ router.post("/signup", authLimiter, async (req, res) => {
       return;
     }
 
-    const userId = crypto.randomUUID();
-    const passwordHash = await hashPassword(password);
     const userName = data?.name || email.split("@")[0];
 
     // Check if this is the first user
@@ -679,17 +677,18 @@ router.post("/signup", authLimiter, async (req, res) => {
       (adminEmail && email.toLowerCase() === adminEmail.toLowerCase());
     const userRole = shouldBeAdmin ? "admin" : "user";
 
-    await pool.query(
-      `INSERT INTO trexdb."user" (id, name, email, "emailVerified", email_confirmed_at, role, password_hash, user_metadata)
-       VALUES ($1, $2, $3, true, NOW(), $4, $5, $6)`,
-      [userId, userName, email, userRole, passwordHash, JSON.stringify(data || {})],
-    );
+    const { id: userId } = await createEngineUser({
+      email,
+      password,
+      name: userName,
+      role: userRole,
+      userMetadata: data || {},
+      flagPlaceholder: false,
+    });
 
     if (shouldBeAdmin) {
       console.log(`[auth] Assigned admin role to ${email} (${isFirstUser ? "first user" : "ADMIN_EMAIL match"})`);
     }
-
-    await writeCredential(userId, passwordHash);
 
     const user = await fetchUserById(userId);
     if (!user) {
@@ -705,7 +704,7 @@ router.post("/signup", authLimiter, async (req, res) => {
     // holding an address nobody can sign in with or register again.
     const engineSession = await authenticateUser(user, password, res);
     if (!engineSession) {
-      await pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [userId]);
+      await (await engineAdapter()).deleteUser(userId);
       res.status(500).json({ error: "server_error", error_description: "Failed to create user" });
       return;
     }

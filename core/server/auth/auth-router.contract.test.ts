@@ -649,6 +649,43 @@ contractTest("POST /signup mirrors the credential into trexdb.account", async ({
   );
 });
 
+contractTest("POST /signup at the placeholder domain stays verified and unflagged", async ({ url, pool }) => {
+  const email = `contract-signup-${crypto.randomUUID().slice(0, 8)}@d2e.local`;
+  try {
+    await withSetting(pool, "auth.selfRegistration", true, async () => {
+      const res = await fetch(`${url}/signup`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password: "correct-horse" }),
+      });
+      assertEquals(res.status, 200);
+      const body = await res.json();
+      const row = await readUser(pool, body.user.id);
+      assertEquals(row.is_placeholder_email, false);
+      assertEquals(row.emailVerified, true);
+    });
+  } finally {
+    await pool.query(`DELETE FROM trexdb."user" WHERE email = $1`, [email]);
+  }
+});
+
+contractTest("POST /signup for an address a soft-deleted row holds is the 500 catch-all", async ({ url, pool }) => {
+  const retired = await createUser(pool, { softDeleted: true });
+  await withSetting(pool, "auth.selfRegistration", true, async () => {
+    const res = await fetch(`${url}/signup`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: retired.email, password: "correct-horse" }),
+    });
+    assertEquals(res.status, 500);
+    assertEquals(await res.json(), { error: "server_error", error_description: "Internal server error" });
+    const { rows } = await pool.query(
+      `SELECT count(*)::int AS n FROM trexdb."user" WHERE lower(email) = lower($1)`, [retired.email],
+    );
+    assertEquals(rows[0].n, 1);
+  });
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 2. POST /token
 // ═══════════════════════════════════════════════════════════════════════════
