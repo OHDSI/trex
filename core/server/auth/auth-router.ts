@@ -23,6 +23,7 @@ import { requireAdmin } from "./require-admin.ts";
 import { IDP_METADATA_KEY } from "./oidc/claims.ts";
 import { revokeOidcTokensForSession, revokeOidcTokensForUser } from "./oidc/revoke.ts";
 import { isEngineAddressable, isPlaceholderAddress } from "./engine-address.ts";
+import { createEngineUser, mirrorCredentialOntoUser } from "./engine-users.ts";
 // Re-exported, not merely imported. V17's twin-of comment and the parity tests
 // both name this module as where the predicate lives, and the federation admin
 // API needs the same rule without loading this router — so the definition moved
@@ -522,25 +523,6 @@ async function writePassword(
  */
 async function endEngineSessions(userId: string) {
   await pool.query(`DELETE FROM trexdb.session WHERE "userId" = $1`, [userId]);
-}
-
-/**
- * The reverse mirror: user.password_hash is the pre-V17 home of the credential
- * and is still what storedPasswordHash prefers, so a user whose password lives
- * only in account.password gets it copied back on their way through. Both
- * columns therefore hold the same value on every row this router has seen, and
- * the mirror can be dropped with the column rather than before it.
- */
-async function mirrorCredentialOntoUser(userId: string) {
-  await pool.query(
-    `UPDATE trexdb."user" u
-        SET password_hash = a.password, "updatedAt" = NOW()
-       FROM trexdb.account a
-      WHERE u.id = $1
-        AND a."userId" = u.id AND a."providerId" = 'credential'
-        AND a.password IS NOT NULL AND u.password_hash IS NULL`,
-    [userId],
-  );
 }
 
 /**
@@ -1539,47 +1521,17 @@ router.post(["/admin/create-user", "/admin/users"], apiLimiter, async (req, res)
       return;
     }
 
-    // The engine creates the user and links the credential, hashing with trex's
-    // own scrypt through better-auth.ts's hook. `data` carries the columns
-    // GoTrue's admin create is expected to set outright — an address an
-    // administrator typed is confirmed, with no verification round-trip — and
-    // the whole `data` object is kept as user_metadata, which is what the wire
-    // contract returns. app_metadata is left to V1's column default so the
-    // provider keys stay what every other row has.
-    // An address on the placeholder domain is synthetic whoever supplied it,
-    // and an administrator migrating a directory through this route rather than
-    // through PUT /federation/links creates exactly the population that made
-    // the flag matter — guessable `<username>@d2e.local` local parts, claimable
-    // by any enabled upstream that asserts one as verified. decideLink needs no
-    // auto_provision to reach {action: "link"}: an enabled provider, an
-    // upstream-asserted emailVerified, the default unset allowlist and a
-    // non-elevated target is the whole gate. So the row is marked here exactly
-    // as provisionUser marks it — flagged, unverified, unconfirmed.
-    const synthetic = isPlaceholderAddress(email);
-    const created = await (await engine()).api.createUser({
-      body: {
-        email,
-        password,
-        name: data?.name || email.split("@")[0],
-        role: data?.role || "user",
-        data: {
-          emailVerified: !synthetic,
-          // Omitted rather than nulled when synthetic: the column's default is
-          // NULL, and "confirmed at <timestamp>" on an address nobody asserted
-          // is the claim the flag exists to contradict.
-          ...(synthetic ? {} : { email_confirmed_at: new Date() }),
-          is_placeholder_email: synthetic,
-          user_metadata: data || {},
-        },
-      },
+    // The engine creates the user and links the credential; createEngineUser
+    // flags a placeholder-domain address exactly as provisionUser does.
+    const created = await createEngineUser({
+      email,
+      password,
+      name: data?.name || email.split("@")[0],
+      role: data?.role || "user",
+      userMetadata: data || {},
     });
 
-    // account.password is now the credential; this fills the pre-V17 mirror so
-    // the two columns agree from the first moment, as they do on every other
-    // path that writes a password.
-    await mirrorCredentialOntoUser(created.user.id);
-
-    const user = await fetchUserById(created.user.id);
+    const user = await fetchUserById(created.id);
     if (!user) {
       res.status(500).json({ error: "server_error", error_description: "Failed to create user" });
       return;
