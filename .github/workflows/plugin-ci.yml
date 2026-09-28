@@ -1908,6 +1908,11 @@ jobs:
               cp ./core/event/index.eszip  /out/core-event.eszip
             '
           ls -l d2e/.ci-overlay/core-*.eszip
+          # Core migrations run from the image's SCHEMA_DIR, so ship this branch's
+          # schema too — otherwise new code meets the old schema.
+          rm -rf d2e/.ci-overlay/core-schema
+          cp -a core/schema d2e/.ci-overlay/core-schema
+          ls d2e/.ci-overlay/core-schema | sort -V | tail -3
 
       # The d2e CLI's `-d ./plugins/functions` does more than name a source dir:
       # it pulls in docker-compose-local.yml, whose trex service bind-mounts
@@ -1994,6 +1999,7 @@ jobs:
                 # This branch's freshly-rebundled core (main) — so the e2e tests our core.
                 - ./.ci-overlay/core-server.eszip:/usr/src/core/server/index.eszip:ro
                 - ./.ci-overlay/core-event.eszip:/usr/src/core/event/index.eszip:ro
+                - ./.ci-overlay/core-schema:/usr/src/core/schema:ro
                 # e2e seed patch (patch-seed-for-e2e.js, run above): forces the cohort
                 # chart to group by monthOfBirth (stable screenshots) and enables
                 # atlasCohortDefinition (the cohort "Import" button). The patched file
