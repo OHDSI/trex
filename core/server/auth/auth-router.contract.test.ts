@@ -963,6 +963,9 @@ contractTest("POST /change-password judges the account credential over a stale l
     await tokenFor(user),
   );
   assertEquals(await res.json(), { success: true });
+  // The stale legacy hash must not survive the change: a rolled-back node
+  // reading it would otherwise still accept the superseded password.
+  assertEquals((await readUser(pool, user.id)).password_hash, null);
 });
 
 contractTest("POST /token refresh grant is 400 invalid_grant without a token", async ({ url }) => {

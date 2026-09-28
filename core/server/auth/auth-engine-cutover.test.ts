@@ -324,17 +324,17 @@ for (const { name, write } of PASSWORD_WRITES) {
     const admin = await createLegacyUser(pool, { role: "admin" });
     const user = await createLegacyUser(pool);
     assertEquals(await credential(pool, user.id), null);
-    const legacyHashBefore = await storedHash(pool, user.id);
 
     const next = "a-brand-new-password";
     const res = await write(url, user, await bearer(admin), next);
     assertEquals(res.status, 200);
     await res.text();
 
-    // account.password is the only column this write touches; the legacy
-    // column is untouched, not mirrored onto.
+    // account.password is the only column a write lands on; the legacy
+    // column is cleared, not mirrored onto, so a rolled-back node cannot
+    // still accept the superseded password.
     assertNotEquals(await credential(pool, user.id), null);
-    assertEquals(await storedHash(pool, user.id), legacyHashBefore);
+    assertEquals(await storedHash(pool, user.id), null);
     assertEquals((await grant(url, user.email, PASSWORD)).status, 400);
     const signedIn = await grant(url, user.email, next);
     assertEquals(signedIn.status, 200);

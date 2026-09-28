@@ -323,7 +323,8 @@ async function fetchUserById(id: string): Promise<DbUser | null> {
   return !user || user.deletedAt ? null : user;
 }
 
-// account.password is canonical; user.password_hash is read only until V23 drops it.
+// account.password is canonical; user.password_hash is read only, slated for
+// removal in a follow-up migration (V23).
 async function storedPasswordHash(userId: string, legacyHash: string | null): Promise<string | null> {
   const result = await pool.query(
     `SELECT password FROM trexdb.account WHERE "userId" = $1 AND "providerId" = 'credential'`,
@@ -511,9 +512,8 @@ async function canonicaliseLoginAddress(user: DbUser): Promise<string> {
  * own failure is re-thrown, so a scrypt or database failure reaches the route's
  * error handler as a 500 instead of being answered as a wrong password.
  *
- * This is the account.password side of the split documented on
- * storedPasswordHash: a sign-in reads that column and no other, which is why
- * /change-password does not go through here.
+ * A sign-in reads account.password only, via the engine itself — unlike
+ * storedPasswordHash, which /change-password calls directly.
  */
 async function authenticateUser(
   user: DbUser,
@@ -1069,9 +1069,13 @@ router.put("/user", apiLimiter, async (req, res) => {
         return;
       }
       newHash = await hashPassword(password);
+      // A change lands only on account.password; the legacy column must not
+      // go on holding a superseded password an old or rolled-back node would
+      // still accept.
+      updates.push(`password_hash = NULL`);
     }
 
-    if (updates.length > 0 || newHash) {
+    if (updates.length > 0) {
       updates.push(`"updatedAt" = NOW()`);
       values.push(claims.sub);
       const update = `UPDATE trexdb."user" SET ${updates.join(", ")} WHERE id = $${paramIdx}`;
@@ -1204,13 +1208,9 @@ router.post("/change-password", apiLimiter, async (req, res) => {
     // leaving it verifying against the old one and answering "Current password
     // is incorrect" to everybody.
     //
-    // NOT authenticateUser, deliberately. That signs in, and a sign-in reads
-    // account.password alone, so it would refuse an account whose password
-    // reached only user.password_hash — the state a node that has not restarted
-    // into the V17 code still writes, and the one the wire contract pins this
-    // route to accept. The resolution order above is trex's answer to which of
-    // the two columns holds the password; the engine's answer is what verifies
-    // it.
+    // NOT authenticateUser, deliberately: that signs in through the engine,
+    // which reads account.password alone, whereas storedPasswordHash also
+    // falls back to the legacy column.
     const { password: credential } = await engineContext();
     if (!(await credential.verify({ hash: storedHash, password: currentPassword }))) {
       res.status(400).json({ error: "Current password is incorrect" });
@@ -1219,7 +1219,7 @@ router.post("/change-password", apiLimiter, async (req, res) => {
 
     const newHash = await hashPassword(newPassword);
     await writePassword(user.id, newHash, (db) =>
-      db.query(`UPDATE trexdb."user" SET "updatedAt" = NOW() WHERE id = $1`, [user.id]));
+      db.query(`UPDATE trexdb."user" SET password_hash = NULL, "updatedAt" = NOW() WHERE id = $1`, [user.id]));
 
     // Revoke all outstanding refresh tokens so a stolen token doesn't survive
     // a password change — and the engine session with them, for the same
@@ -1500,7 +1500,7 @@ router.put("/admin/users/:id", apiLimiter, async (req, res) => {
     if (password !== undefined) {
       const newHash = await hashPassword(password);
       await writePassword(user.id, newHash, (db) =>
-        db.query(`UPDATE trexdb."user" SET "updatedAt" = NOW() WHERE id = $1`, [user.id]));
+        db.query(`UPDATE trexdb."user" SET password_hash = NULL, "updatedAt" = NOW() WHERE id = $1`, [user.id]));
     }
 
     if (banned !== undefined) {
