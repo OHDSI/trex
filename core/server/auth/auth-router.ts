@@ -84,6 +84,21 @@ function toGoTrueUser(u: DbUser) {
   };
 }
 
+/**
+ * True for the FK violation createTokenResponse's INSERT raises when the
+ * engine session it was told to link (a carried-forward session_id) was
+ * deleted between the refresh token's revocation and this insert — a
+ * /revoke-session or ban race. Exported for its unit test; a deterministic
+ * integration test would need to delete the session mid-request.
+ */
+export function isEngineSessionGone(err: unknown): boolean {
+  return (
+    typeof err === "object" && err !== null &&
+    (err as { code?: string }).code === "23503" &&
+    (err as { constraint?: string }).constraint === "refresh_token_engine_session_id_fkey"
+  );
+}
+
 // Exported for the federation callback, which finishes an upstream sign-in by
 // issuing the very same session this grant issues.
 export async function createTokenResponse(user: DbUser, sessionId?: string, res?: any, engineSessionId: string | null = null) {
@@ -415,7 +430,7 @@ async function writePassword(
 }
 
 // Direct adapter call: auth.api.revokeUserSessions demands an admin *session*, which these callers lack.
-// Sufficient only while better-auth.ts configures no secondaryStorage or cookie cache.
+// Sufficient only while better-auth.ts configures no session cookie cache.
 async function endEngineSessions(userId: string) {
   await (await engineAdapter()).deleteUserSessions(userId);
 }
@@ -768,7 +783,19 @@ async function handleRefreshGrant(req: any, res: any) {
     const engineSessionId = req.headers?.cookie
       ? await attachEngineSessionCookie(user.id, req, res)
       : previousEngineSession;
-    const response = await createTokenResponse(user, sessionId, res, engineSessionId);
+    let response;
+    try {
+      response = await createTokenResponse(user, sessionId, res, engineSessionId);
+    } catch (err) {
+      // The old token is already revoked above; answering the same refusal it
+      // would have gotten if it had lost that race a moment earlier — not a
+      // retry with engine_session_id = NULL, which would reopen it.
+      if (isEngineSessionGone(err)) {
+        res.status(400).json({ error: "invalid_grant", error_description: "Invalid or revoked refresh token" });
+        return;
+      }
+      throw err;
+    }
     res.json(response);
   } catch (err) {
     console.error("[auth] refresh grant error:", err);

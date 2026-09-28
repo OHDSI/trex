@@ -4,7 +4,7 @@
 
 CREATE OR REPLACE FUNCTION trexdb.revoke_credentials_on_retire() RETURNS TRIGGER AS $$
 BEGIN
-  -- OIDC rows first: their "sessionId" FK is ON DELETE SET NULL.
+  -- OIDC rows first only to avoid needless SET NULL writes on rows about to be deleted.
   DELETE FROM trexdb."oauthRefreshToken" WHERE "userId" = NEW.id;
   DELETE FROM trexdb."oauthAccessToken" WHERE "userId" = NEW.id;
   DELETE FROM trexdb.session WHERE "userId" = NEW.id;

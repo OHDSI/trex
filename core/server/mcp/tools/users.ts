@@ -87,8 +87,7 @@ export function registerUserTools(server: McpServer) {
         // before it looks anybody up, so the account would exist, look created,
         // and only ever be told its credentials are invalid.
         //
-        // Refused before either INSERT, so a rejected call writes nothing at
-        // all, not even the credential-less half.
+        // Refused before the engine creates anything.
         if (!isEngineAddressable(email)) {
           return {
             content: [{
