@@ -414,33 +414,10 @@ async function writePassword(
   }
 }
 
-/**
- * End every Better Auth session this user holds.
- *
- * Engine sessions were being created on every sign-in and destroyed in exactly
- * one place — /logout. Everything else that invalidates a user revoked
- * trexdb.refresh_token and stopped there, so an administrator banning an
- * account left its engine session live until its own TTL. That is not a
- * cosmetic gap: the engine session is a credential in its own right (the
- * cookie authenticateUser hands back), and phase 2's /oauth2/authorize
- * authenticates against it and nothing else. A ban that leaves it standing is
- * a ban the OAuth provider does not honour.
- *
- * A DELETE rather than auth.api.revokeUserSessions, and the reason is not
- * preference: that endpoint sits behind adminMiddleware, which resolves the
- * CALLER's session and throws UNAUTHORIZED when there is none. These call sites
- * have already run trex's own requireAdmin and have no engine session to
- * present, so the endpoint would 401 every time. This is the statement it would
- * have run — better-auth's internalAdapter.deleteUserSessions is the same
- * DELETE — and trexdb.session is trex's own table since V17.
- *
- * Authoritative because better-auth.ts configures no session cookie cache and
- * no secondary storage: the engine re-reads this row on every request, so the
- * row going away is the session going away. Adding either of those would make
- * this insufficient.
- */
+// Direct adapter call: auth.api.revokeUserSessions demands an admin *session*, which these callers lack.
+// Sufficient only while better-auth.ts configures no secondaryStorage or cookie cache.
 async function endEngineSessions(userId: string) {
-  await pool.query(`DELETE FROM trexdb.session WHERE "userId" = $1`, [userId]);
+  await (await engineAdapter()).deleteUserSessions(userId);
 }
 
 // OIDC tokens first: oauthRefreshToken."sessionId" is ON DELETE SET NULL.
