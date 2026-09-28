@@ -1,5 +1,5 @@
 // plugins/claw/agent/lib/code-session.test.ts
-import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "jsr:@std/assert";
 import { FakeTime } from "jsr:@std/testing/time";
 import { attachCodeStream, CODE_BASE, reattachCodeTurn, resolveCodeApproval, runCodeTurn, type TokioClient } from "./code-session.ts";
 
@@ -677,4 +677,72 @@ Deno.test("a non-404 continue failure still fails the turn — only a gone sessi
     Error,
     "code continue failed: 500",
   );
+});
+
+// ---------------------------------------------------------------------------
+// The coder's HTTP failures must carry the SERVER's explanation, not just a
+// status code. The plugin route already sends one — function.ts's catch-all
+// answers `{"msg": "<the error>"}` with its 500 — and these three throws used
+// to drop it, so a real outage read as a bare "500" in the channel.
+//
+// That cost eleven days: every coding hand-off failed with "coding-session
+// creation returns server error 500" while the actual cause (an agent whose
+// module graph could not resolve) sat in the server log, invisible to anyone
+// reading the thread. The body said exactly which module was missing.
+// ---------------------------------------------------------------------------
+
+Deno.test("a failed session create reports the server's message, not just the status", async () => {
+  const boom = new Response(
+    JSON.stringify({ msg: 'Module not found: file:///core/server/agents/service/context/hook-output.ts' }),
+    { status: 500 },
+  );
+  const { client } = fakeClient([boom]);
+  const err = await assertRejects(() => runCodeTurn(client, { message: "go", startCursor: 0 }), Error);
+  assertStringIncludes(err.message, "code create failed: 500");
+  assertStringIncludes(err.message, "hook-output.ts");
+});
+
+Deno.test("a failed continue reports the server's message", async () => {
+  const boom = new Response(JSON.stringify({ msg: "worker boot error: failed to bootstrap runtime" }), { status: 500 });
+  const { client } = fakeClient([boom]);
+  const err = await assertRejects(
+    () => runCodeTurn(client, { codeSessionId: "code-1", message: "go", startCursor: 1 }),
+    Error,
+  );
+  assertStringIncludes(err.message, "code continue failed: 500");
+  assertStringIncludes(err.message, "failed to bootstrap runtime");
+});
+
+Deno.test("a failed stream attach reports the server's message", async () => {
+  const ok = new Response(JSON.stringify({ sessionId: "code-1" }), { status: 201 });
+  const boom = new Response(JSON.stringify({ msg: "stream gone" }), { status: 503 });
+  const { client } = fakeClient([ok, boom]);
+  const err = await assertRejects(() => runCodeTurn(client, { message: "go", startCursor: 0 }), Error);
+  assertStringIncludes(err.message, "code stream failed: 503");
+  assertStringIncludes(err.message, "stream gone");
+});
+
+// A body that cannot be read must never replace the status with a read error:
+// the status is the fact we are certain of, and losing it would make a
+// diagnosable failure undiagnosable — the very thing this change fixes.
+Deno.test("an unreadable error body still yields the status", async () => {
+  const unreadable = new Response(null, { status: 502 });
+  Object.defineProperty(unreadable, "text", {
+    value: () => Promise.reject(new Error("connection reset while reading body")),
+  });
+  const { client } = fakeClient([unreadable]);
+  const err = await assertRejects(() => runCodeTurn(client, { message: "go", startCursor: 0 }), Error);
+  assertStringIncludes(err.message, "code create failed: 502");
+  // The read failure is swallowed, not surfaced as if it were the server's reply.
+  assert(!err.message.includes("connection reset"), `leaked the body-read error: ${err.message}`);
+});
+
+// The body rides into a chat channel, so it is capped. An agent stack trace can
+// run to thousands of characters and would otherwise bury the reply.
+Deno.test("an oversized error body is truncated", async () => {
+  const huge = new Response(JSON.stringify({ msg: "E".repeat(5000) }), { status: 500 });
+  const { client } = fakeClient([huge]);
+  const err = await assertRejects(() => runCodeTurn(client, { message: "go", startCursor: 0 }), Error);
+  assertStringIncludes(err.message, "code create failed: 500");
+  assert(err.message.length < 1200, `error message not capped: ${err.message.length} chars`);
 });
