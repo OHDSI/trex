@@ -327,7 +327,7 @@ export function registerFederationRoutes(
       if (!rows.length) {
         throw new Error("federated user is gone or deactivated between link and session");
       }
-      await createTokenResponse(rows[0], undefined, res);
+      await createTokenResponse(rows[0], undefined, res, session.session.id);
       res.redirect(302, location);
     } catch (err) {
       // One generic code covers every failure of the exchange; an upstream URL,

@@ -164,6 +164,11 @@ revokes its refresh tokens and deletes its Better Auth sessions and OIDC
 tokens, via the `trg_user_revoke_on_retire` trigger (V22). Unbanning or
 restoring a user revokes nothing.
 
+Each refresh-token session also records the Better Auth session issued
+alongside it (`refresh_token.engine_session_id`, V22). `/revoke-session` and a
+bearer-only `/logout` end that one engine session and its OIDC tokens too,
+instead of leaving them live.
+
 ## The OIDC Provider
 
 Trex is also an OpenID Connect provider. Everything above is how *trex* knows

@@ -2554,3 +2554,78 @@ contractTest(
     );
   },
 );
+
+async function engineSession(userId: string): Promise<string> {
+  const { auth } = await import("./better-auth.ts");
+  const ctx = await auth.$context;
+  return (await ctx.internalAdapter.createSession(userId)).id;
+}
+
+contractTest("POST /token password grant links its refresh token to the engine session", async ({ url, pool }) => {
+  const user = await createUser(pool);
+  const res = await fetch(`${url}/token?grant_type=password`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: user.email, password: user.password }),
+  });
+  assertEquals(res.status, 200);
+  const { refresh_token } = await res.json();
+  const row = await refreshTokenRow(pool, refresh_token);
+  assertNotEquals(row.engine_session_id, null);
+  const { rows } = await pool.query(`SELECT "userId" FROM trexdb.session WHERE id = $1`, [row.engine_session_id]);
+  assertEquals(rows[0].userId, user.id);
+});
+
+contractTest("POST /token refresh grant without cookies carries the engine session forward", async ({ url, pool }) => {
+  const user = await createUser(pool);
+  const sid = crypto.randomUUID();
+  const engineId = await engineSession(user.id);
+  const { token } = await insertRefreshToken(pool, user.id, sid);
+  await pool.query(`UPDATE trexdb.refresh_token SET engine_session_id = $1 WHERE session_id = $2`, [engineId, sid]);
+  const before = (await pool.query(`SELECT count(*)::int AS n FROM trexdb.session WHERE "userId" = $1`, [user.id])).rows[0].n;
+
+  const res = await fetch(`${url}/token?grant_type=refresh_token`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ refresh_token: token }),
+  });
+  assertEquals(res.status, 200);
+  const rotated = await refreshTokenRow(pool, (await res.json()).refresh_token);
+  assertEquals(rotated.engine_session_id, engineId);
+  const after = (await pool.query(`SELECT count(*)::int AS n FROM trexdb.session WHERE "userId" = $1`, [user.id])).rows[0].n;
+  assertEquals(after, before);
+});
+
+contractTest("POST /revoke-session also ends the linked engine session and nothing else", async ({ url, pool }) => {
+  const user = await createUser(pool);
+  const sid = crypto.randomUUID();
+  const linked = await engineSession(user.id);
+  const other = await engineSession(user.id);
+  await insertRefreshToken(pool, user.id, sid);
+  await pool.query(`UPDATE trexdb.refresh_token SET engine_session_id = $1 WHERE session_id = $2`, [linked, sid]);
+
+  const res = await fetch(`${url}/revoke-session`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${await tokenFor(user)}` },
+    body: JSON.stringify({ session_id: sid }),
+  });
+  assertEquals(await res.json(), { success: true });
+  const { rows } = await pool.query(`SELECT id FROM trexdb.session WHERE "userId" = $1 ORDER BY id`, [user.id]);
+  assertEquals(rows.map((r: Json) => r.id), [other]);
+});
+
+contractTest("POST /logout with only a bearer ends the linked engine session", async ({ url, pool }) => {
+  const user = await createUser(pool);
+  const sid = crypto.randomUUID();
+  const linked = await engineSession(user.id);
+  await insertRefreshToken(pool, user.id, sid);
+  await pool.query(`UPDATE trexdb.refresh_token SET engine_session_id = $1 WHERE session_id = $2`, [linked, sid]);
+
+  const res = await fetch(`${url}/logout`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${await tokenFor(user, sid)}` },
+  });
+  assertEquals(res.status, 204);
+  const { rows } = await pool.query(`SELECT 1 FROM trexdb.session WHERE id = $1`, [linked]);
+  assertEquals(rows.length, 0);
+});

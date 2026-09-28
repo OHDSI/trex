@@ -86,7 +86,7 @@ function toGoTrueUser(u: DbUser) {
 
 // Exported for the federation callback, which finishes an upstream sign-in by
 // issuing the very same session this grant issues.
-export async function createTokenResponse(user: DbUser, sessionId?: string, res?: any) {
+export async function createTokenResponse(user: DbUser, sessionId?: string, res?: any, engineSessionId: string | null = null) {
   const sid = sessionId || crypto.randomUUID();
   const accessToken = await signAccessToken(
     {
@@ -106,8 +106,8 @@ export async function createTokenResponse(user: DbUser, sessionId?: string, res?
   const tokenHash = await hashRefreshToken(refreshToken);
 
   await pool.query(
-    `INSERT INTO trexdb.refresh_token (token_hash, "userId", session_id) VALUES ($1, $2, $3)`,
-    [tokenHash, user.id, sid],
+    `INSERT INTO trexdb.refresh_token (token_hash, "userId", session_id, engine_session_id) VALUES ($1, $2, $3, $4)`,
+    [tokenHash, user.id, sid, engineSessionId],
   );
 
   const expiresAt = Math.floor(Date.now() / 1000) + 3600;
@@ -209,7 +209,7 @@ export async function attachEngineSessionCookie(
   req: any,
   // deno-lint-ignore no-explicit-any
   res: any,
-): Promise<void> {
+): Promise<string> {
   const auth = await engine();
   const context = await auth.$context;
 
@@ -228,7 +228,7 @@ export async function attachEngineSessionCookie(
       // its original seventh day, the next call minted a fresh row beside the
       // slid one, and nothing in the tree reaps either.
       for (const cookie of live.headers.getSetCookie()) res.append("Set-Cookie", cookie);
-      return;
+      return live.response.session.id;
     }
   }
 
@@ -243,6 +243,7 @@ export async function attachEngineSessionCookie(
     // Better Auth counts maxAge in seconds; express counts it in milliseconds.
     maxAge: attributes.maxAge === undefined ? undefined : attributes.maxAge * 1000,
   });
+  return session.id;
 }
 
 /**
@@ -525,6 +526,19 @@ async function endEngineSessions(userId: string) {
   await pool.query(`DELETE FROM trexdb.session WHERE "userId" = $1`, [userId]);
 }
 
+// OIDC tokens first: oauthRefreshToken."sessionId" is ON DELETE SET NULL.
+async function endLinkedEngineSessions(userId: string, sessionId: string) {
+  const { rows } = await pool.query(
+    `SELECT DISTINCT engine_session_id FROM trexdb.refresh_token
+      WHERE "userId" = $1 AND session_id = $2 AND engine_session_id IS NOT NULL`,
+    [userId, sessionId],
+  );
+  for (const { engine_session_id: id } of rows) {
+    await revokeOidcTokensForSession(id);
+    await pool.query(`DELETE FROM trexdb.session WHERE id = $1 AND "userId" = $2`, [id, userId]);
+  }
+}
+
 /**
  * Better Auth looks a user up by exact equality against the address it has
  * lower-cased, and lower-cases every address it writes itself, so a stored
@@ -590,7 +604,7 @@ async function authenticateUser(
   password: string,
   // deno-lint-ignore no-explicit-any
   res?: any,
-): Promise<{ userId: string; sessionToken: string } | null> {
+): Promise<{ userId: string; sessionToken: string; engineSessionId: string | null } | null> {
   const email = await canonicaliseLoginAddress(user);
   await adoptLegacyCredential(user);
 
@@ -607,8 +621,9 @@ async function authenticateUser(
   if (res) {
     for (const cookie of signedIn.headers.getSetCookie()) res.append("Set-Cookie", cookie);
   }
+  const found = await (await engineAdapter()).findSession(signedIn.response.token);
   await mirrorCredentialOntoUser(user.id);
-  return { userId: user.id, sessionToken: signedIn.response.token };
+  return { userId: user.id, sessionToken: signedIn.response.token, engineSessionId: found?.session.id ?? null };
 }
 
 // ── POST /signup ─────────────────────────────────────────────────────────────
@@ -709,7 +724,7 @@ router.post("/signup", authLimiter, async (req, res) => {
       return;
     }
 
-    const response = await createTokenResponse(user, undefined, res);
+    const response = await createTokenResponse(user, undefined, res, engineSession.engineSessionId);
 
     // Update last_sign_in_at
     await pool.query(
@@ -775,7 +790,8 @@ async function handlePasswordGrant(req: any, res: any) {
     // Deliberately not distinguishing an account with no password from a wrong
     // one, and deliberately not Better Auth's 401 INVALID_EMAIL_OR_PASSWORD:
     // the wire contract here is GoTrue's 400 invalid_grant.
-    if (!await authenticateUser(user, password, res)) {
+    const signedIn = await authenticateUser(user, password, res);
+    if (!signedIn) {
       res.status(400).json({ error: "invalid_grant", error_description: "Invalid login credentials" });
       return;
     }
@@ -797,7 +813,7 @@ async function handlePasswordGrant(req: any, res: any) {
     // carry the block that no longer exists.
     if (user.app_metadata) delete user.app_metadata[IDP_METADATA_KEY];
 
-    res.json(await createTokenResponse(user, undefined, res));
+    res.json(await createTokenResponse(user, undefined, res, signedIn.engineSessionId));
   } catch (err) {
     console.error("[auth] password grant error:", err);
     res.status(500).json({ error: "server_error", error_description: "Internal server error" });
@@ -819,7 +835,7 @@ async function handleRefreshGrant(req: any, res: any) {
     const result = await pool.query(
       `UPDATE trexdb.refresh_token SET revoked = true, "updatedAt" = NOW()
        WHERE token_hash = $1 AND revoked = false
-       RETURNING "userId", session_id, "createdAt"`,
+       RETURNING "userId", session_id, "createdAt", engine_session_id`,
       [tokenHash],
     );
 
@@ -828,7 +844,7 @@ async function handleRefreshGrant(req: any, res: any) {
       return;
     }
 
-    const { userId, session_id: sessionId, createdAt } = result.rows[0];
+    const { userId, session_id: sessionId, createdAt, engine_session_id: previousEngineSession } = result.rows[0];
 
     // Enforce an absolute lifetime: rotation alone lets a leaked-but-unused
     // token be redeemed indefinitely. The row was just revoked above, so an
@@ -844,7 +860,6 @@ async function handleRefreshGrant(req: any, res: any) {
       return;
     }
 
-    const response = await createTokenResponse(user, sessionId, res);
     // A refresh completes an authentication, and until now it was the last
     // route that completed one with sb-access-token alone. That matters on a
     // clock: Better Auth's session cookie lives seven days and trex's refresh
@@ -858,7 +873,10 @@ async function handleRefreshGrant(req: any, res: any) {
     // for thirty days would leave several hundred of them and nothing reaps
     // them. A browser whose engine cookie has expired still sends
     // sb-access-token, so the case this exists for is not the case it skips.
-    if (req.headers?.cookie) await attachEngineSessionCookie(user.id, req, res);
+    const engineSessionId = req.headers?.cookie
+      ? await attachEngineSessionCookie(user.id, req, res)
+      : previousEngineSession;
+    const response = await createTokenResponse(user, sessionId, res, engineSessionId);
     res.json(response);
   } catch (err) {
     console.error("[auth] refresh grant error:", err);
@@ -991,6 +1009,7 @@ router.post("/logout", apiLimiter, async (req, res) => {
     const token = authHeader.slice(7);
     const claims = await verifyAccessToken(token);
     if (claims?.session_id) {
+      await endLinkedEngineSessions(claims.sub, claims.session_id);
       // Revoke all refresh tokens for this session
       await pool.query(
         `UPDATE trexdb.refresh_token SET revoked = true, "updatedAt" = NOW()
@@ -1378,17 +1397,8 @@ router.post("/revoke-session", apiLimiter, async (req, res) => {
       return;
     }
 
-    // Deliberately NOT paired with endEngineSessions, and — since the cutover
-    // — not with revokeOidcTokensForSession either. Both would need an engine
-    // session to name, and `session_id` here is trex's own: the value minted
-    // with a refresh token and carried in the access token, with no column
-    // anywhere tying it to a row in trexdb.session or to
-    // oauthRefreshToken."sessionId". So there is nothing to scope either
-    // revocation to, and doing it by user would mean signing the caller out of
-    // every device to honour a request to sign out of one. The narrower wrong
-    // answer is the better one until the two session concepts are actually
-    // joined; mcp/tools/sessions.ts's session-revoke, which DOES hold an engine
-    // session id, is what that looks like when the id is available.
+    // Only the engine session issued with this session_id; other devices stay signed in.
+    await endLinkedEngineSessions(claims.sub, targetSessionId);
     await pool.query(
       `UPDATE trexdb.refresh_token SET revoked = true, "updatedAt" = NOW()
        WHERE "userId" = $1 AND session_id = $2 AND revoked = false`,
