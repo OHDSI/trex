@@ -151,6 +151,42 @@ async function getPendingApproval(
   }
 }
 
+// What the server said, appended to a status-code error so the channel sees a
+// cause rather than a number. The plugin route's catch-all already sends one
+// (function.ts: `res.status(500).json({ msg: String(err) })`), and dropping it
+// is how a hard failure — an agent whose module graph cannot resolve — read as
+// a bare "500" in the thread for eleven days while the real message sat in the
+// server log.
+//
+// Capped: this text rides into a chat channel and an agent stack trace would
+// otherwise bury the reply. A read failure yields "" rather than throwing — the
+// status is the fact we are sure of, and a body-read error must never replace
+// it (that would trade one undiagnosable failure for another).
+const ERROR_BODY_MAX = 600;
+
+async function serverDetail(res: Response): Promise<string> {
+  let raw: string;
+  try {
+    raw = await res.text();
+  } catch {
+    return "";
+  }
+  if (!raw) return "";
+  // The route wraps the cause in {"msg": ...}; unwrap it when present so the
+  // channel gets the sentence, not the JSON envelope around it.
+  let text = raw;
+  try {
+    const parsed = JSON.parse(raw);
+    const msg = parsed?.msg ?? parsed?.error ?? parsed?.message;
+    if (typeof msg === "string" && msg) text = msg;
+  } catch {
+    // Not JSON — use the raw body.
+  }
+  text = text.replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return ` ${text.length > ERROR_BODY_MAX ? `${text.slice(0, ERROR_BODY_MAX)}…` : text}`;
+}
+
 export async function runCodeTurn(
   client: TokioClient,
   args: RunArgs,
@@ -190,7 +226,7 @@ export async function runCodeTurn(
 
   const createSession = async (): Promise<string> => {
     const res = await client.req(`${CODE_BASE}/eve/v1/session`, { method: "POST", headers: headers(args.userId), body: createBody });
-    if (!res.ok) throw new Error(`code create failed: ${res.status}`);
+    if (!res.ok) throw new Error(`code create failed: ${res.status}${await serverDetail(res)}`);
     const j = await res.json();
     return j.sessionId as string;
   };
@@ -214,7 +250,7 @@ export async function runCodeTurn(
       startCursor = 0;
       restarted = true;
     } else if (!res.ok) {
-      throw new Error(`code continue failed: ${res.status}`);
+      throw new Error(`code continue failed: ${res.status}${await serverDetail(res)}`);
     }
   }
 
@@ -277,7 +313,7 @@ export async function attachCodeStream(client: TokioClient, args: StreamArgs): P
     `${CODE_BASE}/eve/v1/session/${args.codeSessionId}/stream?startIndex=${args.startCursor}`,
     { method: "GET", headers: headers(args.userId) },
   );
-  if (!res.ok || !res.body) throw new Error(`code stream failed: ${res.status}`);
+  if (!res.ok || !res.body) throw new Error(`code stream failed: ${res.status}${res.ok ? "" : await serverDetail(res)}`);
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   return {
     collect: () => consumeStream(client, reader, args),
