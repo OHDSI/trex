@@ -47,6 +47,7 @@ dbTest("createEngineUser writes a credential the engine verifies", async (pool) 
   assertNotEquals(u.email_confirmed_at, null);
   assertEquals(u.is_placeholder_email, false);
   assertEquals(u.role, "user");
+  assertEquals(u.password_hash, null);
 });
 
 dbTest("createEngineUser flags a placeholder-domain address", async (pool) => {
