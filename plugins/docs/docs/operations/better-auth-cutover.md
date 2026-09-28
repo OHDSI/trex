@@ -249,79 +249,31 @@ it keeps a relying party that trusts the claim linking accounts on an address
 nobody owns, which is the account-takeover this whole area exists to prevent.
 The claim going false is the fix, not a side effect of it.
 
-## The two password columns, and the rows that already disagree
+## The two password columns
 
-`/change-password` and sign-in trust different columns, and on some rows they
-already disagree — in databases running today, not only during a deploy.
+`trexdb.account.password` (the row with `providerId = 'credential'`) is the
+only password column trex writes. `trexdb.user.password_hash` is legacy: it is
+never written by current code, only read, and only as a fallback —
 
-- **Sign-in** (`POST /token`, password grant) *verifies* against
-  `trexdb.account.password` and nothing else. That is the engine's column. It
-  does read `user.password_hash` on the way past, in `adoptLegacyCredential`,
-  but only to fill an account row that has no credential yet — the copy is
-  guarded by `WHERE account.password IS NULL`, so it can never overwrite a
-  current credential with a stale one, and the conclusion below holds.
-- **`/change-password`** resolves `trexdb.user.password_hash` first and only
-  falls back to `account.password`. That is the pre-V17 column, and the wire
-  contract pins it, because it is the column a node that has not yet restarted
-  still writes.
+- **Sign-in** (`POST /token`, password grant) verifies against
+  `account.password`. If that column is `NULL` and a legacy
+  `user.password_hash` exists, `adoptLegacyCredential` copies it into
+  `account.password` — guarded by `WHERE account.password IS NULL`, so it can
+  never overwrite a current credential with a stale one.
+- **`/change-password`** (`storedPasswordHash`) reads `account.password`
+  first and falls back to `user.password_hash` only when the former is
+  `NULL`.
 
-They disagree in **one direction only**: `account.password` current,
-`user.password_hash` stale. What produces it is **the code you are running
-today**, not a deploy window. develop's `PUT /user` (`720b3c33`,
-`auth-router.ts:566`) writes `trexdb.account` *before* the `trexdb."user"`
-UPDATE at `:583`, so a request that changed both the password and the address,
-and collided on the unique index, answered 500 with the credential already
-rotated and the user column left behind.
+`/signup` and `POST /admin/users` create the account row through the engine
+directly, with no legacy hash to clear. Every route that changes an *existing*
+user's password (`PUT /user`, `/change-password`, `PUT /admin/users/:id`)
+writes `account.password` and clears `user.password_hash` to `NULL` in the
+same statement — so a row can only ever fall back once, and the two columns
+cannot re-diverge after that.
 
-**So these rows are already in your database.** This is not something a rolling
-deploy creates; it is something the cutover makes dangerous. Before the cutover
-`user.password_hash` is what signs the account in, so the abandoned credential
-sits there inert. Afterwards `account.password` is what signs it in — and the
-row that was abandoned by a failed request becomes the working password, while
-the password the account holder actually set is refused.
-
-**V17 reconciles them, and you do not have to do anything.** Its account
-backfill sets every diverged credential back to `user.password_hash`, which is
-authoritative because the migration runs before the cutover, when that column
-is the one every successful change wrote last. The statement carries no
-`AND a.password IS NULL` guard precisely so that it repairs rather than skips.
-
-**What remains, for a database that has not run V17 yet**, is not a lockout but
-its opposite: the superseded password goes on authorizing a password change
-while the working one is refused there, so a password the account holder
-believes they replaced can still be presented to `/change-password`. It also
-heals on the next successful password change or admin reset, both of which
-write the two columns in one transaction.
-
-To see how many rows are affected before you migrate:
-
-```sql
-SELECT count(*)
-  FROM trexdb.account a
-  JOIN trexdb."user" u ON u.id = a."userId"
- WHERE a."providerId" = 'credential'
-   AND u.password_hash IS NOT NULL
-   AND a.password IS DISTINCT FROM u.password_hash;
-```
-
-Those are the rows V17 repairs, with this — the direction matters, and it is
-`user` → `account`, because pre-cutover `user.password_hash` is the column every
-successful password change wrote last:
-
-```sql
-UPDATE trexdb.account a
-   SET password = u.password_hash, "updatedAt" = NOW()
-  FROM trexdb."user" u
- WHERE a."userId" = u.id
-   AND a."providerId" = 'credential'
-   -- IS NOT NULL is load-bearing: a user row with no password is a federated
-   -- account, and copying NULL over its credential would remove one it has.
-   AND u.password_hash IS NOT NULL
-   AND a.password IS DISTINCT FROM u.password_hash;
-```
-
-Phase 2 must revisit the split itself if Better Auth's own change-password or
-reset endpoints are ever mounted: those write `account.password` alone, at which point
-the split stops being a transitional artefact of this rollout and becomes
-permanent. The reasoning lives on `storedPasswordHash` in
+V17's one-time backfill already reconciled rows where the two columns had
+drifted apart before the cutover; see that migration for the repair query.
+`user.password_hash` is now a strictly-shrinking read-only fallback. A
+follow-up migration (V23) will drop it once no row still depends on it. The
+reasoning lives on `storedPasswordHash` and `adoptLegacyCredential` in
 `core/server/auth/auth-router.ts`.
