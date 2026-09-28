@@ -36,6 +36,11 @@ function dbTest(name: string, fn: (pool: Pool, userId: string) => Promise<void>)
          VALUES ($1, $1, $2, $3, $4, NOW() + interval '1 day', NOW(), '[]'::jsonb)`,
         [`ort-${userId}`, clientId, `s-${userId}`, userId],
       );
+      await pool.query(
+        `INSERT INTO trexdb."oauthAccessToken" (id, token, "clientId", "sessionId", "userId", "expiresAt", "createdAt", scopes)
+         VALUES ($1, $1, $2, $3, $4, NOW() + interval '1 day', NOW(), '[]'::jsonb)`,
+        [`oat-${userId}`, clientId, `s-${userId}`, userId],
+      );
       try {
         await fn(pool, userId);
       } finally {
@@ -52,22 +57,23 @@ async function live(pool: Pool, userId: string) {
     sessions: await q(`SELECT count(*)::int AS n FROM trexdb.session WHERE "userId" = $1`),
     refresh: await q(`SELECT count(*)::int AS n FROM trexdb.refresh_token WHERE "userId" = $1 AND revoked = false`),
     oidc: await q(`SELECT count(*)::int AS n FROM trexdb."oauthRefreshToken" WHERE "userId" = $1`),
+    access: await q(`SELECT count(*)::int AS n FROM trexdb."oauthAccessToken" WHERE "userId" = $1`),
   };
 }
 
 dbTest("banning through a plain UPDATE revokes every credential", async (pool, userId) => {
   await pool.query(`UPDATE trexdb."user" SET banned = true WHERE id = $1`, [userId]);
-  assertEquals(await live(pool, userId), { sessions: 0, refresh: 0, oidc: 0 });
+  assertEquals(await live(pool, userId), { sessions: 0, refresh: 0, oidc: 0, access: 0 });
 });
 
 dbTest("soft_delete_user revokes every credential", async (pool, userId) => {
   await pool.query(`SELECT trexdb.soft_delete_user($1)`, [userId]);
-  assertEquals(await live(pool, userId), { sessions: 0, refresh: 0, oidc: 0 });
+  assertEquals(await live(pool, userId), { sessions: 0, refresh: 0, oidc: 0, access: 0 });
 });
 
 dbTest("an unrelated update revokes nothing", async (pool, userId) => {
   await pool.query(`UPDATE trexdb."user" SET name = 'Renamed' WHERE id = $1`, [userId]);
-  assertEquals(await live(pool, userId), { sessions: 1, refresh: 1, oidc: 1 });
+  assertEquals(await live(pool, userId), { sessions: 1, refresh: 1, oidc: 1, access: 1 });
 });
 
 dbTest("re-saving an already-banned row and unbanning revoke nothing new", async (pool, userId) => {
@@ -78,7 +84,9 @@ dbTest("re-saving an already-banned row and unbanning revoke nothing new", async
   );
   await pool.query(`UPDATE trexdb."user" SET banned = true, "banReason" = 'again' WHERE id = $1`, [userId]);
   await pool.query(`UPDATE trexdb."user" SET banned = false WHERE id = $1`, [userId]);
-  assertEquals((await live(pool, userId)).sessions, 1);
+  // The first ban already fired and wiped refresh/oidc/access; re-banning and
+  // unbanning don't match the trigger's WHEN clause, so nothing more happens.
+  assertEquals(await live(pool, userId), { sessions: 1, refresh: 0, oidc: 0, access: 0 });
 });
 
 dbTest("restore_user revokes nothing", async (pool, userId) => {
@@ -88,5 +96,7 @@ dbTest("restore_user revokes nothing", async (pool, userId) => {
     [`s3-${userId}`, userId, `t3-${userId}`],
   );
   await pool.query(`SELECT trexdb.restore_user($1)`, [userId]);
-  assertEquals((await live(pool, userId)).sessions, 1);
+  // soft_delete_user already fired and wiped refresh/oidc/access; restore_user
+  // doesn't match the trigger's WHEN clause, so nothing more happens.
+  assertEquals(await live(pool, userId), { sessions: 1, refresh: 0, oidc: 0, access: 0 });
 });

@@ -2644,6 +2644,17 @@ contractTest("POST /token refresh grant without cookies carries the engine sessi
   assertEquals(after, before);
 });
 
+// oauthClient/oauthRefreshToken fixture pattern: core/server/auth/revoke-on-retire.test.ts
+async function insertOidcRefreshToken(pool: PgPool, clientId: string, sessionId: string, userId: string) {
+  const id = `ort-${sessionId}`;
+  await pool.query(
+    `INSERT INTO trexdb."oauthRefreshToken" (id, token, "clientId", "sessionId", "userId", "expiresAt", "createdAt", scopes)
+     VALUES ($1, $1, $2, $3, $4, NOW() + interval '1 day', NOW(), '[]'::jsonb)`,
+    [id, clientId, sessionId, userId],
+  );
+  return id;
+}
+
 contractTest("POST /revoke-session also ends the linked engine session and nothing else", async ({ url, pool }) => {
   const user = await createUser(pool);
   const sid = crypto.randomUUID();
@@ -2652,15 +2663,73 @@ contractTest("POST /revoke-session also ends the linked engine session and nothi
   await insertRefreshToken(pool, user.id, sid);
   await pool.query(`UPDATE trexdb.refresh_token SET engine_session_id = $1 WHERE session_id = $2`, [linked, sid]);
 
-  const res = await fetch(`${url}/revoke-session`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${await tokenFor(user)}` },
-    body: JSON.stringify({ session_id: sid }),
-  });
-  assertEquals(await res.json(), { success: true });
-  const { rows } = await pool.query(`SELECT id FROM trexdb.session WHERE "userId" = $1 ORDER BY id`, [user.id]);
-  assertEquals(rows.map((r: Json) => r.id), [other]);
+  const clientId = `revoke-${user.id.slice(0, 8)}`;
+  await pool.query(
+    `INSERT INTO trexdb."oauthClient" (id, "clientId", "redirectUris") VALUES ($1, $1, '[]'::jsonb)`,
+    [clientId],
+  );
+  try {
+    const linkedOidc = await insertOidcRefreshToken(pool, clientId, linked, user.id);
+    const otherOidc = await insertOidcRefreshToken(pool, clientId, other, user.id);
+
+    const res = await fetch(`${url}/revoke-session`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${await tokenFor(user)}` },
+      body: JSON.stringify({ session_id: sid }),
+    });
+    assertEquals(await res.json(), { success: true });
+    const { rows } = await pool.query(`SELECT id FROM trexdb.session WHERE "userId" = $1 ORDER BY id`, [user.id]);
+    assertEquals(rows.map((r: Json) => r.id), [other]);
+
+    const oidc = await pool.query(`SELECT id FROM trexdb."oauthRefreshToken" WHERE id IN ($1, $2)`, [linkedOidc, otherOidc]);
+    assertEquals(oidc.rows.map((r: Json) => r.id), [otherOidc]);
+  } finally {
+    await pool.query(`DELETE FROM trexdb."oauthClient" WHERE id = $1`, [clientId]);
+  }
 });
+
+contractTest(
+  "POST /revoke-session with another user's session_id leaves them untouched",
+  async ({ url, pool }) => {
+    const user = await createUser(pool);
+    const victim = await createUser(pool);
+    const victimSid = crypto.randomUUID();
+    const victimLinked = await engineSession(victim.id);
+    await insertRefreshToken(pool, victim.id, victimSid);
+    await pool.query(
+      `UPDATE trexdb.refresh_token SET engine_session_id = $1 WHERE session_id = $2`,
+      [victimLinked, victimSid],
+    );
+
+    const clientId = `revoke-other-${victim.id.slice(0, 8)}`;
+    await pool.query(
+      `INSERT INTO trexdb."oauthClient" (id, "clientId", "redirectUris") VALUES ($1, $1, '[]'::jsonb)`,
+      [clientId],
+    );
+    try {
+      const victimOidc = await insertOidcRefreshToken(pool, clientId, victimLinked, victim.id);
+
+      const res = await fetch(`${url}/revoke-session`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${await tokenFor(user)}` },
+        body: JSON.stringify({ session_id: victimSid }),
+      });
+      assertEquals(await res.json(), { success: true });
+
+      const { rows } = await pool.query(`SELECT id FROM trexdb.session WHERE id = $1`, [victimLinked]);
+      assertEquals(rows.length, 1);
+      const oidc = await pool.query(`SELECT id FROM trexdb."oauthRefreshToken" WHERE id = $1`, [victimOidc]);
+      assertEquals(oidc.rows.length, 1);
+      const refresh = await pool.query(
+        `SELECT revoked FROM trexdb.refresh_token WHERE session_id = $1`,
+        [victimSid],
+      );
+      assertEquals(refresh.rows[0].revoked, false);
+    } finally {
+      await pool.query(`DELETE FROM trexdb."oauthClient" WHERE id = $1`, [clientId]);
+    }
+  },
+);
 
 contractTest("POST /logout with only a bearer ends the linked engine session", async ({ url, pool }) => {
   const user = await createUser(pool);
@@ -2669,11 +2738,51 @@ contractTest("POST /logout with only a bearer ends the linked engine session", a
   await insertRefreshToken(pool, user.id, sid);
   await pool.query(`UPDATE trexdb.refresh_token SET engine_session_id = $1 WHERE session_id = $2`, [linked, sid]);
 
-  const res = await fetch(`${url}/logout`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${await tokenFor(user, sid)}` },
-  });
-  assertEquals(res.status, 204);
-  const { rows } = await pool.query(`SELECT 1 FROM trexdb.session WHERE id = $1`, [linked]);
-  assertEquals(rows.length, 0);
+  const clientId = `logout-${user.id.slice(0, 8)}`;
+  await pool.query(
+    `INSERT INTO trexdb."oauthClient" (id, "clientId", "redirectUris") VALUES ($1, $1, '[]'::jsonb)`,
+    [clientId],
+  );
+  try {
+    const linkedOidc = await insertOidcRefreshToken(pool, clientId, linked, user.id);
+
+    const res = await fetch(`${url}/logout`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${await tokenFor(user, sid)}` },
+    });
+    assertEquals(res.status, 204);
+    const { rows } = await pool.query(`SELECT 1 FROM trexdb.session WHERE id = $1`, [linked]);
+    assertEquals(rows.length, 0);
+    const oidc = await pool.query(`SELECT 1 FROM trexdb."oauthRefreshToken" WHERE id = $1`, [linkedOidc]);
+    assertEquals(oidc.rows.length, 0);
+  } finally {
+    await pool.query(`DELETE FROM trexdb."oauthClient" WHERE id = $1`, [clientId]);
+  }
+});
+
+// isEngineSessionGone maps the FK violation createTokenResponse's INSERT
+// raises when a carried-forward engine session was deleted mid-request (a
+// /revoke-session or ban race) onto the refresh grant's existing 400 refusal.
+// No deterministic integration test exists for the race itself — it needs the
+// session row deleted between the UPDATE that revokes the old refresh token
+// and the INSERT that writes the new one, which nothing in this suite can
+// interleave without disabling the trigger/FK machinery under test — so the
+// error mapping is unit-tested directly against representative pg error shapes.
+Deno.test({
+  name: "isEngineSessionGone matches only the refresh_token engine-session FK violation",
+  ignore: !DATABASE_URL,
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const { isEngineSessionGone } = await import("./auth-router.ts");
+    assertEquals(
+      isEngineSessionGone({ code: "23503", constraint: "refresh_token_engine_session_id_fkey" }),
+      true,
+    );
+    assertEquals(isEngineSessionGone({ code: "23503", constraint: "refresh_token_userId_fkey" }), false);
+    assertEquals(isEngineSessionGone({ code: "23505", constraint: "refresh_token_engine_session_id_fkey" }), false);
+    assertEquals(isEngineSessionGone(new Error("boom")), false);
+    assertEquals(isEngineSessionGone(null), false);
+    assertEquals(isEngineSessionGone(undefined), false);
+  },
 });
