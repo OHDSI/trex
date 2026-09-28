@@ -24,28 +24,36 @@ export async function hashPassword(password: string): Promise<string> {
   return saltHex + ":" + hash.toString("hex");
 }
 
+// No try/catch around scrypt. verifyPassword already answers false for every
+// way a caller can be wrong — a password that does not match, a stored hash it
+// cannot parse, a body that did not carry a string — so anything scrypt itself
+// throws is the machine failing, not the credential. Swallowing that reported a
+// broken node as a wrong password: the caller got a 401 nobody could act on,
+// and better-auth.ts's APIError wrapping, which exists to turn such a failure
+// into a visible 500, could never fire.
 async function tryVerify(
   password: string,
   saltHex: string,
   hashHex: string,
   params: { N: number; r: number; p: number },
 ): Promise<boolean> {
-  try {
-    // Better Auth passes the salt as a hex STRING, not as decoded bytes
-    const hash = (await scryptAsync(password, saltHex, DK_LEN, {
-      ...params,
-      maxmem: 128 * params.N * params.r * 2,
-    })) as Buffer;
-    return hash.toString("hex") === hashHex;
-  } catch {
-    return false;
-  }
+  // Better Auth passes the salt as a hex STRING, not as decoded bytes
+  const hash = (await scryptAsync(password, saltHex, DK_LEN, {
+    ...params,
+    maxmem: 128 * params.N * params.r * 2,
+  })) as Buffer;
+  return hash.toString("hex") === hashHex;
 }
 
 export async function verifyPassword(
   password: string,
   stored: string,
 ): Promise<boolean> {
+  // scrypt throws on anything that is not a string or a buffer. A body that
+  // sent a number where a password belongs is the caller being wrong, so it
+  // stays a credential failure rather than being reported as a failing machine.
+  if (typeof password !== "string" || typeof stored !== "string") return false;
+
   const colonIdx = stored.indexOf(":");
   if (colonIdx === -1) return false;
 

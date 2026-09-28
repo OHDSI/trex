@@ -1,0 +1,90 @@
+// The DEK envelope, kept where Better Auth writes accounts.
+//
+// Not account.encryptOAuthTokens: its cipher is XChaCha20-Poly1305 over
+// SHA-256(the Better Auth secret), it never covers idToken, and every row this
+// installation already has holds base64 DEK output that its isLikelyEncrypted
+// test does not recognise — it would hand the ciphertext back as plaintext
+// rather than failing. There is no injectable cipher; setTokenUtil takes none.
+//
+// These hooks run in createWithHooks/updateWithHooks before the adapter write,
+// and what they return is MERGED over the pending row:
+// `actualData = { ...actualData, ...result.data }`
+// (better-auth/dist/db/with-hooks.mjs:18-21, :55-58). That merge is the whole
+// shape of this file. Declining to name a field does not omit it from the
+// write — it hands the adapter the value Better Auth built, unsealed. So every
+// token field present in the input must be named in the output, as ciphertext
+// or as null; there is no third, "leave it alone" option, and believing there
+// was is what put a non-string refresh token in the table in clear text.
+//
+// Nothing upstream of here is typed. @better-auth/core/src/oauth2/utils.ts:34
+// maps `refreshToken: data.refresh_token` straight off the token response with
+// no coercion and no schema, so the IdP's JSON decides what arrives: a string,
+// `null`, `""`, a number, an object. Only a non-empty string is a token; the
+// rest become SQL NULL, which is the one state every reader already handles.
+//
+// Only the three token fields are written. With resolveUser configured the
+// plugin sets requireExactAccountBinding, so a hook that changed accountId,
+// providerId or userId would abort the sign-in with
+// account_hook_binding_conflict (dist/oauth2/link-account.mjs:111-114,
+// 168-171, 232-235) — which is the behaviour we want, and the reason this hook
+// never goes near them.
+//
+// The reader stays providers.ts's readAccountTokens; nothing else may SELECT
+// these columns. Two Better Auth paths would misread them if they were ever
+// reachable, and they are kept unreachable by oidc/mount.ts, which 404s
+// everything outside /oauth2/ and /.well-known/:
+//   - getAccessToken would hand the ciphertext to a caller as if it were a
+//     token, because with encryptOAuthTokens false its decryptOAuthToken is a
+//     pass-through. That is disclosure of a useless value, and a bug report.
+//   - api/routes/account.mjs:374 and :376 feed the STORED columns back into
+//     updateAccount unchanged when the upstream's refresh did not replace them
+//     (`: account.refreshToken`, `|| account.idToken`). Those values are already
+//     ciphertext, so they would run through this hook a second time and the
+//     column would hold the ciphertext of the ciphertext. That one is
+//     corruption, not disclosure: the original token is unrecoverable, and
+//     readAccountTokens would return base64 instead of a token.
+import { encryptWithDek } from "../dek.ts";
+
+const TOKEN_FIELDS = ["accessToken", "refreshToken", "idToken"] as const;
+
+type AccountData = Record<string, unknown>;
+
+async function sealTokens(data: AccountData): Promise<{ data: Record<string, string | null> }> {
+  const out: Record<string, string | null> = {};
+  for (const field of TOKEN_FIELDS) {
+    const value = data[field];
+    if (typeof value === "string" && value.length > 0) {
+      try {
+        out[field] = await encryptWithDek(value);
+      } catch (err) {
+        // Never log the value; name the column and re-throw. Failing the
+        // sign-in is the point: a live upstream credential must not be stored
+        // in the clear because encryption was unavailable.
+        throw new Error(`could not encrypt upstream ${field}: ${err}`);
+      }
+      continue;
+    }
+    // Present but not a token. `undefined` is the only value that must NOT be
+    // named: Better Auth has already filtered it out of an update
+    // (dist/oauth2/link-account.mjs:151), and naming it would turn "the
+    // upstream said nothing about this column" into "clear this column".
+    // Everything else — null, "", a number — is named as null rather than left
+    // to the merge, which would write it verbatim.
+    //
+    // Writing null here does NOT destroy a stored refresh token: V21's
+    // trg_account_preserve_refresh_token puts the old value back, which is
+    // upsertAccount's COALESCE(EXCLUDED."refreshToken", stored) restored. It has
+    // to live there rather than here because updateWithHooks passes this hook
+    // the update payload and the endpoint context but not the `where` clause,
+    // and the sign-in payload carries no id and no accountId — so the hook
+    // cannot identify the row it is updating, let alone read its old value.
+    // accessToken and idToken are deliberately NOT preserved; V21 says why.
+    if (value !== undefined) out[field] = null;
+  }
+  return { data: out };
+}
+
+export const accountTokenHooks = {
+  create: { before: (data: AccountData) => sealTokens(data) },
+  update: { before: (data: AccountData) => sealTokens(data) },
+};

@@ -114,6 +114,47 @@ fn collect_extension_paths(dirs: &[String]) -> Vec<PathBuf> {
     ext_paths
 }
 
+/// Roles created before the core schema migrations run, in the form
+/// `core/schema/V1__initial_schema.sql` expects them.
+///
+/// `postgres`: V1 GRANTs to a role named `postgres` but never creates it — it
+/// assumes the conventional local superuser. Managed Postgres (RDS, Cloud SQL,
+/// Azure) names the master role whatever the operator chose, so that GRANT
+/// aborts the whole migration transaction and trexdb is never created.
+///
+/// The PostgREST roles: V1 does guard each of those with a `pg_roles` lookup,
+/// but the whole migration runs in one REPEATABLE READ transaction (the
+/// postgres scanner opens it with `BEGIN TRANSACTION ISOLATION LEVEL
+/// REPEATABLE READ`), so the guard answers from the snapshot taken when the
+/// migration started while `CREATE ROLE` itself reads the live catalog. A
+/// bootstrap that commits one of these roles while V1 is still executing DDL
+/// is therefore invisible to the guard and fatal to the CREATE. d2e's
+/// `d2e-bootstrap` creates exactly `anon`, `authenticated` and `service_role`
+/// against the same database at boot, which is how it reaches us: V1 dies on
+/// `role "anon" already exists` and the whole migration rolls back. Committing
+/// them here first, each in its own transaction, closes that window — once
+/// they exist before V1 starts, V1's guards see them and skip.
+///
+/// Either failure mode shows up the same way downstream: `relation
+/// "trexdb.event_log" does not exist`, then a fatal `kek_wrapped_dek not
+/// present`, and a trex container that never reports healthy.
+///
+/// None of this can be fixed in V1 itself: editing an applied migration trips
+/// the checksum guard in plugins/migration and would refuse to boot every
+/// existing install.
+fn pre_migration_role_statements() -> Vec<&'static str> {
+    vec![
+        // Only ever a GRANT target in V1, so NOLOGIN suffices.
+        "CREATE ROLE postgres NOLOGIN",
+        "CREATE ROLE anon NOLOGIN NOINHERIT",
+        "CREATE ROLE authenticated NOLOGIN NOINHERIT",
+        "CREATE ROLE service_role NOLOGIN NOINHERIT BYPASSRLS",
+        // V1 sets the password with an unconditional ALTER ROLE right after its
+        // own guard, so the password stays defined in exactly one place.
+        "CREATE ROLE authenticator NOINHERIT LOGIN",
+    ]
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let check_mode = args.iter().any(|a| a == "--check");
@@ -219,26 +260,15 @@ fn main() {
         }
     }
 
-    // V1__initial_schema GRANTs to a role named `postgres` but never creates it —
-    // it assumes the conventional local superuser. Managed Postgres (RDS, Cloud
-    // SQL, Azure) names the master role whatever the operator chose, so that
-    // GRANT aborts the whole migration transaction and trexdb is never created;
-    // the visible symptoms are `relation "trexdb.event_log" does not exist` and a
-    // fatal `kek_wrapped_dek not present`. Ensure the role exists first. It is
-    // only ever a GRANT target here, so NOLOGIN suffices. This cannot be fixed in
-    // V1 itself: editing an applied migration trips the checksum guard in
-    // plugins/migration and would refuse to boot every existing install.
     if is_data_node() {
-        match conn.execute(
-            "CALL postgres_execute('_config', 'CREATE ROLE postgres NOLOGIN')",
-            [],
-        ) {
-            Ok(_) => println!("Created the `postgres` grant-target role"),
-            Err(e) => {
+        for stmt in pre_migration_role_statements() {
+            let sql = format!("CALL postgres_execute('_config', '{stmt}')");
+            if let Err(e) = conn.execute(&sql, []) {
                 let msg = e.to_string();
-                // Already present is the normal case on a conventional Postgres.
+                // Already present is the normal case on every boot after the
+                // first, and on a lost race with a concurrent bootstrap.
                 if !msg.contains("already exists") {
-                    println!("WARN: could not ensure the `postgres` role exists: {msg}");
+                    println!("WARN: could not ensure a role exists: {msg}");
                 }
             }
         }
@@ -367,5 +397,41 @@ mod tests {
         assert_eq!(names, vec!["pool.trex".to_string(), "zeta.trex".to_string()]);
 
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// The pre-migration bootstrap only closes the CREATE ROLE race if it covers
+    /// every role V1's PostgREST block creates — one added there and missed here
+    /// stays creatable by a concurrent writer mid-migration, which kills V1.
+    #[test]
+    fn pre_migration_roles_cover_every_role_v1_creates() {
+        let v1 = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("core/schema/V1__initial_schema.sql"),
+        )
+        .expect("V1 migration readable");
+
+        let block = v1
+            .split("-- ── PostgREST roles")
+            .nth(1)
+            .and_then(|rest| rest.split("END $$;").next())
+            .expect("V1 has a PostgREST roles block");
+
+        let role_of = |stmt: &str| -> Option<String> {
+            stmt.split_once("CREATE ROLE ")
+                .map(|(_, tail)| tail.split_whitespace().next().unwrap_or("").to_string())
+        };
+
+        // `postgres` is only ever a GRANT target in V1, so it is never in the block.
+        let mut expected: Vec<String> = block.lines().filter_map(role_of).collect();
+        assert!(!expected.is_empty(), "parsed no roles out of V1");
+        expected.push("postgres".to_string());
+
+        let mut actual: Vec<String> = pre_migration_role_statements()
+            .iter()
+            .filter_map(|s| role_of(s))
+            .collect();
+        expected.sort();
+        actual.sort();
+
+        assert_eq!(actual, expected);
     }
 }

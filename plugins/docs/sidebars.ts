@@ -123,6 +123,14 @@ const sidebars: SidebarsConfig = {
         "deployment/distributed",
       ],
     },
+    {
+      type: "category",
+      label: "Operations",
+      items: [
+        "operations/secret-rotation",
+        "operations/better-auth-cutover",
+      ],
+    },
   ],
 };
 

@@ -276,33 +276,31 @@ fn compute_schema_hash_duckdb(schema: &duckdb::arrow::datatypes::SchemaRef) -> u
 
 /// Publish `catalog:{table}` gossip keys for all local tables.
 pub fn advertise_local_tables() -> Result<usize, String> {
-    let table_data = crate::local_connections::with_connection(|conn| {
-        let mut stmt = conn
-            .prepare("SHOW TABLES")
-            .map_err(|e| format!("Failed to prepare SHOW TABLES: {e}"))?;
+    // SHOW TABLES enumerates every attached catalog, so it goes through the
+    // pool, whose catalog gate keeps it from overlapping a pg_clear_cache()
+    // (the overlap invalidates the database). The per-table lookups below are
+    // by name and stay on the local connection.
+    let (_, batches) = crate::pool::read_arrow("SHOW TABLES")
+        .map_err(|e| format!("Failed to execute SHOW TABLES: {e}"))?;
 
-        let batches: Vec<DuckRecordBatch> = stmt
-            .query_arrow([])
-            .map_err(|e| format!("Failed to execute SHOW TABLES: {e}"))?
-            .collect();
-
-        let mut names = Vec::new();
-        for batch in &batches {
-            if batch.num_columns() == 0 {
-                continue;
-            }
-            let col = batch.column(0);
-            let string_array = col
-                .as_any()
-                .downcast_ref::<duckdb::arrow::array::StringArray>()
-                .ok_or_else(|| "SHOW TABLES did not return string column".to_string())?;
-            for i in 0..string_array.len() {
-                if !string_array.is_null(i) {
-                    names.push(string_array.value(i).to_string());
-                }
+    let mut names = Vec::new();
+    for batch in &batches {
+        if batch.num_columns() == 0 {
+            continue;
+        }
+        let col = batch.column(0);
+        let string_array = col
+            .as_any()
+            .downcast_ref::<arrow_array::StringArray>()
+            .ok_or_else(|| "SHOW TABLES did not return string column".to_string())?;
+        for i in 0..string_array.len() {
+            if !string_array.is_null(i) {
+                names.push(string_array.value(i).to_string());
             }
         }
+    }
 
+    let table_data = crate::local_connections::with_connection(|conn| {
         if names.is_empty() {
             return Ok(vec![]);
         }

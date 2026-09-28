@@ -80,6 +80,11 @@ export async function runD2eAtlasDbInit(): Promise<void> {
 // Awaited so routes are registered before the server starts listening.
 export async function applyD2eCompat(app: Express): Promise<void> {
   if (!D2E_COMPAT) return;
+  // Once, here, rather than in the gate: an audience the tokens can never match
+  // is a configuration mistake whose only other symptom is a 401 indistinguishable
+  // from a forged token, and the gate would repeat it on every request.
+  const { warnOnUnmatchableAudience } = await import("./idp.ts");
+  warnOnUnmatchableAudience();
   const m = await import("./routes.ts");
   m.mountD2eRoutes(app);
 }

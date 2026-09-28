@@ -15,7 +15,9 @@ import { isServiceRoleBearer } from "./service-role-skip.ts";
  * what an offline attack achieves, and a deployment that fronts trex with its
  * own protection can set its own number.
  */
-const authRateLimitMax = (raw: string | undefined = Deno.env.get("TREX_AUTH_RATE_LIMIT_MAX")): number => {
+export const authRateLimitMax = (
+  raw: string | undefined = Deno.env.get("TREX_AUTH_RATE_LIMIT_MAX"),
+): number => {
   const n = Number(raw);
   return Number.isInteger(n) && n > 0 ? n : 600;
 };
@@ -31,9 +33,32 @@ export const authLimiter = rateLimit({
 const STATIC_ASSET_RE = /\.(?:js|mjs|css|map|svg|png|jpg|jpeg|gif|webp|woff2?|ttf|ico|json|wasm)$/i;
 const STATIC_PATH_RE = /\/(?:_next\/static|monaco-editor|favicon|img|assets|build)\//i;
 
+/**
+ * Ceiling for the general API limiter, and for adminLimiter, which is the same
+ * bucket.
+ *
+ * Same reasoning as authRateLimitMax: the bucket is per IP, so everyone behind
+ * one NAT gateway, one CI runner or one embedding portal shares it. What makes
+ * 5000/15min too low is that it is also shared across every route a single page
+ * uses, and a data-heavy page is not one request — d2e's filtering-barchart
+ * issues over 10,000 XHRs for one shard, which exhausts the bucket on its own
+ * and then 429s every other caller from that IP for the rest of the window.
+ *
+ * Raising the default for everyone would weaken a limit that is doing its job
+ * for ordinary traffic, so this is the same escape hatch authLimiter already
+ * has: deployments that front trex with their own protection, or that serve a
+ * page like that one, set their own number.
+ */
+export const apiRateLimitMax = (
+  raw: string | undefined = Deno.env.get("TREX_API_RATE_LIMIT_MAX"),
+): number => {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : 5000;
+};
+
 export const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 5000,
+  max: apiRateLimitMax(),
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) =>
@@ -42,7 +67,8 @@ export const apiLimiter = rateLimit({
 });
 
 /**
- * apiLimiter's ~5000-req/15min bucket is shared per IP across ~61 routes. The
+ * apiLimiter's bucket (5000 req/15min by default, TREX_API_RATE_LIMIT_MAX) is
+ * shared per IP across ~61 routes. The
  * federation and roles admin routers (/trex/admin/federation, /trex/admin/roles)
  * are also called by service-role scripts doing bulk work in-process — an
  * identity migration issues one PUT /links plus one POST /assign per user, all
@@ -61,7 +87,7 @@ export const apiLimiter = rateLimit({
  */
 export const adminLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 5000,
+  max: apiRateLimitMax(),
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => isServiceRoleBearer(req.headers.authorization),

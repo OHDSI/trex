@@ -4,8 +4,8 @@
 // unit tested against an injected client, without pulling in the express
 // router or the database connection auth-router.ts (via ../db.ts) requires
 // at import time.
-import { federationEnabled, nativePasswordLoginEnabled } from "./federation/config.ts";
-import { loadProviders } from "./federation/providers.ts";
+import { federationEnabled, nativePasswordLoginEnabled } from "./federation/flags.ts";
+import { enabledProviderIds } from "./federation/providers.ts";
 
 // deno-lint-ignore no-explicit-any
 type PgClient = any;
@@ -47,7 +47,7 @@ export async function loadExternalProviders(
   const external: Record<string, boolean> = { email: nativePassword };
   if (!enabled) return external;
   try {
-    for (const id of (await loadProviders(client)).keys()) {
+    for (const id of await enabledProviderIds(client)) {
       external[id] = true;
     }
   } catch (err) {

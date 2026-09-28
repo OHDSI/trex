@@ -81,6 +81,33 @@
       <version>${trexsql.version}</version>
     </dependency>
 
+    <!-- Google's BigQuery JDBC driver, so a BigQuery Source works in the native
+         image. WebAPI declares it in its `webapi-bigquery` profile, and a profile
+         is re-evaluated (not baked in) when WebAPI is consumed as a dependency, so
+         activating it during `mvn install` would not carry the driver through to
+         this build — it has to be declared here. Coordinates match WebAPI's profile
+         (OHDSI/WebAPI#2547, which replaced the classpath-provided Simba driver).
+
+         The `all` classifier is the shaded distribution; `*:*` excluded to match
+         WebAPI, since everything it needs is already inside that jar. It also ships
+         its own META-INF/native-image metadata for the gRPC/Netty/gax stack it
+         bundles, which native-image picks up automatically — only the driver class
+         itself is registered by hand, in graalvm-config/reflect-config.json, because
+         DataAccessConfig reaches it through Class.forName. -->
+    <dependency>
+      <groupId>com.google.cloud</groupId>
+      <artifactId>google-cloud-bigquery-jdbc</artifactId>
+      <version>1.5.0</version>
+      <classifier>all</classifier>
+      <scope>runtime</scope>
+      <exclusions>
+        <exclusion>
+          <groupId>*</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+
     <!-- @CEntryPoint compile visibility (provided; comes from WebAPI jar at runtime). -->
     <dependency>
       <groupId>org.graalvm.sdk</groupId>
@@ -172,11 +199,54 @@
           <buildArgs>
             <buildArg>--no-fallback</buildArg>
             <buildArg>-H:+ReportExceptionStackTraces</buildArg>
-            <buildArg>-J-Xmx8g</buildArg>
+            <!-- 8g was enough until the BigQuery JDBC driver joined the image: its
+                 `all` jar carries ~23.5k classes (a whole shaded gRPC/Netty/protobuf/
+                 guava/CEL stack), and points-to analysis over that on top of WebAPI +
+                 Spring + the Clojure runtime died at "[2/8] Performing analysis" with
+                 "GC overhead limit exceeded" on both arches.
+
+                 The job already frees disk and adds a 15G swap file for exactly this
+                 (see plugin-ci.yml: "native-image needs ~12-16 GB RAM"), and the
+                 runner reports 15.57GB, so 12g is within RAM+swap with room for the
+                 outer maven JVM and docker. Left explicit rather than removed: with
+                 no cap native-image takes 80% of RAM, which is about the same number
+                 but moves with whatever runner the job lands on. -->
+            <buildArg>-J-Xmx12g</buildArg>
             <!-- This image (WebAPI + trexsql + the whole Clojure runtime) compiles slowly;
                  disable the deadlock watchdog so a slow phase isn't mistaken for a hang. -->
             <buildArg>-H:DeadlockWatchdogInterval=0</buildArg>
             <buildArg>-H:ConfigurationFileDirectories=${project.basedir}/../graalvm-config</buildArg>
+            <!-- The BigQuery JDBC driver's `all` jar relocates everything it bundles
+                 under com.google.bqjdbc.shaded (Google's gax/gRPC/Netty/protobuf; its
+                 own com.google.cloud.bigquery.jdbc API, okhttp, conscrypt and
+                 OpenTelemetry stay put). Its embedded META-INF/native-image metadata
+                 was NOT rewritten to match, so it still names the pre-shading classes.
+                 Most of that is inert: an unresolvable name in an initialize-at-*
+                 option is taken for a package prefix. A features= class that does
+                 not resolve is fatal, though, and the build died on the first one:
+
+                   Error: Feature com.google.api.gax.grpc.nativeimage.GrpcNettyFeature
+                   class not found on the classpath.
+
+                 So drop that jar's two gax properties files and re-add what they were
+                 for, under the names this artifact actually ships. The features
+                 themselves WERE relocated, and the shade plugin rewrote the class-name
+                 string constants inside them, so the relocated copies register the
+                 relocated Netty/gRPC classes correctly. Everything else the jar
+                 bundles (its netty/grpc json configs, okhttp, opentelemetry) is left
+                 alone. Revisit if upstream ships metadata matching the shaded jar. -->
+            <buildArg>--exclude-config</buildArg>
+            <buildArg>.*google-cloud-bigquery-jdbc.*\.jar</buildArg>
+            <buildArg>.*gax(-grpc)?/native-image\.properties</buildArg>
+            <buildArg>--features=com.google.bqjdbc.shaded.com.google.api.gax.grpc.nativeimage.GrpcNettyFeature,com.google.bqjdbc.shaded.com.google.api.gax.nativeimage.OpenCensusFeature,com.google.bqjdbc.shaded.com.google.api.gax.nativeimage.GoogleJsonClientFeature</buildArg>
+            <!-- Netty must not be initialized at build time (it would bake a seeded
+                 Random and platform state into the image heap). org.conscrypt is
+                 unrelocated in that jar, so it keeps its own name. -->
+            <buildArg>--initialize-at-run-time=org.conscrypt,com.google.bqjdbc.shaded.io.grpc.netty.shaded.io.netty,com.google.bqjdbc.shaded.io.grpc.netty.shaded.io.grpc.netty,com.google.bqjdbc.shaded.io.grpc.internal.RetriableStream</buildArg>
+            <buildArg>--initialize-at-build-time=com.google.bqjdbc.shaded.com.google.api.gax.core.GaxProperties,com.google.bqjdbc.shaded.com.google.common.base.Platform,com.google.bqjdbc.shaded.com.google.common.base.Platform$JdkPatternCompiler,com.google.bqjdbc.shaded.com.google.common.collect.ImmutableMapEntry,com.google.bqjdbc.shaded.com.google.common.collect.ImmutableMapEntry$NonTerminalImmutableMapEntry,com.google.bqjdbc.shaded.com.google.common.collect.RegularImmutableList,com.google.bqjdbc.shaded.com.google.common.collect.SingletonImmutableBiMap,com.google.bqjdbc.shaded.com.google.protobuf.RuntimeVersion,com.google.bqjdbc.shaded.com.google.protobuf.RuntimeVersion$RuntimeDomain</buildArg>
+            <buildArg>--enable-url-protocols=https,http</buildArg>
+            <buildArg>--add-opens=java.base/java.time=ALL-UNNAMED</buildArg>
+            <buildArg>--add-modules=jdk.httpserver</buildArg>
             <!-- BouncyCastle JCE provider for WebAPI's Jasypt source-credential encryption
                  (JASYPT_ENCRYPTOR_ENABLED uses BC's PBEWITHSHA256AND256BITAES-CBC-BC).
                  native-image refuses to use a JCE provider it didn't verify at build time

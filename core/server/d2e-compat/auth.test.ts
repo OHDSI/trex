@@ -1,6 +1,7 @@
 import { assertEquals } from "jsr:@std/assert";
-import { exportJWK, generateKeyPair, SignJWT } from "npm:jose";
-import { verifyIdpToken } from "./auth.ts";
+import { exportJWK, generateKeyPair, jwtVerify, SignJWT } from "npm:jose";
+import { idpVerifyOptions, verifyIdpToken } from "./auth.ts";
+import { resolveIdpConfig } from "./idp.ts";
 
 // A local JWKS server stands in for Logto. Tokens are signed with its private
 // key, so the SIGNATURE is always valid — these tests isolate the claim checks
@@ -19,7 +20,7 @@ jwk.use = "sig";
 
 async function sign(
   claims: Record<string, unknown>,
-  opts: { iss?: string; aud?: string } = {},
+  opts: { iss?: string; aud?: string | string[] } = {},
 ): Promise<string> {
   const t = new SignJWT(claims)
     .setProtectedHeader({ alg: "RS256", kid: "test-key" })
@@ -89,4 +90,57 @@ Deno.test("verifyIdpToken claim validation", async (t) => {
   } finally {
     await server.shutdown();
   }
+});
+
+// ── The trex provider's two token shapes, verified through the options
+// d2e-compat actually builds ────────────────────────────────────────────────
+//
+// @better-auth/oauth-provider puts the RFC 8707 resource identifier in the
+// ACCESS token's `aud`, alongside `<issuer>/oauth2/userinfo` whenever `openid`
+// was granted (dist/introspect-njKASm3q.mjs:519); the client id rides only as
+// `client_id`/`azp`. The ID token's `aud` is still the client id. The portal
+// presents the access token, scripts/lib/idp-login.cjs presents the id_token,
+// so both have to verify.
+//
+// Verified against the key directly rather than through verifyIdpToken: that
+// function caches its JWKS in a module-level singleton keyed on the first call,
+// which would make a second IdP's run pass on the first IdP's key set and tell
+// us nothing about the audience at all.
+const TREX_ENV = {
+  D2E_IDP: "trex",
+  TREX_OIDC_ISSUER: "https://d2e.example:41100",
+  TREX_OIDC_CLIENT_ID: "d2e-portal",
+};
+const TREX_ISSUER = resolveIdpConfig(TREX_ENV).issuer;
+
+Deno.test("trex: an access token audienced at the resource and userinfo verifies", async () => {
+  const token = await sign({ roles: ["role.researcher"] }, {
+    iss: TREX_ISSUER,
+    aud: [TREX_ISSUER, `${TREX_ISSUER}/oauth2/userinfo`],
+  });
+  const { payload } = await jwtVerify(token, publicKey, idpVerifyOptions(TREX_ENV));
+  assertEquals(payload.sub, "user-1");
+});
+
+Deno.test("trex: an id_token audienced at the client id still verifies", async () => {
+  const token = await sign({}, { iss: TREX_ISSUER, aud: "d2e-portal" });
+  const { payload } = await jwtVerify(token, publicKey, idpVerifyOptions(TREX_ENV));
+  assertEquals(payload.sub, "user-1");
+});
+
+Deno.test("trex: a token for another resource on the same issuer is refused", async () => {
+  // The step that tells "the audience matched" apart from "the audience was
+  // never checked": same signing key, same `iss`, an audience that is neither
+  // the resource nor the client id.
+  const token = await sign({ roles: ["role.systemadmin"] }, {
+    iss: TREX_ISSUER,
+    aud: ["https://some-other-resource", `${TREX_ISSUER}/oauth2/userinfo`],
+  });
+  let rejected = false;
+  try {
+    await jwtVerify(token, publicKey, idpVerifyOptions(TREX_ENV));
+  } catch {
+    rejected = true;
+  }
+  assertEquals(rejected, true);
 });
