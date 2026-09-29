@@ -6,9 +6,9 @@ sidebar_position: 2
 
 trexsql ships a GoTrue-compatible auth router (custom Express implementation) plus
 machine-to-machine API keys for MCP / CLI access. JWT access tokens (1h) and opaque
-refresh tokens are issued from `trexdb.refresh_token`; passwords are hashed in
-`trexdb.user.password_hash` (legacy `trexdb.account.password` rows are migrated on first
-login).
+refresh tokens are issued from `trexdb.refresh_token`; passwords are hashed and stored
+in `trexdb.account.password` (the credential row). `trexdb.user.password_hash` is a
+legacy read-only fallback, cleared on every password write.
 
 ## Base Path
 
@@ -231,4 +231,4 @@ Beyond the standard GoTrue fields, `trexdb.user` carries:
 | `role` | string | `admin` or `user` (default `user`). Surfaces as `app_metadata.trex_role` in JWTs. |
 | `deletedAt` | timestamp | Soft-delete marker. Deleted users are filtered from all auth queries. |
 | `mustChangePassword` | bool | Force a password change before privileged actions. Cleared by `/password-changed`. |
-| `password_hash` | string | scrypt hash (Better-Auth compatible, format `saltHex:hashHex`). Legacy hashes in `trexdb.account.password` are migrated on first successful login. |
+| `password_hash` | string \| null | Legacy scrypt hash (format `saltHex:hashHex`), read-only. `trexdb.account.password` is the canonical credential; this column is a fallback read when that one is `NULL`, and is cleared to `NULL` on every password write. |

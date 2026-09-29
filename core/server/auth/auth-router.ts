@@ -23,6 +23,7 @@ import { requireAdmin } from "./require-admin.ts";
 import { IDP_METADATA_KEY } from "./oidc/claims.ts";
 import { revokeOidcTokensForSession, revokeOidcTokensForUser } from "./oidc/revoke.ts";
 import { isEngineAddressable, isPlaceholderAddress } from "./engine-address.ts";
+import { createEngineUser } from "./engine-users.ts";
 // Re-exported, not merely imported. V17's twin-of comment and the parity tests
 // both name this module as where the predicate lives, and the federation admin
 // API needs the same rule without loading this router — so the definition moved
@@ -83,9 +84,24 @@ function toGoTrueUser(u: DbUser) {
   };
 }
 
+/**
+ * True for the FK violation createTokenResponse's INSERT raises when the
+ * engine session it was told to link (a carried-forward session_id) was
+ * deleted between the refresh token's revocation and this insert — a
+ * /revoke-session or ban race. Exported for its unit test; a deterministic
+ * integration test would need to delete the session mid-request.
+ */
+export function isEngineSessionGone(err: unknown): boolean {
+  return (
+    typeof err === "object" && err !== null &&
+    (err as { code?: string }).code === "23503" &&
+    (err as { constraint?: string }).constraint === "refresh_token_engine_session_id_fkey"
+  );
+}
+
 // Exported for the federation callback, which finishes an upstream sign-in by
 // issuing the very same session this grant issues.
-export async function createTokenResponse(user: DbUser, sessionId?: string, res?: any) {
+export async function createTokenResponse(user: DbUser, sessionId?: string, res?: any, engineSessionId: string | null = null) {
   const sid = sessionId || crypto.randomUUID();
   const accessToken = await signAccessToken(
     {
@@ -105,8 +121,8 @@ export async function createTokenResponse(user: DbUser, sessionId?: string, res?
   const tokenHash = await hashRefreshToken(refreshToken);
 
   await pool.query(
-    `INSERT INTO trexdb.refresh_token (token_hash, "userId", session_id) VALUES ($1, $2, $3)`,
-    [tokenHash, user.id, sid],
+    `INSERT INTO trexdb.refresh_token (token_hash, "userId", session_id, engine_session_id) VALUES ($1, $2, $3, $4)`,
+    [tokenHash, user.id, sid, engineSessionId],
   );
 
   const expiresAt = Math.floor(Date.now() / 1000) + 3600;
@@ -208,7 +224,7 @@ export async function attachEngineSessionCookie(
   req: any,
   // deno-lint-ignore no-explicit-any
   res: any,
-): Promise<void> {
+): Promise<string> {
   const auth = await engine();
   const context = await auth.$context;
 
@@ -227,7 +243,7 @@ export async function attachEngineSessionCookie(
       // its original seventh day, the next call minted a fresh row beside the
       // slid one, and nothing in the tree reaps either.
       for (const cookie of live.headers.getSetCookie()) res.append("Set-Cookie", cookie);
-      return;
+      return live.response.session.id;
     }
   }
 
@@ -242,6 +258,7 @@ export async function attachEngineSessionCookie(
     // Better Auth counts maxAge in seconds; express counts it in milliseconds.
     maxAge: attributes.maxAge === undefined ? undefined : attributes.maxAge * 1000,
   });
+  return session.id;
 }
 
 /**
@@ -321,80 +338,22 @@ async function fetchUserById(id: string): Promise<DbUser | null> {
   return !user || user.deletedAt ? null : user;
 }
 
-/**
- * The account's password, in whichever of its two homes holds one:
- * user.password_hash is the pre-V17 column and account.password is where the
- * engine keeps it. Returning null is what distinguishes an account with no
- * credential from a wrong password, which /change-password is pinned to report
- * as two different sentences — the engine reports both the same way.
- *
- * THE TWO SIDES TRUST DIFFERENT COLUMNS, AND THAT IS DELIBERATE.
- * This resolves user.password_hash first and falls back to account.password.
- * authenticateUser signs in, and a sign-in reads account.password and nothing
- * else. So /change-password judges the current password by the user column
- * while /token judges it by the account column.
- *
- * They can disagree in one direction only: account current, user stale. What
- * produces it is DEVELOP, not a rollout window. develop's PUT /user
- * (720b3c33, :566) writes trexdb.account before the trexdb."user" UPDATE at
- * :583, so a request that also changed the address and collided on the unique
- * index answered 500 with the credential already rotated and the user column
- * left behind. That code has been shipping, so the rows are in production
- * databases today rather than arriving during a deploy. Nothing produces the
- * reverse: adoptLegacyCredential fills account.password only while it IS NULL,
- * and every path here writes both columns together.
- *
- * V17 reconciles them, which is why this is a historical note and not a live
- * hazard: its account backfill no longer carries `AND a.password IS NULL`, so
- * every diverged row is set back to user.password_hash — authoritative because
- * the migration runs before the cutover, when that column is the one every
- * successful change wrote last.
- *
- * The consequence, for a database that has not run V17 yet: not a lockout but
- * its opposite. The superseded password goes on authorizing a password change
- * while the working one is refused, so a password the account holder believes
- * they replaced can still be presented to /change-password. It also heals on
- * the next successful change or admin reset, both of which go through
- * writePassword and set the two columns in one transaction.
- *
- * Preferring account.password here is not the fix: the wire contract pins the
- * user column working beside a stale credential, because that is the state a
- * node that has not yet restarted into this code still writes. PHASE 2 MUST REVISIT THIS if
- * Better Auth's own change-password or reset endpoints are ever mounted. Those
- * write account.password alone, so the split stops being a transitional
- * artefact of the rollout and becomes permanent.
- */
-async function storedPasswordHash(
-  userId: string,
-  userPasswordHash: string | null,
-): Promise<string | null> {
-  if (userPasswordHash) return userPasswordHash;
-
+// account.password is canonical; user.password_hash is read only, slated for
+// removal in a follow-up migration (V23).
+async function storedPasswordHash(userId: string, legacyHash: string | null): Promise<string | null> {
   const result = await pool.query(
     `SELECT password FROM trexdb.account WHERE "userId" = $1 AND "providerId" = 'credential'`,
     [userId],
   );
-  return result.rows[0]?.password || null;
+  return result.rows[0]?.password || legacyHash || null;
 }
 
 // ── The credential, and the engine that verifies it ─────────────────────────
 
 /**
- * Write a password where the engine reads it.
- *
- * Better Auth takes the credential from account.password, so that row is what a
- * password change has to land on. Every route below used to UPDATE it, which
- * silently changed nothing for a user who had no credential row yet — a
- * federated account setting its first password, or a row written by a path that
- * predates V17. The new password went only to user.password_hash, so the moment
- * sign-in moved to the engine the old password kept working and the new one did
- * not. An upsert cannot miss.
- *
- * `db` is the caller's transaction wherever the same request also writes
- * user.password_hash. account.password is the column sign-in reads, so a
- * credential that outlives a failed request is not a stale mirror — it is the
- * password, rotated by a request that answered 500 and told the caller nothing
- * had happened.
+ * Write a password where the engine reads it. account.password is the only
+ * column trex writes; user.password_hash is legacy, read-only, and slated
+ * for removal in a follow-up migration (V23).
  */
 // deno-lint-ignore no-explicit-any
 async function writeCredential(userId: string, hash: string, db: any = pool) {
@@ -408,25 +367,10 @@ async function writeCredential(userId: string, hash: string, db: any = pool) {
 }
 
 /**
- * V17 moved every password it found onto account.password. A row can still
- * carry one only on user.password_hash — written by a node that had not
- * restarted into this code, or by a fixture — and to the engine that account
- * simply has no password, which it reports as a wrong one. Filled in on the way
- * past, never overwritten: a credential that is already there is the current
- * one, and user.password_hash is only a mirror of it.
- *
- * Copied rather than re-hashed. The stored value is trex's own scrypt, which
- * better-auth.ts's hooks verify unchanged, so re-hashing would spend a second
- * scrypt to arrive at an equivalent string.
- *
- * DELIBERATELY BEFORE THE PASSWORD IS CHECKED, so an unauthenticated request
- * can cause this write. It has to be: the engine is what verifies, and it
- * cannot verify a credential it cannot see. The write is bounded and
- * idempotent — one row per user, whose contents are a copy of a column that
- * account already mirrors, carrying no information the requester supplied — and
- * the route is behind authLimiter. It is accepted, not overlooked. Anything
- * added here that is unbounded, or that records what an anonymous caller sent,
- * would be a different question.
+ * Adopts a password still living only on the legacy user.password_hash column
+ * into account.password, so the engine — which reads only the latter — can
+ * verify it. user.password_hash itself is slated for removal in a follow-up
+ * migration (V23); until then this is the read fallback for rows still on it.
  */
 async function adoptLegacyCredential(user: DbUser) {
   if (!user.password_hash) return;
@@ -441,28 +385,18 @@ async function adoptLegacyCredential(user: DbUser) {
 }
 
 /**
- * The two columns a password lives in, written together or not at all.
- *
- * account.password is what sign-in reads and user.password_hash is its mirror,
- * so a request that writes one and then fails does not leave a stale copy — it
- * leaves the account holding a password nobody was told about. `PUT /user` used
- * to do exactly that: it wrote the credential first, and a duplicate address
- * then violated user_email_lower_key and the route answered 500 with the
- * password already rotated. The mirror's IS NULL guard cannot repair a column
- * that is merely out of date.
- *
- * The scope is the two writes and nothing more. A route can still fail *after*
- * this returns — `PUT /user` re-reads the row afterwards and can answer 404 —
- * so what is guaranteed is that the two columns never disagree, not that a
- * request answering an error changed nothing at all.
+ * Writes the credential, optionally alongside other row work in the same
+ * transaction. The scope is that write and nothing more: a route can still
+ * fail *after* this returns, so what is guaranteed is that this write and
+ * `alsoInTransaction`'s land together or not at all.
  */
 async function writePassword(
   userId: string,
   hash: string,
-  // The row work that has to land with it: the caller's own UPDATE of
-  // trexdb."user", run on the transaction rather than on the pool.
+  // The row work that has to land with it, run on the transaction rather
+  // than on the pool. Optional: not every caller has any.
   // deno-lint-ignore no-explicit-any
-  alsoInTransaction: (db: any) => Promise<void>,
+  alsoInTransaction?: (db: any) => Promise<void>,
 ) {
   const client = await pool.connect();
 
@@ -480,7 +414,7 @@ async function writePassword(
   let destroyWith: Error | undefined;
   try {
     await client.query("BEGIN");
-    await alsoInTransaction(client);
+    await alsoInTransaction?.(client);
     await writeCredential(userId, hash, client);
     await client.query("COMMIT");
   } catch (err) {
@@ -495,52 +429,23 @@ async function writePassword(
   }
 }
 
-/**
- * End every Better Auth session this user holds.
- *
- * Engine sessions were being created on every sign-in and destroyed in exactly
- * one place — /logout. Everything else that invalidates a user revoked
- * trexdb.refresh_token and stopped there, so an administrator banning an
- * account left its engine session live until its own TTL. That is not a
- * cosmetic gap: the engine session is a credential in its own right (the
- * cookie authenticateUser hands back), and phase 2's /oauth2/authorize
- * authenticates against it and nothing else. A ban that leaves it standing is
- * a ban the OAuth provider does not honour.
- *
- * A DELETE rather than auth.api.revokeUserSessions, and the reason is not
- * preference: that endpoint sits behind adminMiddleware, which resolves the
- * CALLER's session and throws UNAUTHORIZED when there is none. These call sites
- * have already run trex's own requireAdmin and have no engine session to
- * present, so the endpoint would 401 every time. This is the statement it would
- * have run — better-auth's internalAdapter.deleteUserSessions is the same
- * DELETE — and trexdb.session is trex's own table since V17.
- *
- * Authoritative because better-auth.ts configures no session cookie cache and
- * no secondary storage: the engine re-reads this row on every request, so the
- * row going away is the session going away. Adding either of those would make
- * this insufficient.
- */
+// Direct adapter call: auth.api.revokeUserSessions demands an admin *session*, which these callers lack.
+// Sufficient only while better-auth.ts configures no session cookie cache.
 async function endEngineSessions(userId: string) {
-  await pool.query(`DELETE FROM trexdb.session WHERE "userId" = $1`, [userId]);
+  await (await engineAdapter()).deleteUserSessions(userId);
 }
 
-/**
- * The reverse mirror: user.password_hash is the pre-V17 home of the credential
- * and is still what storedPasswordHash prefers, so a user whose password lives
- * only in account.password gets it copied back on their way through. Both
- * columns therefore hold the same value on every row this router has seen, and
- * the mirror can be dropped with the column rather than before it.
- */
-async function mirrorCredentialOntoUser(userId: string) {
-  await pool.query(
-    `UPDATE trexdb."user" u
-        SET password_hash = a.password, "updatedAt" = NOW()
-       FROM trexdb.account a
-      WHERE u.id = $1
-        AND a."userId" = u.id AND a."providerId" = 'credential'
-        AND a.password IS NOT NULL AND u.password_hash IS NULL`,
-    [userId],
+// OIDC tokens first: oauthRefreshToken."sessionId" is ON DELETE SET NULL.
+async function endLinkedEngineSessions(userId: string, sessionId: string) {
+  const { rows } = await pool.query(
+    `SELECT DISTINCT engine_session_id FROM trexdb.refresh_token
+      WHERE "userId" = $1 AND session_id = $2 AND engine_session_id IS NOT NULL`,
+    [userId, sessionId],
   );
+  for (const { engine_session_id: id } of rows) {
+    await revokeOidcTokensForSession(id);
+    await pool.query(`DELETE FROM trexdb.session WHERE id = $1 AND "userId" = $2`, [id, userId]);
+  }
 }
 
 /**
@@ -599,16 +504,15 @@ async function canonicaliseLoginAddress(user: DbUser): Promise<string> {
  * own failure is re-thrown, so a scrypt or database failure reaches the route's
  * error handler as a 500 instead of being answered as a wrong password.
  *
- * This is the account.password side of the split documented on
- * storedPasswordHash: a sign-in reads that column and no other, which is why
- * /change-password does not go through here.
+ * A sign-in reads account.password only, via the engine itself — unlike
+ * storedPasswordHash, which /change-password calls directly.
  */
 async function authenticateUser(
   user: DbUser,
   password: string,
   // deno-lint-ignore no-explicit-any
   res?: any,
-): Promise<{ userId: string; sessionToken: string } | null> {
+): Promise<{ userId: string; sessionToken: string; engineSessionId: string | null } | null> {
   const email = await canonicaliseLoginAddress(user);
   await adoptLegacyCredential(user);
 
@@ -625,8 +529,8 @@ async function authenticateUser(
   if (res) {
     for (const cookie of signedIn.headers.getSetCookie()) res.append("Set-Cookie", cookie);
   }
-  await mirrorCredentialOntoUser(user.id);
-  return { userId: user.id, sessionToken: signedIn.response.token };
+  const found = await (await engineAdapter()).findSession(signedIn.response.token);
+  return { userId: user.id, sessionToken: signedIn.response.token, engineSessionId: found?.session.id ?? null };
 }
 
 // ── POST /signup ─────────────────────────────────────────────────────────────
@@ -680,8 +584,6 @@ router.post("/signup", authLimiter, async (req, res) => {
       return;
     }
 
-    const userId = crypto.randomUUID();
-    const passwordHash = await hashPassword(password);
     const userName = data?.name || email.split("@")[0];
 
     // Check if this is the first user
@@ -697,17 +599,18 @@ router.post("/signup", authLimiter, async (req, res) => {
       (adminEmail && email.toLowerCase() === adminEmail.toLowerCase());
     const userRole = shouldBeAdmin ? "admin" : "user";
 
-    await pool.query(
-      `INSERT INTO trexdb."user" (id, name, email, "emailVerified", email_confirmed_at, role, password_hash, user_metadata)
-       VALUES ($1, $2, $3, true, NOW(), $4, $5, $6)`,
-      [userId, userName, email, userRole, passwordHash, JSON.stringify(data || {})],
-    );
+    const { id: userId } = await createEngineUser({
+      email,
+      password,
+      name: userName,
+      role: userRole,
+      userMetadata: data || {},
+      flagPlaceholder: false,
+    });
 
     if (shouldBeAdmin) {
       console.log(`[auth] Assigned admin role to ${email} (${isFirstUser ? "first user" : "ADMIN_EMAIL match"})`);
     }
-
-    await writeCredential(userId, passwordHash);
 
     const user = await fetchUserById(userId);
     if (!user) {
@@ -723,12 +626,12 @@ router.post("/signup", authLimiter, async (req, res) => {
     // holding an address nobody can sign in with or register again.
     const engineSession = await authenticateUser(user, password, res);
     if (!engineSession) {
-      await pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [userId]);
+      await (await engineAdapter()).deleteUser(userId);
       res.status(500).json({ error: "server_error", error_description: "Failed to create user" });
       return;
     }
 
-    const response = await createTokenResponse(user, undefined, res);
+    const response = await createTokenResponse(user, undefined, res, engineSession.engineSessionId);
 
     // Update last_sign_in_at
     await pool.query(
@@ -794,7 +697,8 @@ async function handlePasswordGrant(req: any, res: any) {
     // Deliberately not distinguishing an account with no password from a wrong
     // one, and deliberately not Better Auth's 401 INVALID_EMAIL_OR_PASSWORD:
     // the wire contract here is GoTrue's 400 invalid_grant.
-    if (!await authenticateUser(user, password, res)) {
+    const signedIn = await authenticateUser(user, password, res);
+    if (!signedIn) {
       res.status(400).json({ error: "invalid_grant", error_description: "Invalid login credentials" });
       return;
     }
@@ -816,7 +720,7 @@ async function handlePasswordGrant(req: any, res: any) {
     // carry the block that no longer exists.
     if (user.app_metadata) delete user.app_metadata[IDP_METADATA_KEY];
 
-    res.json(await createTokenResponse(user, undefined, res));
+    res.json(await createTokenResponse(user, undefined, res, signedIn.engineSessionId));
   } catch (err) {
     console.error("[auth] password grant error:", err);
     res.status(500).json({ error: "server_error", error_description: "Internal server error" });
@@ -838,7 +742,7 @@ async function handleRefreshGrant(req: any, res: any) {
     const result = await pool.query(
       `UPDATE trexdb.refresh_token SET revoked = true, "updatedAt" = NOW()
        WHERE token_hash = $1 AND revoked = false
-       RETURNING "userId", session_id, "createdAt"`,
+       RETURNING "userId", session_id, "createdAt", engine_session_id`,
       [tokenHash],
     );
 
@@ -847,7 +751,7 @@ async function handleRefreshGrant(req: any, res: any) {
       return;
     }
 
-    const { userId, session_id: sessionId, createdAt } = result.rows[0];
+    const { userId, session_id: sessionId, createdAt, engine_session_id: previousEngineSession } = result.rows[0];
 
     // Enforce an absolute lifetime: rotation alone lets a leaked-but-unused
     // token be redeemed indefinitely. The row was just revoked above, so an
@@ -863,7 +767,6 @@ async function handleRefreshGrant(req: any, res: any) {
       return;
     }
 
-    const response = await createTokenResponse(user, sessionId, res);
     // A refresh completes an authentication, and until now it was the last
     // route that completed one with sb-access-token alone. That matters on a
     // clock: Better Auth's session cookie lives seven days and trex's refresh
@@ -877,7 +780,22 @@ async function handleRefreshGrant(req: any, res: any) {
     // for thirty days would leave several hundred of them and nothing reaps
     // them. A browser whose engine cookie has expired still sends
     // sb-access-token, so the case this exists for is not the case it skips.
-    if (req.headers?.cookie) await attachEngineSessionCookie(user.id, req, res);
+    const engineSessionId = req.headers?.cookie
+      ? await attachEngineSessionCookie(user.id, req, res)
+      : previousEngineSession;
+    let response;
+    try {
+      response = await createTokenResponse(user, sessionId, res, engineSessionId);
+    } catch (err) {
+      // The old token is already revoked above; answering the same refusal it
+      // would have gotten if it had lost that race a moment earlier — not a
+      // retry with engine_session_id = NULL, which would reopen it.
+      if (isEngineSessionGone(err)) {
+        res.status(400).json({ error: "invalid_grant", error_description: "Invalid or revoked refresh token" });
+        return;
+      }
+      throw err;
+    }
     res.json(response);
   } catch (err) {
     console.error("[auth] refresh grant error:", err);
@@ -1010,6 +928,7 @@ router.post("/logout", apiLimiter, async (req, res) => {
     const token = authHeader.slice(7);
     const claims = await verifyAccessToken(token);
     if (claims?.session_id) {
+      await endLinkedEngineSessions(claims.sub, claims.session_id);
       // Revoke all refresh tokens for this session
       await pool.query(
         `UPDATE trexdb.refresh_token SET revoked = true, "updatedAt" = NOW()
@@ -1154,8 +1073,10 @@ router.put("/user", apiLimiter, async (req, res) => {
         return;
       }
       newHash = await hashPassword(password);
-      updates.push(`password_hash = $${paramIdx++}`);
-      values.push(newHash);
+      // A change lands only on account.password; the legacy column must not
+      // go on holding a superseded password an old or rolled-back node would
+      // still accept.
+      updates.push(`password_hash = NULL`);
     }
 
     if (updates.length > 0) {
@@ -1291,13 +1212,9 @@ router.post("/change-password", apiLimiter, async (req, res) => {
     // leaving it verifying against the old one and answering "Current password
     // is incorrect" to everybody.
     //
-    // NOT authenticateUser, deliberately. That signs in, and a sign-in reads
-    // account.password alone, so it would refuse an account whose password
-    // reached only user.password_hash — the state a node that has not restarted
-    // into the V17 code still writes, and the one the wire contract pins this
-    // route to accept. The resolution order above is trex's answer to which of
-    // the two columns holds the password; the engine's answer is what verifies
-    // it.
+    // NOT authenticateUser, deliberately: that signs in through the engine,
+    // which reads account.password alone, whereas storedPasswordHash also
+    // falls back to the legacy column.
     const { password: credential } = await engineContext();
     if (!(await credential.verify({ hash: storedHash, password: currentPassword }))) {
       res.status(400).json({ error: "Current password is incorrect" });
@@ -1306,10 +1223,7 @@ router.post("/change-password", apiLimiter, async (req, res) => {
 
     const newHash = await hashPassword(newPassword);
     await writePassword(user.id, newHash, (db) =>
-      db.query(
-        `UPDATE trexdb."user" SET password_hash = $1, "updatedAt" = NOW() WHERE id = $2`,
-        [newHash, user.id],
-      ));
+      db.query(`UPDATE trexdb."user" SET password_hash = NULL, "updatedAt" = NOW() WHERE id = $1`, [user.id]));
 
     // Revoke all outstanding refresh tokens so a stolen token doesn't survive
     // a password change — and the engine session with them, for the same
@@ -1397,17 +1311,8 @@ router.post("/revoke-session", apiLimiter, async (req, res) => {
       return;
     }
 
-    // Deliberately NOT paired with endEngineSessions, and — since the cutover
-    // — not with revokeOidcTokensForSession either. Both would need an engine
-    // session to name, and `session_id` here is trex's own: the value minted
-    // with a refresh token and carried in the access token, with no column
-    // anywhere tying it to a row in trexdb.session or to
-    // oauthRefreshToken."sessionId". So there is nothing to scope either
-    // revocation to, and doing it by user would mean signing the caller out of
-    // every device to honour a request to sign out of one. The narrower wrong
-    // answer is the better one until the two session concepts are actually
-    // joined; mcp/tools/sessions.ts's session-revoke, which DOES hold an engine
-    // session id, is what that looks like when the id is available.
+    // Only the engine session issued with this session_id; other devices stay signed in.
+    await endLinkedEngineSessions(claims.sub, targetSessionId);
     await pool.query(
       `UPDATE trexdb.refresh_token SET revoked = true, "updatedAt" = NOW()
        WHERE "userId" = $1 AND session_id = $2 AND revoked = false`,
@@ -1539,47 +1444,17 @@ router.post(["/admin/create-user", "/admin/users"], apiLimiter, async (req, res)
       return;
     }
 
-    // The engine creates the user and links the credential, hashing with trex's
-    // own scrypt through better-auth.ts's hook. `data` carries the columns
-    // GoTrue's admin create is expected to set outright — an address an
-    // administrator typed is confirmed, with no verification round-trip — and
-    // the whole `data` object is kept as user_metadata, which is what the wire
-    // contract returns. app_metadata is left to V1's column default so the
-    // provider keys stay what every other row has.
-    // An address on the placeholder domain is synthetic whoever supplied it,
-    // and an administrator migrating a directory through this route rather than
-    // through PUT /federation/links creates exactly the population that made
-    // the flag matter — guessable `<username>@d2e.local` local parts, claimable
-    // by any enabled upstream that asserts one as verified. decideLink needs no
-    // auto_provision to reach {action: "link"}: an enabled provider, an
-    // upstream-asserted emailVerified, the default unset allowlist and a
-    // non-elevated target is the whole gate. So the row is marked here exactly
-    // as provisionUser marks it — flagged, unverified, unconfirmed.
-    const synthetic = isPlaceholderAddress(email);
-    const created = await (await engine()).api.createUser({
-      body: {
-        email,
-        password,
-        name: data?.name || email.split("@")[0],
-        role: data?.role || "user",
-        data: {
-          emailVerified: !synthetic,
-          // Omitted rather than nulled when synthetic: the column's default is
-          // NULL, and "confirmed at <timestamp>" on an address nobody asserted
-          // is the claim the flag exists to contradict.
-          ...(synthetic ? {} : { email_confirmed_at: new Date() }),
-          is_placeholder_email: synthetic,
-          user_metadata: data || {},
-        },
-      },
+    // The engine creates the user and links the credential; createEngineUser
+    // flags a placeholder-domain address exactly as provisionUser does.
+    const created = await createEngineUser({
+      email,
+      password,
+      name: data?.name || email.split("@")[0],
+      role: data?.role || "user",
+      userMetadata: data || {},
     });
 
-    // account.password is now the credential; this fills the pre-V17 mirror so
-    // the two columns agree from the first moment, as they do on every other
-    // path that writes a password.
-    await mirrorCredentialOntoUser(created.user.id);
-
-    const user = await fetchUserById(created.user.id);
+    const user = await fetchUserById(created.id);
     if (!user) {
       res.status(500).json({ error: "server_error", error_description: "Failed to create user" });
       return;
@@ -1629,10 +1504,7 @@ router.put("/admin/users/:id", apiLimiter, async (req, res) => {
     if (password !== undefined) {
       const newHash = await hashPassword(password);
       await writePassword(user.id, newHash, (db) =>
-        db.query(
-          `UPDATE trexdb."user" SET password_hash = $1, "updatedAt" = NOW() WHERE id = $2`,
-          [newHash, user.id],
-        ));
+        db.query(`UPDATE trexdb."user" SET password_hash = NULL, "updatedAt" = NOW() WHERE id = $1`, [user.id]));
     }
 
     if (banned !== undefined) {
