@@ -15,10 +15,12 @@ import {
 } from "./config.ts";
 import { createFailureBudget, isUserInfoRefusal } from "./userinfo-limit.ts";
 import { createJwksLocalReadFetch, providerJwksUrl } from "./jwks-local-read.ts";
+import { upstreamLogoutUrl } from "./upstream-logout.ts";
 import {
   annotateLogoutConfirmation,
   type HintVerdict,
   hintFromRequest,
+  subjectFromHint,
   logoutHintDiagnosis,
   logoutHintWasRejected,
 } from "./logout-hint.ts";
@@ -226,6 +228,27 @@ export function oidcHandler(): express.RequestHandler {
       // For a programmatic caller, which never sees the page.
       res.setHeader("X-Trex-Logout-Hint", `rejected; local-verification=${verdict}`);
       rejectedHintVerdict = verdict;
+    }
+
+    // A federated session is not over when trex's is: the upstream still holds
+    // its own browser cookie, so the next sign-in reuses it silently and the
+    // user is never asked who they are. Carry the browser one hop further,
+    // handing the upstream the destination the provider had already validated
+    // as this logout's return target.
+    if (isEndSession && response.status >= 300 && response.status < 400) {
+      const returnTo = response.headers.get("location");
+      if (returnTo) {
+        const sub = subjectFromHint(hint);
+        const upstream = await upstreamLogoutUrl(sub, new URL(returnTo, oidcIssuer()).toString())
+          .catch((err) => {
+            // Never at the cost of the logout itself: trex's session is
+            // already gone by here, and failing now would strand the browser
+            // on an error instead of signing it out.
+            console.error("[oidc] end-session: upstream logout not attempted:", err);
+            return null;
+          });
+        if (upstream) response.headers.set("location", upstream);
+      }
     }
 
     res.status(response.status);

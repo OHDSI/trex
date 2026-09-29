@@ -135,3 +135,32 @@ export function hintFromRequest(url: string, body: Buffer | undefined): string |
   const fromBody = new URLSearchParams(body.toString("utf8")).get("id_token_hint");
   return fromBody && fromBody.length > 0 ? fromBody : null;
 }
+
+/**
+ * The account an `id_token_hint` names, without verifying it.
+ *
+ * Verification belongs to the provider, which has already accepted or rejected
+ * the hint by the time this runs, and re-doing it here would only decide
+ * whether to offer the extra hop. A forged subject cannot widen anything: the
+ * destination is whichever provider that account is configured against, and
+ * the return target is the one the provider itself validated. The worst a lie
+ * achieves is a logout that visits the wrong configured upstream.
+ */
+export function subjectFromHint(hint: string | null): string | null {
+  if (!hint) return null;
+  const [, payload] = hint.split(".");
+  if (!payload) return null;
+  try {
+    const json = JSON.parse(
+      new TextDecoder().decode(
+        Uint8Array.from(
+          atob(payload.replace(/-/g, "+").replace(/_/g, "/")),
+          (c) => c.charCodeAt(0),
+        ),
+      ),
+    );
+    return typeof json?.sub === "string" && json.sub ? json.sub : null;
+  } catch {
+    return null;
+  }
+}
