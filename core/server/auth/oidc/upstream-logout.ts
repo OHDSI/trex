@@ -6,8 +6,22 @@
 // and the user is never asked who they are. Nothing here revokes anything —
 // that already happens — this only carries the browser one hop further so the
 // upstream can clear its own cookie.
-import { pool } from "../../db.ts";
 import { federationFromAppMetadata } from "./claims.ts";
+
+/**
+ * The pool, fetched when a query is actually made.
+ *
+ * Imported lazily on purpose: ../../db.ts constructs its pool at module scope
+ * and throws without DATABASE_URL, so naming it at the top of this file would
+ * put both in the import graph of everything that mounts the OIDC routes —
+ * and a test that imports the mount would then hold an open pool it never
+ * opened, which Deno's resource sanitizer fails the file for. Nothing else in
+ * this path needs a database until a federated logout actually happens.
+ */
+async function db() {
+  const { pool } = await import("../../db.ts");
+  return pool;
+}
 
 /** Cached per provider: a logout should not pay for a discovery fetch. */
 const endSessionCache = new Map<string, string | null>();
@@ -19,7 +33,7 @@ const endSessionCache = new Map<string, string | null>();
  * session that reports no `idp_provider` resolves to no upstream here either.
  */
 async function providerForUser(userId: string): Promise<string | null> {
-  const { rows } = await pool.query<{ app_metadata: unknown }>(
+  const { rows } = await (await db()).query<{ app_metadata: unknown }>(
     `SELECT app_metadata FROM trexdb."user" WHERE id = $1`,
     [userId],
   );
@@ -39,7 +53,7 @@ async function endSessionEndpoint(providerId: string): Promise<string | null> {
   const cached = endSessionCache.get(providerId);
   if (cached !== undefined) return cached;
 
-  const { rows } = await pool.query<{
+  const { rows } = await (await db()).query<{
     issuer: string | null;
     discovery_url: string | null;
     oidcConfig: Record<string, unknown> | null;
