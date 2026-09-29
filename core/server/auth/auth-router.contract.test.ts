@@ -227,6 +227,8 @@ interface UserSpec {
   password?: string | null;
   /** Written to trexdb.account only, leaving user.password_hash NULL. */
   accountOnlyPassword?: string;
+  /** Written to the legacy user.password_hash column only, leaving account.password NULL. */
+  legacyPasswordHashOnly?: boolean;
   role?: string;
   banned?: boolean;
   image?: string | null;
@@ -252,6 +254,7 @@ async function createUser(pool: PgPool, spec: UserSpec = {}): Promise<Fixture> {
   const role = spec.role ?? "user";
   const password = spec.password === null ? "" : (spec.password ?? "correct-horse");
   const hash = spec.password === null ? null : await hashPassword(password);
+  const legacyOnly = spec.legacyPasswordHashOnly ?? false;
 
   await pool.query(
     `INSERT INTO trexdb."user"
@@ -266,7 +269,7 @@ async function createUser(pool: PgPool, spec: UserSpec = {}): Promise<Fixture> {
       role,
       spec.banned ?? false,
       spec.image ?? null,
-      hash,
+      legacyOnly ? hash : null,
       spec.mustChangePassword ?? false,
       JSON.stringify(spec.userMetadata ?? {}),
       JSON.stringify(spec.appMetadata ?? { provider: "email", providers: ["email"] }),
@@ -279,6 +282,13 @@ async function createUser(pool: PgPool, spec: UserSpec = {}): Promise<Fixture> {
       `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId", password)
        VALUES ($1, $2, $2, 'credential', $3)`,
       [crypto.randomUUID(), id, await hashPassword(spec.accountOnlyPassword)],
+    );
+  } else if (hash !== null && !legacyOnly) {
+    // The fixture's default: the password lives in trexdb.account, same as everything trex writes now.
+    await pool.query(
+      `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId", password)
+       VALUES ($1, $2, $2, 'credential', $3)`,
+      [crypto.randomUUID(), id, hash],
     );
   }
 
@@ -649,6 +659,43 @@ contractTest("POST /signup mirrors the credential into trexdb.account", async ({
   );
 });
 
+contractTest("POST /signup at the placeholder domain stays verified and unflagged", async ({ url, pool }) => {
+  const email = `contract-signup-${crypto.randomUUID().slice(0, 8)}@d2e.local`;
+  try {
+    await withSetting(pool, "auth.selfRegistration", true, async () => {
+      const res = await fetch(`${url}/signup`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password: "correct-horse" }),
+      });
+      assertEquals(res.status, 200);
+      const body = await res.json();
+      const row = await readUser(pool, body.user.id);
+      assertEquals(row.is_placeholder_email, false);
+      assertEquals(row.emailVerified, true);
+    });
+  } finally {
+    await pool.query(`DELETE FROM trexdb."user" WHERE email = $1`, [email]);
+  }
+});
+
+contractTest("POST /signup for an address a soft-deleted row holds is the 500 catch-all", async ({ url, pool }) => {
+  const retired = await createUser(pool, { softDeleted: true });
+  await withSetting(pool, "auth.selfRegistration", true, async () => {
+    const res = await fetch(`${url}/signup`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: retired.email, password: "correct-horse" }),
+    });
+    assertEquals(res.status, 500);
+    assertEquals(await res.json(), { error: "server_error", error_description: "Internal server error" });
+    const { rows } = await pool.query(
+      `SELECT count(*)::int AS n FROM trexdb."user" WHERE lower(email) = lower($1)`, [retired.email],
+    );
+    assertEquals(rows[0].n, 1);
+  });
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 2. POST /token
 // ═══════════════════════════════════════════════════════════════════════════
@@ -868,7 +915,7 @@ contractTest(
 );
 
 contractTest(
-  "POST /token password grant migrates an account-only hash onto the user row",
+  "POST /token password grant signs in against an account-only hash and never touches user.password_hash",
   async ({ url, pool }) => {
     const user = await createUser(pool, {
       password: null,
@@ -883,10 +930,43 @@ contractTest(
       });
       assertEquals(res.status, 200);
       await drain(res);
-      assertNotEquals((await readUser(pool, user.id)).password_hash, null);
+      assertEquals((await readUser(pool, user.id)).password_hash, null);
     });
   },
 );
+
+contractTest("a password only on legacy user.password_hash still signs in and is adopted", async ({ url, pool }) => {
+  const user = await createUser(pool, { legacyPasswordHashOnly: true });
+  const res = await fetch(`${url}/token?grant_type=password`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: user.email, password: user.password }),
+  });
+  assertEquals(res.status, 200);
+  await drain(res);
+  const { rows } = await pool.query(
+    `SELECT password FROM trexdb.account WHERE "userId" = $1 AND "providerId" = 'credential'`,
+    [user.id],
+  );
+  assertNotEquals(rows[0]?.password ?? null, null);
+});
+
+contractTest("POST /change-password judges the account credential over a stale legacy column", async ({ url, pool }) => {
+  const user = await createUser(pool, { password: null, accountOnlyPassword: "account-pass" });
+  await pool.query(
+    `UPDATE trexdb."user" SET password_hash = $1 WHERE id = $2`,
+    [await hashPassword("stale-legacy"), user.id],
+  );
+  const res = await post(
+    `${url}/change-password`,
+    { currentPassword: "account-pass", newPassword: "new-password-1" },
+    await tokenFor(user),
+  );
+  assertEquals(await res.json(), { success: true });
+  // The stale legacy hash must not survive the change: a rolled-back node
+  // reading it would otherwise still accept the superseded password.
+  assertEquals((await readUser(pool, user.id)).password_hash, null);
+});
 
 contractTest("POST /token refresh grant is 400 invalid_grant without a token", async ({ url }) => {
   const res = await post(`${url}/token?grant_type=refresh_token`, {});
@@ -1224,6 +1304,10 @@ contractTest("PUT /user is 401 with the same two descriptions as GET /user", asy
 contractTest("PUT /user is 422 validation_failed and writes nothing for a short password", async ({ url, pool }) => {
   const user = await createUser(pool);
   const before = await readUser(pool, user.id);
+  const beforeAccount = await pool.query(
+    `SELECT password FROM trexdb.account WHERE "userId" = $1 AND "providerId" = 'credential'`,
+    [user.id],
+  );
 
   const res = await request("PUT", `${url}/user`, { password: "1234567" }, await tokenFor(user));
   assertEquals(res.status, 422);
@@ -1233,7 +1317,12 @@ contractTest("PUT /user is 422 validation_failed and writes nothing for a short 
   });
 
   const after = await readUser(pool, user.id);
-  assertEquals(after.password_hash, before.password_hash);
+  assertEquals(after.password_hash, null);
+  const afterAccount = await pool.query(
+    `SELECT password FROM trexdb.account WHERE "userId" = $1 AND "providerId" = 'credential'`,
+    [user.id],
+  );
+  assertEquals(afterAccount.rows[0].password, beforeAccount.rows[0].password);
   assertEquals(iso(after.updatedAt), iso(before.updatedAt));
 });
 
@@ -1339,15 +1428,14 @@ contractTest("PUT /user with no updates returns the current row untouched", asyn
   assertEquals(iso((await readUser(pool, user.id)).updatedAt), iso(before.updatedAt));
 });
 
-contractTest("PUT /user password change mirrors the hash and revokes refresh tokens", async ({ url, pool }) => {
-  const user = await createUser(pool);
+contractTest("PUT /user password change rotates account.password and revokes refresh tokens", async ({ url, pool }) => {
+  const user = await createUser(pool, { password: null });
   await pool.query(
     `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId", password)
      VALUES ($1, $2, $2, 'credential', 'stale')`,
     [crypto.randomUUID(), user.id],
   );
   const { token: refresh } = await insertRefreshToken(pool, user.id, crypto.randomUUID());
-  const before = await readUser(pool, user.id);
 
   const res = await request(
     "PUT",
@@ -1358,13 +1446,12 @@ contractTest("PUT /user password change mirrors the hash and revokes refresh tok
   assertEquals(res.status, 200);
   await drain(res);
 
-  const after = await readUser(pool, user.id);
-  assertNotEquals(after.password_hash, before.password_hash);
   const account = await pool.query(
     `SELECT password FROM trexdb.account WHERE "userId" = $1 AND "providerId" = 'credential'`,
     [user.id],
   );
-  assertEquals(account.rows[0].password, after.password_hash);
+  assertNotEquals(account.rows[0].password, "stale");
+  assertEquals((await readUser(pool, user.id)).password_hash, null);
   assertEquals((await refreshTokenRow(pool, refresh)).revoked, true);
 });
 
@@ -1500,12 +1587,11 @@ contractTest("POST /change-password is 400 when the account has no password", as
   assertEquals(await res.json(), { error: "No password set for this account" });
 });
 
-contractTest("POST /change-password rotates the hash and revokes refresh tokens", async ({ url, pool }) => {
+contractTest("POST /change-password rotates account.password and revokes refresh tokens", async ({ url, pool }) => {
   const user = await createUser(pool);
-  await pool.query(
-    `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId", password)
-     VALUES ($1, $2, $2, 'credential', 'stale')`,
-    [crypto.randomUUID(), user.id],
+  const before = await pool.query(
+    `SELECT password FROM trexdb.account WHERE "userId" = $1 AND "providerId" = 'credential'`,
+    [user.id],
   );
   const { token: refresh } = await insertRefreshToken(pool, user.id, crypto.randomUUID());
 
@@ -1517,12 +1603,12 @@ contractTest("POST /change-password rotates the hash and revokes refresh tokens"
   assertEquals(res.status, 200);
   assertEquals(await res.json(), { success: true });
 
-  const row = await readUser(pool, user.id);
   const account = await pool.query(
     `SELECT password FROM trexdb.account WHERE "userId" = $1 AND "providerId" = 'credential'`,
     [user.id],
   );
-  assertEquals(account.rows[0].password, row.password_hash);
+  assertNotEquals(account.rows[0].password, before.rows[0].password);
+  assertEquals((await readUser(pool, user.id)).password_hash, null);
   assertEquals((await refreshTokenRow(pool, refresh)).revoked, true);
 
   await withEnv({ TREX_NATIVE_PASSWORD_LOGIN_ENABLED: undefined }, async () => {
@@ -1682,7 +1768,7 @@ contractTest("GET /accounts is a bare array of raw account rows", async ({ url, 
 });
 
 contractTest("GET /accounts is an empty array for a user with none", async ({ url, pool }) => {
-  const user = await createUser(pool);
+  const user = await createUser(pool, { password: null });
   const res = await request("GET", `${url}/accounts`, undefined, await tokenFor(user));
   assertEquals(res.status, 200);
   assertEquals(await res.json(), []);
@@ -1988,10 +2074,9 @@ contractTest("PUT /admin/users/:id validates its body in order", async ({ url, p
 contractTest("PUT /admin/users/:id resets a password and revokes refresh tokens", async ({ url, pool }) => {
   const admin = await createUser(pool, { role: "admin" });
   const target = await createUser(pool);
-  await pool.query(
-    `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId", password)
-     VALUES ($1, $2, $2, 'credential', 'stale')`,
-    [crypto.randomUUID(), target.id],
+  const before = await pool.query(
+    `SELECT password FROM trexdb.account WHERE "userId" = $1 AND "providerId" = 'credential'`,
+    [target.id],
   );
   const { token: refresh } = await insertRefreshToken(pool, target.id, crypto.randomUUID());
 
@@ -2004,12 +2089,12 @@ contractTest("PUT /admin/users/:id resets a password and revokes refresh tokens"
   assertEquals(res.status, 200);
   await drain(res);
 
-  const row = await readUser(pool, target.id);
   const account = await pool.query(
     `SELECT password FROM trexdb.account WHERE "userId" = $1 AND "providerId" = 'credential'`,
     [target.id],
   );
-  assertEquals(account.rows[0].password, row.password_hash);
+  assertNotEquals(account.rows[0].password, before.rows[0].password);
+  assertEquals((await readUser(pool, target.id)).password_hash, null);
   assertEquals((await refreshTokenRow(pool, refresh)).revoked, true);
 });
 
@@ -2517,3 +2602,187 @@ contractTest(
     );
   },
 );
+
+async function engineSession(userId: string): Promise<string> {
+  const { auth } = await import("./better-auth.ts");
+  const ctx = await auth.$context;
+  return (await ctx.internalAdapter.createSession(userId)).id;
+}
+
+contractTest("POST /token password grant links its refresh token to the engine session", async ({ url, pool }) => {
+  const user = await createUser(pool);
+  const res = await fetch(`${url}/token?grant_type=password`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: user.email, password: user.password }),
+  });
+  assertEquals(res.status, 200);
+  const { refresh_token } = await res.json();
+  const row = await refreshTokenRow(pool, refresh_token);
+  assertNotEquals(row.engine_session_id, null);
+  const { rows } = await pool.query(`SELECT "userId" FROM trexdb.session WHERE id = $1`, [row.engine_session_id]);
+  assertEquals(rows[0].userId, user.id);
+});
+
+contractTest("POST /token refresh grant without cookies carries the engine session forward", async ({ url, pool }) => {
+  const user = await createUser(pool);
+  const sid = crypto.randomUUID();
+  const engineId = await engineSession(user.id);
+  const { token } = await insertRefreshToken(pool, user.id, sid);
+  await pool.query(`UPDATE trexdb.refresh_token SET engine_session_id = $1 WHERE session_id = $2`, [engineId, sid]);
+  const before = (await pool.query(`SELECT count(*)::int AS n FROM trexdb.session WHERE "userId" = $1`, [user.id])).rows[0].n;
+
+  const res = await fetch(`${url}/token?grant_type=refresh_token`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ refresh_token: token }),
+  });
+  assertEquals(res.status, 200);
+  const rotated = await refreshTokenRow(pool, (await res.json()).refresh_token);
+  assertEquals(rotated.engine_session_id, engineId);
+  const after = (await pool.query(`SELECT count(*)::int AS n FROM trexdb.session WHERE "userId" = $1`, [user.id])).rows[0].n;
+  assertEquals(after, before);
+});
+
+// oauthClient/oauthRefreshToken fixture pattern: core/server/auth/revoke-on-retire.test.ts
+async function insertOidcRefreshToken(pool: PgPool, clientId: string, sessionId: string, userId: string) {
+  const id = `ort-${sessionId}`;
+  await pool.query(
+    `INSERT INTO trexdb."oauthRefreshToken" (id, token, "clientId", "sessionId", "userId", "expiresAt", "createdAt", scopes)
+     VALUES ($1, $1, $2, $3, $4, NOW() + interval '1 day', NOW(), '[]'::jsonb)`,
+    [id, clientId, sessionId, userId],
+  );
+  return id;
+}
+
+contractTest("POST /revoke-session also ends the linked engine session and nothing else", async ({ url, pool }) => {
+  const user = await createUser(pool);
+  const sid = crypto.randomUUID();
+  const linked = await engineSession(user.id);
+  const other = await engineSession(user.id);
+  await insertRefreshToken(pool, user.id, sid);
+  await pool.query(`UPDATE trexdb.refresh_token SET engine_session_id = $1 WHERE session_id = $2`, [linked, sid]);
+
+  const clientId = `revoke-${user.id.slice(0, 8)}`;
+  await pool.query(
+    `INSERT INTO trexdb."oauthClient" (id, "clientId", "redirectUris") VALUES ($1, $1, '[]'::jsonb)`,
+    [clientId],
+  );
+  try {
+    const linkedOidc = await insertOidcRefreshToken(pool, clientId, linked, user.id);
+    const otherOidc = await insertOidcRefreshToken(pool, clientId, other, user.id);
+
+    const res = await fetch(`${url}/revoke-session`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${await tokenFor(user)}` },
+      body: JSON.stringify({ session_id: sid }),
+    });
+    assertEquals(await res.json(), { success: true });
+    const { rows } = await pool.query(`SELECT id FROM trexdb.session WHERE "userId" = $1 ORDER BY id`, [user.id]);
+    assertEquals(rows.map((r: Json) => r.id), [other]);
+
+    const oidc = await pool.query(`SELECT id FROM trexdb."oauthRefreshToken" WHERE id IN ($1, $2)`, [linkedOidc, otherOidc]);
+    assertEquals(oidc.rows.map((r: Json) => r.id), [otherOidc]);
+  } finally {
+    await pool.query(`DELETE FROM trexdb."oauthClient" WHERE id = $1`, [clientId]);
+  }
+});
+
+contractTest(
+  "POST /revoke-session with another user's session_id leaves them untouched",
+  async ({ url, pool }) => {
+    const user = await createUser(pool);
+    const victim = await createUser(pool);
+    const victimSid = crypto.randomUUID();
+    const victimLinked = await engineSession(victim.id);
+    await insertRefreshToken(pool, victim.id, victimSid);
+    await pool.query(
+      `UPDATE trexdb.refresh_token SET engine_session_id = $1 WHERE session_id = $2`,
+      [victimLinked, victimSid],
+    );
+
+    const clientId = `revoke-other-${victim.id.slice(0, 8)}`;
+    await pool.query(
+      `INSERT INTO trexdb."oauthClient" (id, "clientId", "redirectUris") VALUES ($1, $1, '[]'::jsonb)`,
+      [clientId],
+    );
+    try {
+      const victimOidc = await insertOidcRefreshToken(pool, clientId, victimLinked, victim.id);
+
+      const res = await fetch(`${url}/revoke-session`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${await tokenFor(user)}` },
+        body: JSON.stringify({ session_id: victimSid }),
+      });
+      assertEquals(await res.json(), { success: true });
+
+      const { rows } = await pool.query(`SELECT id FROM trexdb.session WHERE id = $1`, [victimLinked]);
+      assertEquals(rows.length, 1);
+      const oidc = await pool.query(`SELECT id FROM trexdb."oauthRefreshToken" WHERE id = $1`, [victimOidc]);
+      assertEquals(oidc.rows.length, 1);
+      const refresh = await pool.query(
+        `SELECT revoked FROM trexdb.refresh_token WHERE session_id = $1`,
+        [victimSid],
+      );
+      assertEquals(refresh.rows[0].revoked, false);
+    } finally {
+      await pool.query(`DELETE FROM trexdb."oauthClient" WHERE id = $1`, [clientId]);
+    }
+  },
+);
+
+contractTest("POST /logout with only a bearer ends the linked engine session", async ({ url, pool }) => {
+  const user = await createUser(pool);
+  const sid = crypto.randomUUID();
+  const linked = await engineSession(user.id);
+  await insertRefreshToken(pool, user.id, sid);
+  await pool.query(`UPDATE trexdb.refresh_token SET engine_session_id = $1 WHERE session_id = $2`, [linked, sid]);
+
+  const clientId = `logout-${user.id.slice(0, 8)}`;
+  await pool.query(
+    `INSERT INTO trexdb."oauthClient" (id, "clientId", "redirectUris") VALUES ($1, $1, '[]'::jsonb)`,
+    [clientId],
+  );
+  try {
+    const linkedOidc = await insertOidcRefreshToken(pool, clientId, linked, user.id);
+
+    const res = await fetch(`${url}/logout`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${await tokenFor(user, sid)}` },
+    });
+    assertEquals(res.status, 204);
+    const { rows } = await pool.query(`SELECT 1 FROM trexdb.session WHERE id = $1`, [linked]);
+    assertEquals(rows.length, 0);
+    const oidc = await pool.query(`SELECT 1 FROM trexdb."oauthRefreshToken" WHERE id = $1`, [linkedOidc]);
+    assertEquals(oidc.rows.length, 0);
+  } finally {
+    await pool.query(`DELETE FROM trexdb."oauthClient" WHERE id = $1`, [clientId]);
+  }
+});
+
+// isEngineSessionGone maps the FK violation createTokenResponse's INSERT
+// raises when a carried-forward engine session was deleted mid-request (a
+// /revoke-session or ban race) onto the refresh grant's existing 400 refusal.
+// No deterministic integration test exists for the race itself — it needs the
+// session row deleted between the UPDATE that revokes the old refresh token
+// and the INSERT that writes the new one, which nothing in this suite can
+// interleave without disabling the trigger/FK machinery under test — so the
+// error mapping is unit-tested directly against representative pg error shapes.
+Deno.test({
+  name: "isEngineSessionGone matches only the refresh_token engine-session FK violation",
+  ignore: !DATABASE_URL,
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const { isEngineSessionGone } = await import("./auth-router.ts");
+    assertEquals(
+      isEngineSessionGone({ code: "23503", constraint: "refresh_token_engine_session_id_fkey" }),
+      true,
+    );
+    assertEquals(isEngineSessionGone({ code: "23503", constraint: "refresh_token_userId_fkey" }), false);
+    assertEquals(isEngineSessionGone({ code: "23505", constraint: "refresh_token_engine_session_id_fkey" }), false);
+    assertEquals(isEngineSessionGone(new Error("boom")), false);
+    assertEquals(isEngineSessionGone(null), false);
+    assertEquals(isEngineSessionGone(undefined), false);
+  },
+});

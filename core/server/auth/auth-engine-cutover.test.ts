@@ -214,7 +214,10 @@ cutoverTest("signing up leaves the same session and cookie as signing in", async
     // use, so signup goes through the engine rather than only writing rows.
     assertEquals(await sessionCount(pool, body.user.id), 1);
     assertNotEquals(engineCookie(res), undefined);
-    assertEquals(await credential(pool, body.user.id), await storedHash(pool, body.user.id));
+    // account.password is the only column trex writes; the legacy column is
+    // never mirrored onto.
+    assertNotEquals(await credential(pool, body.user.id), null);
+    assertEquals(await storedHash(pool, body.user.id), null);
   } finally {
     if (previousAdmin !== undefined) Deno.env.set("ADMIN_EMAIL", previousAdmin);
     if (before.length > 0) {
@@ -327,7 +330,11 @@ for (const { name, write } of PASSWORD_WRITES) {
     assertEquals(res.status, 200);
     await res.text();
 
-    assertEquals(await credential(pool, user.id), await storedHash(pool, user.id));
+    // account.password is the only column a write lands on; the legacy
+    // column is cleared, not mirrored onto, so a rolled-back node cannot
+    // still accept the superseded password.
+    assertNotEquals(await credential(pool, user.id), null);
+    assertEquals(await storedHash(pool, user.id), null);
     assertEquals((await grant(url, user.email, PASSWORD)).status, 400);
     const signedIn = await grant(url, user.email, next);
     assertEquals(signedIn.status, 200);

@@ -12,6 +12,12 @@ import { assertEquals, assertStringIncludes } from "jsr:@std/assert";
 
 const dbUrl = Deno.env.get("DATABASE_URL");
 
+// user-create goes through createEngineUser, which dynamically imports
+// better-auth.ts and derives its secret from this at first use. Set once per
+// test here so the file doesn't depend on another file's tests running first
+// in the same process.
+const VALID_ROOT = btoa(String.fromCharCode(...new Uint8Array(32).map((_, i) => i)));
+
 // deno-lint-ignore no-explicit-any
 type Handler = (args: any) => Promise<any>;
 
@@ -38,6 +44,7 @@ async function withDb(fn: (db: PgTestClient, run: string) => Promise<void>) {
   const db = new Client({ connectionString: dbUrl });
   await db.connect();
   const run = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+  Deno.env.set("TREX_ROOT_KEY", VALID_ROOT);
   try {
     await fn(db, run);
   } finally {
@@ -161,4 +168,44 @@ dbTest("user-create leaves an ordinary address genuine", async (db, run) => {
     is_placeholder_email: false,
     unconfirmed: false,
   });
+});
+
+// ── Through createEngineUser ────────────────────────────────────────────────
+//
+// user-create now shares the engine helper with POST /admin/users, so it
+// picks up case-folding and real credential linking for free.
+
+dbTest("user-create stores the address case-folded and echoes it", async (db, run) => {
+  const create = await userCreate();
+  const typed = `MCP-${run}@Example.COM`;
+
+  const res = await create({ name: "Jo", email: typed, password: "a-long-password" });
+  assertEquals(res.isError, undefined);
+  assertEquals(JSON.parse(res.content[0].text).email, typed.toLowerCase());
+  assertEquals((await rowsFor(db, typed.toLowerCase())).length, 1);
+});
+
+dbTest("user-create with a password signs in through the engine", async (_db, run) => {
+  const create = await userCreate();
+  const email = `mcp-${run}@example.com`;
+  const res = await create({ name: "Jo", email, password: "a-long-password" });
+  const { id } = JSON.parse(res.content[0].text);
+
+  const { auth } = await import("../../auth/better-auth.ts");
+  const signedIn = await auth.api.signInEmail({ body: { email, password: "a-long-password" } });
+  assertEquals(signedIn.user.id, id);
+});
+
+dbTest("user-create for an address a soft-deleted row holds is an error and adds no row", async (db, run) => {
+  const email = `mcp-${run}@example.com`;
+  await db.query(
+    `INSERT INTO trexdb."user" (id, name, email, role, "emailVerified", "deletedAt")
+     VALUES ($1, 'Old', $2, 'user', true, NOW())`,
+    [crypto.randomUUID(), email],
+  );
+  const create = await userCreate();
+  const res = await create({ name: "Jo", email, password: "a-long-password" });
+  assertEquals(res.isError, true);
+  const { rows } = await db.query(`SELECT count(*)::int AS n FROM trexdb."user" WHERE email = $1`, [email]);
+  assertEquals(rows[0].n, 1);
 });
