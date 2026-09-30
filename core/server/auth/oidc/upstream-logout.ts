@@ -7,6 +7,23 @@
 // that already happens — this only carries the browser one hop further so the
 // upstream can clear its own cookie.
 import { federationFromAppMetadata } from "./claims.ts";
+import { decryptWithDek } from "../dek.ts";
+
+/** The upstream id_token stored on the user's federated account, decrypted. */
+async function upstreamIdToken(userId: string, providerId: string): Promise<string | null> {
+  const { rows } = await (await db()).query<{ idToken: string | null }>(
+    `SELECT "idToken" FROM trexdb.account WHERE "userId" = $1 AND "providerId" = $2 LIMIT 1`,
+    [userId, providerId],
+  );
+  const enc = rows[0]?.idToken;
+  if (!enc) return null;
+  try {
+    return await decryptWithDek(enc);
+  } catch (err) {
+    console.error("[oidc] end-session: could not decrypt upstream id_token:", err);
+    return null;
+  }
+}
 
 /**
  * The pool, fetched when a query is actually made.
@@ -56,9 +73,10 @@ async function endSessionEndpoint(providerId: string): Promise<string | null> {
   const { rows } = await (await db()).query<{
     issuer: string | null;
     discovery_url: string | null;
+    authorization_endpoint: string | null;
     oidcConfig: Record<string, unknown> | null;
   }>(
-    `SELECT issuer, discovery_url, "oidcConfig"
+    `SELECT issuer, discovery_url, authorization_endpoint, "oidcConfig"
        FROM trexdb.sso_provider
       WHERE id = $1 AND enabled = true`,
     [providerId],
@@ -69,6 +87,16 @@ async function endSessionEndpoint(providerId: string): Promise<string | null> {
   }
 
   const row = rows[0];
+  // Prefer deriving from the PUBLIC authorization_endpoint the browser was sent
+  // to at sign-in (`.../oidc/auth` -> `.../oidc/session/end`). The issuer and
+  // its discovery document name the INTERNAL host, which a browser cannot reach
+  // in a split public/internal deployment; only this column is browser-facing.
+  if (typeof row.authorization_endpoint === "string" && /\/auth\/?$/.test(row.authorization_endpoint)) {
+    const derived = row.authorization_endpoint.replace(/\/auth\/?$/, "/session/end");
+    endSessionCache.set(providerId, derived);
+    return derived;
+  }
+
   const persisted = row.oidcConfig?.["end_session_endpoint"];
   if (typeof persisted === "string" && persisted) {
     endSessionCache.set(providerId, persisted);
@@ -123,6 +151,10 @@ export async function upstreamLogoutUrl(
 
   try {
     const url = new URL(endpoint);
+    // Without the hint Logto keeps its session and prompts for confirmation, so
+    // the browser silently re-authenticates on the next sign-in.
+    const idToken = await upstreamIdToken(userId, providerId).catch(() => null);
+    if (idToken) url.searchParams.set("id_token_hint", idToken);
     url.searchParams.set("post_logout_redirect_uri", returnTo);
     return url.toString();
   } catch {
