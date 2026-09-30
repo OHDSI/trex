@@ -16,7 +16,7 @@
 // V19; every `string[]` field is jsonb.
 import type { PoolClient } from "pg";
 import { pool } from "../../db.ts";
-import { parseSeedClient, SERVICE_SCOPE, type SeedClientSpec } from "./config.ts";
+import { parseSeedClient, parseServiceClients, SERVICE_SCOPE, type SeedClientSpec } from "./config.ts";
 
 /**
  * The plugin's `defaultHasher`, reproduced: with the jwt plugin installed
@@ -174,8 +174,8 @@ async function registerClient(
       // moves — it now sends Basic when it is talking to trex's own provider
       // (d2e-compat/routes.ts).
       confidential ? "client_secret_basic" : "none",
-      JSON.stringify(["authorization_code", "refresh_token", "client_credentials"]),
-      JSON.stringify(["code"]),
+      JSON.stringify(spec.grantTypes ?? ["authorization_code", "refresh_token", "client_credentials"]),
+      JSON.stringify(spec.responseTypes ?? ["code"]),
       // There is no column for the roles a client carries. They ride in
       // metadata, which is what customAccessTokenClaims is handed
       // (`parseClientMetadata(client.metadata)`), so a client_credentials token
@@ -235,4 +235,31 @@ export async function seedOAuthClientFromEnv(
     console.error("[oidc] client registration failed (continuing):", (e as Error)?.message ?? e);
     return false;
   }
+}
+
+/** Called at boot, like the above; one bad client does not stop the others. */
+export async function seedServiceClientsFromEnv(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): Promise<number> {
+  let specs: SeedClientSpec[];
+  try {
+    specs = parseServiceClients(env);
+  } catch (e) {
+    console.error("[oidc] service clients not registered:", (e as Error)?.message ?? e);
+    return 0;
+  }
+  let seeded = 0;
+  for (const spec of specs) {
+    try {
+      await upsertOAuthClient(spec);
+      console.log(`[oidc] registered service client ${spec.clientId} (${spec.name})`);
+      seeded++;
+    } catch (e) {
+      console.error(
+        `[oidc] service client ${spec.name} registration failed (continuing):`,
+        (e as Error)?.message ?? e,
+      );
+    }
+  }
+  return seeded;
 }

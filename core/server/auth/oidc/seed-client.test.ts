@@ -10,7 +10,7 @@ import { betterAuth } from "better-auth";
 import { jwt } from "better-auth/plugins";
 import { oauthProvider } from "@better-auth/oauth-provider";
 import { pool } from "../../db.ts";
-import { seedOAuthClientFromEnv } from "./seed-client.ts";
+import { seedOAuthClientFromEnv, seedServiceClientsFromEnv } from "./seed-client.ts";
 
 const DATABASE_URL = Deno.env.get("DATABASE_URL");
 
@@ -246,4 +246,57 @@ test("re-seeding merges into metadata rather than replacing it", async () => {
   assertEquals(metadata.software_statement, "kept");
   // And the merge is right-biased, so the seeder still owns the roles.
   assertEquals(metadata.clientRoles, ["ALP_USER_ADMIN", "ALP_SYSTEM_ADMIN"]);
+});
+
+// ── service clients (TREX_OIDC_SERVICE_CLIENTS) ─────────────────────────────
+
+const SERVICE_ID = "d2e-data-seed-test";
+
+const SERVICE_ENV = {
+  TREX_OIDC_ISSUER: ENV.TREX_OIDC_ISSUER,
+  TREX_OIDC_CLIENT_ID: CLIENT_ID,
+  TREX_OIDC_SERVICE_CLIENTS: JSON.stringify([
+    { name: "alp-data", type: "MachineToMachine", id: SERVICE_ID, secret: "s3cret" },
+  ]),
+};
+
+async function deleteServiceClient() {
+  await pool.query(`DELETE FROM trexdb."oauthClientResource" WHERE "clientId" = $1`, [SERVICE_ID]);
+  await pool.query(`DELETE FROM trexdb."oauthClient" WHERE "clientId" = $1`, [SERVICE_ID]);
+}
+
+test("a service client is registered for client_credentials and nothing else", async () => {
+  const auth = providerInstance();
+  await auth.$context; // seeds oauthResource, which the link below needs
+  try {
+    assertEquals(await seedServiceClientsFromEnv(SERVICE_ENV), 1);
+    const row = (await pool.query(
+      `SELECT * FROM trexdb."oauthClient" WHERE "clientId" = $1`,
+      [SERVICE_ID],
+    )).rows[0];
+    assertNotEquals(row, undefined);
+    assertEquals(row.name, "alp-data");
+    assertEquals(row.grantTypes, ["client_credentials"]);
+    assertEquals(row.responseTypes, []);
+    assertEquals(row.redirectUris, []);
+    assertEquals(row.clientSecret, "HsHCa1DV08WNlYMYGvgHZlX-AHVr9yhZQLo2cPmfy6A");
+    assertEquals(row.tokenEndpointAuthMethod, "client_secret_basic");
+    assertEquals(row.clientCredentialsScopes, ["trex:service"]);
+    assertEquals(row.requirePKCE, false);
+    assertEquals((row.metadata as { clientRoles?: string[] }).clientRoles, []);
+
+    const links = await pool.query(
+      `SELECT "resourceId" FROM trexdb."oauthClientResource" WHERE "clientId" = $1`,
+      [SERVICE_ID],
+    );
+    assertEquals(links.rows.map((r) => r.resourceId), [ISSUER]);
+  } finally {
+    await deleteServiceClient();
+  }
+});
+
+test("a malformed service client list is logged, and boot carries on", async () => {
+  // Boot does not await it, so it must not throw.
+  assertEquals(await seedServiceClientsFromEnv({ TREX_OIDC_SERVICE_CLIENTS: "alp-data" }), 0);
+  assertEquals(await seedServiceClientsFromEnv({}), 0);
 });

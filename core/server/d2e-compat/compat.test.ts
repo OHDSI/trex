@@ -295,7 +295,6 @@ Deno.test("trex: the secret moves into a Basic header and OUT of the body", () =
     grant_type: "authorization_code",
     client_id: "d2e-webapi",
     code: "abc",
-    client_secret: "posted-by-the-caller",
   });
   const headers = applyClientAuthentication(params, TREX_CFG);
   assertEquals(params.has("client_secret"), false);
@@ -305,6 +304,30 @@ Deno.test("trex: the secret moves into a Basic header and OUT of the body", () =
     clientId: "d2e-webapi",
     clientSecret: "5FT0DkLlEvzGXAjP08EMuRSU3U72yh",
   });
+});
+
+Deno.test("trex: a caller's own client credentials are forwarded, not replaced", () => {
+  // Plugin authz keys a service's roles on its own client id.
+  const params = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: "data-client",
+    client_secret: "data-secret",
+  });
+  const headers = applyClientAuthentication(params, TREX_CFG);
+  assertEquals(params.has("client_secret"), false);
+  assertEquals(decodeBasicCredentials(headers.Authorization), {
+    clientId: "data-client",
+    clientSecret: "data-secret",
+  });
+});
+
+Deno.test("client_credentials without caller credentials never gets the configured secret", () => {
+  for (const method of ["client_secret_basic", "client_secret_post"] as const) {
+    const params = new URLSearchParams({ grant_type: "client_credentials" });
+    const headers = applyClientAuthentication(params, { ...TREX_CFG, tokenEndpointAuthMethod: method });
+    assertEquals(headers, {}, method);
+    assertEquals(params.has("client_secret"), false, method);
+  }
 });
 
 Deno.test("trex: a secret with reserved characters survives the round trip", () => {

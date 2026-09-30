@@ -192,11 +192,25 @@ export function shouldReserializeParsedBody(
 // the header. Stripping rather than leaving it as dead weight is deliberate —
 // this route logs its own parameter names, and a credential that cannot be used
 // should not be carried through a retry loop or written to a log.
+//
+// A caller's own credentials are forwarded unchanged, and the configured secret
+// is never added to a client_credentials grant: it is for the portal's code
+// exchange, and lending it let this public route mint service tokens.
 export function applyClientAuthentication(
   params: URLSearchParams,
   idpCfg: Pick<IdpConfig, "clientId" | "clientSecret" | "tokenEndpointAuthMethod">,
 ): Record<string, string> {
-  const { clientId, clientSecret, tokenEndpointAuthMethod } = idpCfg;
+  const { tokenEndpointAuthMethod } = idpCfg;
+  const callerSecret = params.get("client_secret");
+  if (callerSecret) {
+    if (tokenEndpointAuthMethod !== "client_secret_basic") return {};
+    params.delete("client_secret");
+    const callerId = params.get("client_id") || idpCfg.clientId;
+    return { Authorization: encodeBasicCredentials(callerId, callerSecret) };
+  }
+  if (params.get("grant_type") === "client_credentials") return {};
+
+  const { clientId, clientSecret } = idpCfg;
   if (tokenEndpointAuthMethod === "client_secret_basic") {
     params.delete("client_secret");
     // The package's own encoder, not a hand-rolled base64: the provider
