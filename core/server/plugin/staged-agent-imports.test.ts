@@ -127,7 +127,41 @@ async function reachableFrom(entries: string[]): Promise<Set<string>> {
   return seen;
 }
 
-Deno.test("no module a staged agent can reach imports from a remote URL", async () => {
+// Resolution rules a staged worker actually has, in one place. `strip` removes
+// comments AND template literals first: prompts.ts embeds example React/zod
+// code inside prompt strings, and a scanner that reads those as real imports
+// reports noise until someone switches the guard off.
+function strip(s: string): string {
+  return s
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/`(?:[^`\\]|\\[\s\S])*`/g, "``")
+    .split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
+}
+
+// Between the keyword and `from`, only a real clause may appear (identifiers,
+// braces, commas, `as`, whitespace). `[^;]*?` used to span whole lines, so a
+// description reading "switch from 'plan' to 'agent'" parsed as an import.
+const STATIC_RE = /^\s*(?:import|export)(?:\s+type)?[\w*{},\s]*?\bfrom\s*["']([^"']+)["']/gm;
+const SIDE_RE = /^\s*import\s+["']([^"']+)["']/gm;
+const DYN_RE = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
+
+/** Bare specifiers the generated import map names (plugin/agents.ts). */
+async function mappedSpecifiers(): Promise<Set<string>> {
+  const src = await Deno.readTextFile(`${REPO}core/server/plugin/agents.ts`);
+  const start = src.indexOf("const imports: Record<string, string> = {");
+  const block = src.slice(start, src.indexOf("\n  };", start));
+  return new Set([...block.matchAll(/^\s*"([^"]+)":/gm)].map((m) => m[1]));
+}
+
+/**
+ * Walk the graph a staged agent really loads: relative imports AND the
+ * `eve/...` specifiers the generated map points back into the staged core, so
+ * core's own modules are covered too — the unprefixed MCP SDK import that made
+ * every MCP tool vanish lived in core, out of reach of a plugins-only walk.
+ */
+async function stageGraphOffenders(): Promise<string[]> {
+  const CORE = `${REPO}core/server/agents/`;
+  const mapped = await mappedSpecifiers();
   const entries: string[] = [];
   for await (const plugin of Deno.readDir(`${REPO}plugins`)) {
     if (!plugin.isDirectory) continue;
@@ -137,24 +171,59 @@ Deno.test("no module a staged agent can reach imports from a remote URL", async 
     } catch {
       continue;
     }
-    // loader.ts dynamic-imports agent.ts, dynamic-tools.ts and every tools/*.ts,
-    // so each is an entrypoint in its own right.
     for await (
       const e of walk(agentDir, { exts: [".ts"], includeDirs: false, skip: [/\.test\.ts$/, /\/evals\//] })
     ) entries.push(e.path);
   }
+  entries.push(`${CORE}service/index.ts`); // the stage's index.ts imports this
   assert(entries.length > 0, "found no plugin agent entrypoints to walk");
 
+  const seen = new Set<string>();
   const offenders: string[] = [];
-  for (const f of await reachableFrom(entries)) {
-    for (const m of (await Deno.readTextFile(f)).matchAll(REMOTE_RE)) {
-      offenders.push(`${f.slice(REPO.length)} -> ${m[1]}`);
+  const queue = [...entries];
+  while (queue.length) {
+    const f = queue.pop()!;
+    if (seen.has(f)) continue;
+    let raw: string;
+    try {
+      raw = await Deno.readTextFile(f);
+    } catch {
+      continue;
+    }
+    seen.add(f);
+    const src = strip(raw);
+    const rel = f.slice(REPO.length);
+    const specs: string[] = [];
+    for (const re of [STATIC_RE, SIDE_RE, DYN_RE]) {
+      for (const m of src.matchAll(re)) specs.push(m[1]);
+    }
+    for (const spec of specs) {
+      let file: string | undefined;
+      if (spec.startsWith(".")) file = pnormalize(pjoin(pdirname(f), spec));
+      else if (spec.startsWith("eve/core/")) file = CORE + spec.slice("eve/core/".length);
+      else if (spec === "eve") file = `${CORE}eve-shim/mod.ts`;
+      else if (spec === "eve/tools") file = `${CORE}eve-shim/tools.ts`;
+      if (file) {
+        // Outside the repo means outside the stage: the servicePath escape.
+        if (!file.startsWith(REPO)) offenders.push(`${rel} -> ${spec} (escapes the stage)`);
+        else queue.push(file);
+        continue;
+      }
+      if (/^https?:\/\//.test(spec)) offenders.push(`${rel} -> ${spec} (remote URL)`);
+      else if (spec.startsWith("node:") || spec.startsWith("npm:") || spec.startsWith("jsr:")) continue;
+      else if (spec.startsWith("eve/") || mapped.has(spec)) continue;
+      else offenders.push(`${rel} -> ${spec} (bare, not in the generated import map)`);
     }
   }
+  return offenders.sort();
+}
+
+Deno.test("every module a staged agent can reach resolves inside the stage", async () => {
   assertEquals(
-    offenders.sort(),
+    await stageGraphOffenders(),
     [],
-    "a staged agent cannot load a remote URL (it is outside the worker's " +
-      `servicePath); import path helpers from "node:path" instead:\n  ${offenders.join("\n  ")}`,
+    'a staged worker resolves only what is under its servicePath, what the generated ' +
+      'import map names, or what the runtime itself resolves (node:/npm:/jsr:). Use ' +
+      '"node:path" for path helpers and an "npm:" prefix for npm packages.',
   );
 });
