@@ -55,17 +55,25 @@ const CONFIRMATION_FORM_MARKER = "data-oidc-logout-confirmation";
  * Two outcomes, because the endpoint answers a browser and an API caller
  * differently for the same refusal (dist/authorize-riRRCSbC.mjs:661-663):
  *
- * - a browser navigation with a live session gets the confirmation page, and
- *   the confirmation cookie is the only thing that distinguishes it from the
- *   success page — both are 200 HTML;
+ * - a browser navigation with a live session gets the confirmation page, whose
+ *   confirmation cookie is SET to a signed value — the only thing that
+ *   distinguishes it from the success page, both being 200 HTML;
  * - anything else gets 401 `The id_token_hint is invalid`.
  *
  * A verified hint takes neither path: it deletes the session and redirects to
- * the registered post-logout URI (:666-675).
+ * the registered post-logout URI (:666-675). Both that path (:673) and the
+ * confirm-completion CLEAR the confirmation cookie (empty value, Max-Age=0), so
+ * only a cookie with a non-empty value counts — a cleared one is a success.
  */
 export function logoutHintWasRejected(status: number, setCookies: string[]): boolean {
   if (status === 401) return true;
-  return setCookies.some((c) => c.split("=")[0]?.includes(LOGOUT_CONFIRMATION_COOKIE_SUFFIX));
+  return setCookies.some((c) => {
+    const eq = c.indexOf("=");
+    if (eq < 0) return false;
+    if (!c.slice(0, eq).includes(LOGOUT_CONFIRMATION_COOKIE_SUFFIX)) return false;
+    const semi = c.indexOf(";", eq);
+    return c.slice(eq + 1, semi < 0 ? undefined : semi).trim().length > 0;
+  });
 }
 
 export type HintVerdict = "signature-valid" | "signature-invalid" | "unverifiable";

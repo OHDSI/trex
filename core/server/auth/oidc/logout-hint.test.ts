@@ -41,6 +41,19 @@ Deno.test("a hint that WORKED is not reported as rejected", () => {
   assertEquals(logoutHintWasRejected(302, ["__Secure-better-auth.session_token=; Max-Age=0"]), false);
   assertEquals(logoutHintWasRejected(200, []), false, "the success page");
   assertEquals(logoutHintWasRejected(200, ["sb-access-token=; Max-Age=0"]), false);
+  // The verified-hint path (:673) and the confirm-completion CLEAR the
+  // confirmation cookie (empty value, Max-Age=0). Matching only its name read
+  // that as a rejection, misreporting a successful logout.
+  assertEquals(
+    logoutHintWasRejected(302, ["d2e.oauth_logout_confirmation=; Path=/; Max-Age=0"]),
+    false,
+    "a cleared confirmation cookie is a success, not a rejection",
+  );
+  assertEquals(
+    logoutHintWasRejected(200, ["d2e.oauth_logout_confirmation=; Max-Age=0"]),
+    false,
+    "the success page clears the same cookie",
+  );
 });
 
 Deno.test("the diagnosis names the JWKS fetch, not the certificate", () => {
