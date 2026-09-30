@@ -199,6 +199,10 @@ export interface SeedClientSpec {
    * granted to this client without anyone saying so.
    */
   resourceIdentifier: string;
+  /** Defaults to authorization_code, refresh_token and client_credentials. */
+  grantTypes?: string[];
+  /** Defaults to ["code"]. */
+  responseTypes?: string[];
 }
 
 const splitList = (raw: string | undefined): string[] =>
@@ -232,6 +236,52 @@ export function parseSeedClient(
     // the row the client is linked to cannot drift.
     resourceIdentifier: oidcIssuer(env.TREX_OIDC_ISSUER),
   };
+}
+
+/**
+ * Confidential, client_credentials-only clients from TREX_OIDC_SERVICE_CLIENTS:
+ * a JSON array shaped like d2e's LOGTO__CLIENT_APPS entries ({name, id, secret},
+ * other keys ignored). Entries missing id or secret, duplicates and the
+ * interactive client are skipped; a value that is not an array throws.
+ */
+export function parseServiceClients(
+  env: Record<string, string | undefined>,
+): SeedClientSpec[] {
+  const raw = env.TREX_OIDC_SERVICE_CLIENTS?.trim();
+  if (!raw) return [];
+  let entries: unknown;
+  try {
+    entries = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`TREX_OIDC_SERVICE_CLIENTS is not valid JSON: ${(e as Error).message}`);
+  }
+  if (!Array.isArray(entries)) {
+    throw new Error("TREX_OIDC_SERVICE_CLIENTS must be a JSON array of {name, id, secret}");
+  }
+
+  const interactive = env.TREX_OIDC_CLIENT_ID?.trim();
+  const specs: SeedClientSpec[] = [];
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") continue;
+    const { id, secret, name } = entry as Record<string, unknown>;
+    const clientId = typeof id === "string" ? id.trim() : "";
+    const clientSecret = typeof secret === "string" ? secret.trim() : "";
+    if (!clientId || !clientSecret || clientId === interactive) continue;
+    if (specs.some((s) => s.clientId === clientId)) continue;
+    specs.push({
+      clientId,
+      clientSecret,
+      name: typeof name === "string" && name.trim() ? name.trim() : clientId,
+      redirectUris: [],
+      postLogoutRedirectUris: [],
+      clientRoles: [],
+      allowedScopes: undefined,
+      resourceIdentifier: oidcIssuer(env.TREX_OIDC_ISSUER),
+      grantTypes: ["client_credentials"],
+      responseTypes: [],
+    });
+  }
+  return specs;
 }
 
 /**
