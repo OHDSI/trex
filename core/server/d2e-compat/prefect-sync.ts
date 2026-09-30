@@ -116,7 +116,7 @@ async function buildFlowCredentials(): Promise<any[]> {
       };
       const read = pick("Read");
       const admin = pick("Admin");
-      const extra = row.extra ?? {};
+      const extra = row.extra?.Internal ?? row.extra ?? {};
       out.push({
         readUser: read ? read.username : null,
         readPassword: read ? await recoverPassword(read.password, read.password_encrypted) : null,
