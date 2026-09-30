@@ -6,7 +6,7 @@
  * and Deno.mkdir write to the real host filesystem (not an ephemeral TmpFs).
  */
 
-import { join } from "https://deno.land/std@0.224.0/path/mod.ts";
+import { join } from "node:path";
 
 const DEFAULT_WORKSPACE_DIR = "/tmp/devx-workspaces";
 

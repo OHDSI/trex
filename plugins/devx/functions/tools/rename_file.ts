@@ -1,7 +1,7 @@
 // @ts-nocheck - Deno edge function
 import type { ToolDefinition } from "./types.ts";
 import { safeJoin } from "./path_safety.ts";
-import { dirname } from "https://deno.land/std@0.224.0/path/mod.ts";
+import { dirname } from "node:path";
 
 export const renameFileTool: ToolDefinition<{
   source: string;

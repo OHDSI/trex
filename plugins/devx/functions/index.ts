@@ -23,7 +23,7 @@ import { parseSecurityFindings } from "./security_review_prompt.ts";
 import { parseQaFindings } from "./qa_review_prompt.ts";
 import { parseDesignFindings } from "./design_review_prompt.ts";
 import { TEMPLATES, scaffoldTemplate, injectComponentTagger } from "./templates.ts";
-import { relative } from "https://deno.land/std@0.224.0/path/mod.ts";
+import { relative } from "node:path";
 import { gitOps } from "./git.ts";
 import { ensureGitConfig, refreshUserGitConfigs } from "./git_identity.ts";
 import { getGithubToken, injectToken } from "./routes/github_routes.ts";

@@ -16,7 +16,7 @@
 // so they never hit the loader. Everything a staged agent imports at runtime
 // must go through an "eve/..." specifier from the generated import map (see
 // agents.ts), which points inside the stage.
-import { assertEquals } from "jsr:@std/assert";
+import { assert, assertEquals } from "jsr:@std/assert";
 import { walk } from "jsr:@std/fs/walk";
 import { fromFileUrl } from "jsr:@std/path";
 
@@ -78,4 +78,83 @@ Deno.test("the rule exempts type-only imports and catches value imports", () => 
     ["../../../core/server/agents/connections/mcp.ts"],
   );
   assertEquals(offendingImports(`import { defineTool } from "eve/tools";`), []);
+});
+
+// ---------------------------------------------------------------------------
+// The same confinement rule as above, for REMOTE specifiers.
+//
+// buildAgentWorkerConfig stages the agent and gives the worker that stage as
+// its servicePath, and "the worker can only import modules under its
+// servicePath" (agents.ts). A relative path that climbs out of the stage is one
+// way to break that; an `https://…` URL is another — it is not under the stage
+// either, so the worker dies at module evaluation with
+// "Module not found: https://…".
+//
+// That is not hypothetical: plugins/devx/functions/** imported
+// `https://deno.land/std@0.224.0/path/mod.ts` for join/dirname/relative/resolve,
+// and the agent reaches those files through `../functions/...`. Once the
+// relative-core-import bug above was fixed, module resolution got one step
+// further and died on this instead — the coder's session create returned 500
+// again, for the same reason wearing a different specifier.
+//
+// Path helpers must come from `node:path` (a runtime builtin, so it needs
+// neither the network nor anything under the stage). The walk below follows
+// only relative imports, so it reports exactly what a staged agent would
+// actually try to load — a plugin's own function files included.
+import { dirname as pdirname, join as pjoin, normalize as pnormalize } from "jsr:@std/path";
+
+const REL_RE = /(?:^|\n)\s*(?:import|export)(?:\s+type)?[\s\S]*?from\s*["'](\.[^"']+)["']/g;
+const REMOTE_RE = /(?:^|\n)\s*(?:import|export)(?:\s+type)?[\s\S]*?from\s*["'](https?:\/\/[^"']+)["']/g;
+
+/** Every file a staged agent can reach by following relative imports. */
+async function reachableFrom(entries: string[]): Promise<Set<string>> {
+  const seen = new Set<string>();
+  const queue = [...entries];
+  while (queue.length) {
+    const f = queue.pop()!;
+    if (seen.has(f)) continue;
+    let src: string;
+    try {
+      src = await Deno.readTextFile(f);
+    } catch {
+      continue; // a specifier we cannot resolve on disk is not ours to police here
+    }
+    seen.add(f);
+    for (const m of src.matchAll(REL_RE)) {
+      queue.push(pnormalize(pjoin(pdirname(f), m[1])));
+    }
+  }
+  return seen;
+}
+
+Deno.test("no module a staged agent can reach imports from a remote URL", async () => {
+  const entries: string[] = [];
+  for await (const plugin of Deno.readDir(`${REPO}plugins`)) {
+    if (!plugin.isDirectory) continue;
+    const agentDir = `${REPO}plugins/${plugin.name}/agent`;
+    try {
+      if (!(await Deno.stat(agentDir)).isDirectory) continue;
+    } catch {
+      continue;
+    }
+    // loader.ts dynamic-imports agent.ts, dynamic-tools.ts and every tools/*.ts,
+    // so each is an entrypoint in its own right.
+    for await (
+      const e of walk(agentDir, { exts: [".ts"], includeDirs: false, skip: [/\.test\.ts$/, /\/evals\//] })
+    ) entries.push(e.path);
+  }
+  assert(entries.length > 0, "found no plugin agent entrypoints to walk");
+
+  const offenders: string[] = [];
+  for (const f of await reachableFrom(entries)) {
+    for (const m of (await Deno.readTextFile(f)).matchAll(REMOTE_RE)) {
+      offenders.push(`${f.slice(REPO.length)} -> ${m[1]}`);
+    }
+  }
+  assertEquals(
+    offenders.sort(),
+    [],
+    "a staged agent cannot load a remote URL (it is outside the worker's " +
+      `servicePath); import path helpers from "node:path" instead:\n  ${offenders.join("\n  ")}`,
+  );
 });

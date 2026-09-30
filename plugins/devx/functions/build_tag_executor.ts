@@ -5,7 +5,7 @@
 
 import type { BuildTag } from "./build_tag_parser.ts";
 import { safeJoin } from "./tools/path_safety.ts";
-import { dirname } from "https://deno.land/std@0.224.0/path/mod.ts";
+import { dirname } from "node:path";
 import { duckdb, escapeSql } from "./duckdb.ts";
 
 export interface BuildTagContext {

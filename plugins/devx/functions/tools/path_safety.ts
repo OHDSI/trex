@@ -4,7 +4,7 @@
  * All tool file operations must use safeJoin() to resolve paths.
  */
 
-import { join, resolve, relative } from "https://deno.land/std@0.224.0/path/mod.ts";
+import { join, resolve, relative } from "node:path";
 
 /**
  * Safely join a base path with user-provided path segments.
