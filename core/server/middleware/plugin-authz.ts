@@ -3,6 +3,7 @@ import { ROLE_SCOPES, REQUIRED_URL_SCOPES, SERVICE_CLIENT_ROLES } from "../plugi
 import { extractToken, verifyIdpToken } from "../d2e-compat/auth.ts";
 import { type D2eIdp, d2eIdp, isSystemAdminClaims } from "../d2e-compat/idp.ts";
 import { fetchUserGroups } from "../d2e-compat/lib/usermgmt.ts";
+import { extractDatasetIds } from "./dataset-id.ts";
 
 export function pluginAuthz(
   req: Request,
@@ -148,6 +149,10 @@ function rolesFromGroups(g: Record<string, unknown>): string[] {
  *                             AND method, resolve the caller's roles (token `roles` +
  *                             userMgmtGroups fetched from usermgmt, as old main did),
  *                             and require ALL of that entry's scopes; 403 otherwise.
+ *  - Researcher access      → when only the RESEARCHER role supplies those scopes,
+ *                             every dataset id the request names must be in the
+ *                             caller's alp_role_study_researcher list, and an entry
+ *                             declaring a `datasetId` key requires one; 403 otherwise.
  */
 export const d2eAuthn = async (
   req: Request,
@@ -223,12 +228,13 @@ export const d2eAuthn = async (
   // Resolve the caller's full role set. The token does NOT carry userMgmtGroups, so
   // regular users need them fetched from usermgmt (cached by jti), exactly as old
   // main's authz did. Service/M2M tokens already carry their scopes as roles.
+  let groups: Record<string, unknown> | null | undefined;
   if (!isServiceToken(payload)) {
     const sub = payload["sub"] as string | undefined;
     const idpUserId = (payload["oid"] as string | undefined) || sub || "";
     const jti = typeof payload["jti"] === "string" ? (payload["jti"] as string) : undefined;
     const exp = typeof payload["exp"] === "number" ? (payload["exp"] as number) : undefined;
-    const groups = tokenGroups ?? (await fetchUserGroups(token, idpUserId, jti, exp));
+    groups = tokenGroups ?? (await fetchUserGroups(token, idpUserId, jti, exp));
     if (!groups) {
       res.status(403).json({ error: "Forbidden: could not resolve user roles" });
       return;
@@ -237,16 +243,36 @@ export const d2eAuthn = async (
   }
 
   const userScopes = new Set<string>();
+  const nonResearcherScopes = new Set<string>();
   for (const role of roles) {
-    for (const scope of ROLE_SCOPES[role] ?? []) userScopes.add(scope);
+    for (const scope of ROLE_SCOPES[role] ?? []) {
+      userScopes.add(scope);
+      if (role !== "RESEARCHER") nonResearcherScopes.add(scope);
+    }
   }
   // Old main required ALL of the matched entry's scopes (hasRequiredScopes = every),
   // not any — e.g. an entry of [strategus.results.admin.upload, portal.dataset.read]
   // demands both. `.some` here would grant access to callers holding only the weaker
   // secondary scope.
-  if (match.scopes.every((scope) => userScopes.has(scope))) {
+  if (!match.scopes.every((scope) => userScopes.has(scope))) {
+    res.status(403).json({ error: "Forbidden: insufficient scopes" });
+    return;
+  }
+  if (!groups || match.scopes.every((scope) => nonResearcherScopes.has(scope))) {
     next();
     return;
   }
-  res.status(403).json({ error: "Forbidden: insufficient scopes" });
+
+  const allowed = groups["alp_role_study_researcher"];
+  const allowedIds = Array.isArray(allowed) ? allowed.map(String) : [];
+  const { ids, unverifiable } = await extractDatasetIds(req, match.datasetId ?? "datasetId");
+  if (unverifiable || ids.some((id) => !allowedIds.includes(id))) {
+    res.status(403).json({ error: "Unauthorized access to dataset" });
+    return;
+  }
+  if (ids.length === 0 && match.datasetId) {
+    res.status(403).json({ error: "Dataset id is missing in the request" });
+    return;
+  }
+  next();
 };

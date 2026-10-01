@@ -41,7 +41,13 @@ function cachedDatabaseCredentialsJson(): string {
   return _dbCredsJson;
 }
 export const ROLE_SCOPES: Record<string, string[]> = {};
-export const REQUIRED_URL_SCOPES: Array<{ path: string; scopes: string[]; httpMethods?: string[] }> = [];
+export const REQUIRED_URL_SCOPES: Array<{
+  path: string;
+  scopes: string[];
+  httpMethods?: string[];
+  /** Request key carrying the dataset id; its presence makes the id mandatory for researchers. */
+  datasetId?: string;
+}> = [];
 
 // Service-account client id -> the plugin role name granting its scopes. A
 // client-credentials token carries no role claim, so authz resolves its grants from
@@ -654,9 +660,12 @@ export function _addFunction(
 
       let body: Blob | string | undefined;
       if (req.method !== "GET" && req.method !== "HEAD") {
-        // If body was already parsed by middleware (e.g. express.json()),
-        // re-serialize it. Otherwise read the raw stream.
-        if ((req as any).body && typeof (req as any).body === "object" && Object.keys((req as any).body).length > 0) {
+        // A Buffer body was drained by an upstream gate (d2eAuthn) and is sent
+        // as-is. A body already parsed by middleware (e.g. express.json()) is
+        // re-serialized. Otherwise read the raw stream.
+        if (Buffer.isBuffer((req as any).body) && (req as any).body.length > 0) {
+          body = new Blob([new Uint8Array((req as any).body)]);
+        } else if ((req as any).body && typeof (req as any).body === "object" && Object.keys((req as any).body).length > 0) {
           body = JSON.stringify((req as any).body);
         } else {
           const chunks: Uint8Array[] = [];
