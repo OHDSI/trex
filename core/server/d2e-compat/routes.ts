@@ -211,7 +211,9 @@ export function applyClientAuthentication(
     return { Authorization: encodeBasicCredentials(callerId, callerSecret) };
   }
   // Lent only to the portal's own legs; anything else must bring its own secret.
-  if (!LENT_SECRET_GRANTS.has(params.get("grant_type") ?? "")) return {};
+  // A repeated grant_type is refused too: the provider reads the last value.
+  const grants = params.getAll("grant_type");
+  if (grants.length !== 1 || !LENT_SECRET_GRANTS.has(grants[0])) return {};
 
   const { clientId, clientSecret } = idpCfg;
   if (tokenEndpointAuthMethod === "client_secret_basic") {
@@ -460,8 +462,10 @@ export function mountD2eRoutes(app: Express): void {
       (req as any).body &&
       typeof (req as any).body === "object"
     ) {
-      for (const [k, v] of Object.entries((req as any).body as Record<string, string>)) {
-        params.append(k, v);
+      // qs folds a repeated key into an array; keep every value so the
+      // repeat check below sees it.
+      for (const [k, v] of Object.entries((req as any).body as Record<string, unknown>)) {
+        for (const item of Array.isArray(v) ? v : [v]) params.append(k, String(item));
       }
     } else {
       // Raw body — read stream.
@@ -471,6 +475,14 @@ export function mountD2eRoutes(app: Express): void {
       }
       const buf = await new Blob(chunks as BlobPart[]).arrayBuffer();
       new URLSearchParams(new TextDecoder().decode(buf)).forEach((v, k) => params.append(k, v));
+    }
+
+    // RFC 6749 §3.2: parameters MUST NOT be repeated. This route reads the
+    // first value and the provider the last, so a repeat could steer the lent secret.
+    const repeated = [...new Set(params.keys())].find((k) => params.getAll(k).length > 1);
+    if (repeated) {
+      (res as any).status(400).json({ error: "invalid_request", error_description: `${repeated} is repeated` });
+      return;
     }
 
     const resource = idpCfg.resource;

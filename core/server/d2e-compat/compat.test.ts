@@ -357,6 +357,12 @@ Deno.test("an unrecognised grant never gets the configured secret", () => {
   }
 });
 
+Deno.test("a repeated grant_type is never lent the configured secret", () => {
+  // The provider reads the last value, URLSearchParams.get the first.
+  const params = new URLSearchParams("grant_type=refresh_token&grant_type=client_credentials");
+  assertEquals(applyClientAuthentication(params, TREX_CFG), {});
+});
+
 Deno.test("logto: a posted secret stays in the body", () => {
   const params = new URLSearchParams({ grant_type: "client_credentials", client_id: "svc", client_secret: "s" });
   const headers = applyClientAuthentication(params, { ...TREX_CFG, tokenEndpointAuthMethod: "client_secret_post" });
