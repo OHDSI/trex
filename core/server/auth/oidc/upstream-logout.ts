@@ -19,7 +19,7 @@ import { readAccountIdTokenByUser } from "../federation/providers.ts";
  * upstream silently rejects rather than a throw. Sending nothing is better --
  * the user gets the confirmation page instead of a dead end, and this logs.
  */
-function looksLikeCompactJws(value: string): boolean {
+export function looksLikeCompactJws(value: string): boolean {
   const parts = value.split(".");
   return parts.length === 3 && parts.every((p) => /^[A-Za-z0-9_-]+$/.test(p));
 }
