@@ -43,9 +43,11 @@
 // as a plugin: steps 1-3 all complete before WebAPI has created those tables.
 
 import {
+  bigqueryCredentialsFromRow,
   CACHE_DIR,
   ensureAttached,
   ensureCacheAttached,
+  normalizeDialect,
   redactSecrets,
   snowflakeExtrasFromRow,
   type ExecFn,
@@ -238,6 +240,28 @@ export async function d2eBoot(): Promise<void> {
 
     const connections: SourceCredential[] = [];
     for (const row of rows.rows) {
+      // BigQuery authenticates with the service-account JSON in `extra`, not a
+      // username/password, so it has no Admin credential row. Gating it on one
+      // meant the attach — the only place google-credentials.json is written —
+      // never ran, and WebAPI (OAuthType=3 / ADC) found no credentials file.
+      if (normalizeDialect(row.dialect) === "bigquery") {
+        const googleCredentials = bigqueryCredentialsFromRow(row.extra);
+        if (!googleCredentials) {
+          log(`[attach-startup] no service-account JSON in extra for ${row.id} — skipping __srcdb attach`);
+          continue;
+        }
+        connections.push({
+          id: row.id,
+          dialect: row.dialect,
+          host: row.host,
+          port: row.port,
+          name: row.databaseName,
+          adminUsername: "",
+          adminPassword: "",
+          googleCredentials,
+        });
+        continue;
+      }
       if (!row.cred_username) {
         log(`[attach-startup] no Admin credential for ${row.id} — skipping __srcdb attach`);
         continue;

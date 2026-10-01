@@ -8,6 +8,11 @@ export function isValidIdentifier(s: string): boolean {
   return s.length > 0 && s.length <= MAX_IDENTIFIER_LEN && IDENTIFIER_RE.test(s);
 }
 
+/** A source id that `<id>__srcdb` and `<id>__srcdb_secret` can be built from. */
+export function isValidSourceId(id: string): boolean {
+  return isValidIdentifier(id) && id.length <= MAX_SOURCE_ID_LEN;
+}
+
 // Escape a single value for safe inclusion inside a single-quoted SQL string.
 function sqlQuote(s: string): string {
   return s.replace(/'/g, "''");
@@ -52,6 +57,8 @@ export function redactSecrets(text: string): string {
   }
   // Snowflake: PRIVATE_KEY '-----BEGIN ...', PRIVATE_KEY_PASSPHRASE 'pp'.
   out = out.replace(/(PRIVATE_KEY(?:_PASSPHRASE)?\s+)('[^']*'|"[^"]*")/gi, "$1[REDACTED]");
+  // BigQuery: SERVICE_ACCOUNT_JSON '{...}', with '' escapes inside the literal.
+  out = out.replace(/(SERVICE_ACCOUNT_JSON\s+)'(?:[^']|'')*'/gi, "$1'[REDACTED]'");
   // URI userinfo: scheme://user:secret@host
   return out.replace(/([a-z][a-z0-9+.-]*:\/\/[^:/?#\s]+:)([^@\s]+)(@)/gi, "$1[REDACTED]$3");
 }
@@ -126,22 +133,30 @@ export interface SourceCredential {
   role?: string;
   privateKey?: string;
   privateKeyPassphrase?: string;
+  googleCredentials?: Record<string, unknown>;
 }
 
-// Pulls Snowflake-specific extras out of a trex.db row's `extra` (jsonb). `extra`
-// stores the Internal object's CONTENTS directly — routes persist
-// JSON.stringify(body.extra) and prefect-sync reads extra.<field> directly.
+// The portal saves extra as {Internal: {...}}; rows written straight through
+// the API hold the fields unwrapped. jsonb may also arrive as a string.
+export function extraFields(dbExtra: unknown): Record<string, unknown> {
+  let extra: unknown = dbExtra ?? {};
+  if (typeof extra === "string") {
+    try { extra = JSON.parse(extra || "{}"); } catch { return {}; }
+  }
+  if (!extra || typeof extra !== "object") return {};
+  const inner = (extra as Record<string, unknown>).Internal;
+  if (inner && typeof inner === "object" && Object.keys(inner).length > 0) {
+    return inner as Record<string, unknown>;
+  }
+  return extra as Record<string, unknown>;
+}
+
 export function snowflakeExtrasFromRow(dbExtra: unknown): Pick<
   SourceCredential,
   "warehouse" | "schema" | "role" | "privateKey" | "privateKeyPassphrase"
 > {
-  // `extra` is a jsonb column. Depending on the pg type parser in this runtime it
-  // may arrive already-parsed (object) or as a raw JSON string — normalize both.
   // deno-lint-ignore no-explicit-any
-  let extra: any = dbExtra ?? {};
-  if (typeof extra === "string") {
-    try { extra = JSON.parse(extra || "{}"); } catch { extra = {}; }
-  }
+  const extra: any = extraFields(dbExtra);
   return {
     warehouse: extra.warehouse,
     schema: extra.schema,
@@ -149,6 +164,43 @@ export function snowflakeExtrasFromRow(dbExtra: unknown): Pick<
     privateKey: extra.privateKey,
     privateKeyPassphrase: extra.privateKeyPassphrase,
   };
+}
+
+export function bigqueryCredentialsFromRow(dbExtra: unknown): Record<string, unknown> | undefined {
+  const key = extraFields(dbExtra);
+  const nonEmpty = (v: unknown) => typeof v === "string" && v.trim() !== "";
+  return key.type === "service_account" && nonEmpty(key.private_key) && nonEmpty(key.client_email)
+    ? key
+    : undefined;
+}
+
+export function bigquerySecretSql(id: string, project: string, key: Record<string, unknown>): string {
+  return `CREATE OR REPLACE SECRET ${id}${SRCDB_SUFFIX}_secret (TYPE bigquery, ` +
+    `SERVICE_ACCOUNT_JSON '${sqlQuote(JSON.stringify(key))}', SCOPE 'bq://${sqlQuote(project)}')`;
+}
+
+export function googleCredentialsPath(): string {
+  return Deno.env.get("GOOGLE_APPLICATION_CREDENTIALS") || "/usr/src/data/google-credentials.json";
+}
+
+// Marks the key file as trex's, so a file an operator put there is never removed.
+const OWNED_SUFFIX = ".trex-owned";
+
+/** WebAPI's BigQuery driver (OAuthType=3) reads Application Default Credentials from this file. */
+export async function writeGoogleCredentials(key: Record<string, unknown>): Promise<void> {
+  await Deno.writeTextFile(googleCredentialsPath(), JSON.stringify(key), { mode: 0o600 });
+  await Deno.writeTextFile(googleCredentialsPath() + OWNED_SUFFIX, "");
+}
+
+/** Removes a key file trex wrote, so a deleted or cleared key stops authenticating WebAPI. */
+export async function removeGoogleCredentials(): Promise<void> {
+  const path = googleCredentialsPath();
+  const owned = await Deno.stat(path + OWNED_SUFFIX).then(() => true, () => false);
+  if (!owned) return;
+  await Deno.remove(path).catch((e) => {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  });
+  await Deno.remove(path + OWNED_SUFFIX);
 }
 
 /**
@@ -160,7 +212,7 @@ export async function ensureSourceAttached(
   c: SourceCredential,
   opts: { exec: ExecFn },
 ): Promise<boolean> {
-  if (!isValidIdentifier(c.id) || c.id.length > MAX_SOURCE_ID_LEN) {
+  if (!isValidSourceId(c.id)) {
     throw new Error(`invalid identifier: ${c.id}`);
   }
   const alias = `${c.id}${SRCDB_SUFFIX}`;
@@ -179,6 +231,12 @@ export async function ensureSourceAttached(
     return true;
   }
   if (dialect === "bigquery") {
+    if (!c.googleCredentials) {
+      throw new Error(`bigquery source ${c.id} has no service-account key in extra`);
+    }
+    // A secret per source: the process-wide ADC file holds one key, so with two
+    // sources the second would attach as the first's service account.
+    await opts.exec(bigquerySecretSql(c.id, c.host, c.googleCredentials));
     const host = sqlQuote(c.host);
     // An empty/blank dataset attaches the whole project, exposing every dataset
     // as a schema (queryable as `<alias>.<dataset>.<table>`). A specified
@@ -187,9 +245,9 @@ export async function ensureSourceAttached(
     const conn = dataset
       ? `project=${host} dataset=${sqlQuote(dataset)}`
       : `project=${host}`;
-    const sql =
-      `ATTACH IF NOT EXISTS '${conn}' AS ${alias} (TYPE bigquery, READ_ONLY)`;
-    await opts.exec(sql);
+    await opts.exec(
+      `ATTACH IF NOT EXISTS '${conn}' AS ${alias} (TYPE bigquery, SECRET ${alias}_secret, READ_ONLY)`,
+    );
     return true;
   }
   if (dialect === "snowflake") {

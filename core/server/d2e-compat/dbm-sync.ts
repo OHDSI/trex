@@ -12,6 +12,14 @@
 
 import { pool } from "../db.ts";
 import { decryptSecret } from "../auth/crypto.ts";
+import {
+  bigqueryCredentialsFromRow,
+  bigquerySecretSql,
+  isValidSourceId,
+  redactSecrets,
+  removeGoogleCredentials,
+  writeGoogleCredentials,
+} from "./lib/attach.ts";
 
 // Monotonic counter bumped on every deliberate registry sync (boot + /trex/db
 // writes, via syncTrexDatabaseManager). Function workers (plugin/function.ts) read
@@ -129,6 +137,96 @@ export async function readRegistryDecrypted(): Promise<any[]> {
   }
 }
 
+/** What the registry sync must prepare for BigQuery: a scoped DuckDB secret per
+ *  source, and the one key WebAPI's ADC file can hold. Pure, for testing. */
+export function planBigQueryCredentials(
+  creds: Array<{ id: string; host: string; dialect: string; extra?: unknown }>,
+): { secrets: string[]; adcKey?: Record<string, unknown>; warnings: string[] } {
+  const secrets: string[] = [];
+  const warnings: string[] = [];
+  const byProject = new Map<string, string>();
+  const emails = new Set<string>();
+  let adcKey: Record<string, unknown> | undefined;
+  // Sorted so WebAPI's single key does not flip between syncs with row order.
+  for (const c of [...creds].sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0))) {
+    if (c.dialect !== "bigquery") continue;
+    if (!isValidSourceId(c.id)) {
+      warnings.push(`bigquery source ${c.id} has an id DuckDB cannot name — skipped`);
+      continue;
+    }
+    const key = bigqueryCredentialsFromRow(c.extra);
+    if (!key) {
+      warnings.push(`bigquery source ${c.id} has no service-account key in extra`);
+      continue;
+    }
+    const email = String(key.client_email);
+    const seen = byProject.get(c.host);
+    if (seen && seen !== email) {
+      warnings.push(`bigquery project ${c.host} has sources with different keys; the native attach picks one by scope`);
+    }
+    byProject.set(c.host, email);
+    emails.add(email);
+    secrets.push(bigquerySecretSql(c.id, c.host, key));
+    adcKey ??= key;
+  }
+  if (emails.size > 1) {
+    warnings.push(
+      `GOOGLE_APPLICATION_CREDENTIALS holds one key; WebAPI uses ${String(adcKey?.client_email)} for every BigQuery source`,
+    );
+  }
+  return { secrets, adcKey, warnings };
+}
+
+interface SqlConn {
+  execute(sql: string, params: unknown[]): unknown;
+  close?(): void;
+}
+
+/** Creates the scoped secrets on the instance the native manager attaches on
+ *  (its #add_bigquery picks them by SCOPE) and writes WebAPI's ADC file. Each
+ *  step fails on its own, so one bad source cannot strip the others' keys. */
+export async function applyBigQueryPlan(
+  plan: { secrets: string[]; adcKey?: Record<string, unknown> },
+  openConn: () => SqlConn,
+  adcFile: {
+    write: (key: Record<string, unknown>) => Promise<void> | void;
+    remove: () => Promise<void> | void;
+  },
+): Promise<void> {
+  const fail = (what: string, e: unknown) =>
+    console.error(`[d2e-compat] dbm sync: ${what}: ${redactSecrets(String(e))}`);
+  if (plan.secrets.length > 0) {
+    let conn: SqlConn | undefined;
+    try {
+      conn = openConn();
+      try {
+        await conn.execute("LOAD bigquery", []);
+      } catch {
+        await conn.execute("INSTALL bigquery FROM community", []);
+        await conn.execute("LOAD bigquery", []);
+      }
+      for (const sql of plan.secrets) {
+        try {
+          await conn.execute(sql, []);
+        } catch (e) {
+          fail("bigquery secret not created", e);
+        }
+      }
+    } catch (e) {
+      fail("bigquery extension unavailable", e);
+    } finally {
+      conn?.close?.();
+    }
+  }
+  // WebAPI reads ADC (OAuthType=3) from this file.
+  try {
+    if (plan.adcKey) await adcFile.write(plan.adcKey);
+    else await adcFile.remove();
+  } catch (e) {
+    fail("ADC file not updated", e);
+  }
+}
+
 /** Push the trexdb registry into the trex-native DatabaseManager so source DBs
  *  get attached/published. No-op (with a warning) if the native manager is absent
  *  — e.g. a trex build without the ambient global — so the API still functions. */
@@ -145,6 +243,14 @@ export async function syncTrexDatabaseManager(): Promise<void> {
     console.error(`[d2e-compat] dbm sync: failed to read trexdb registry: ${e}`);
     return;
   }
+  // A BigQuery key problem must not keep the other sources from syncing.
+  const plan = planBigQueryCredentials(creds);
+  for (const w of plan.warnings) console.warn(`[d2e-compat] dbm sync: ${w}`);
+  // deno-lint-ignore no-explicit-any
+  await applyBigQueryPlan(plan, () => new (globalThis as any).Trex.TrexDB("memory"), {
+    write: writeGoogleCredentials,
+    remove: removeGoogleCredentials,
+  });
   try {
     console.log(
       `[d2e-compat] syncing ${creds.length} database(s) to Trex.DatabaseManager: [${creds.map((c) => c.id).join(", ")}]`,

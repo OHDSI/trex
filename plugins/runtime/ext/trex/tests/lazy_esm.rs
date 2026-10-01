@@ -27,9 +27,9 @@
 //! `duckdb_*` symbols (none are called here) satisfies the linker via
 //! `RUSTFLAGS="-L native=<dir>"`.
 
-/// Loading the entry point also proves its three static imports
+/// Loading the entry point also proves its four static imports
 /// (`ext:trex/dbconnection.js`, `ext:trex/db_resolve.js`,
-/// `ext:trex/hana_sql.js`) resolve from the same bucket -- an unresolvable
+/// `ext:trex/hana_sql.js`, `ext:trex/redact.js`) resolve from the same bucket -- an unresolvable
 /// import would fail instantiation -- and each dependency is loaded directly
 /// as well, which additionally exercises the `trex_lib.js` <->
 /// `dbconnection.js` import cycle.
@@ -63,6 +63,7 @@ fn lazy_load_esm_resolves_the_trex_module_graph() {
         "TrexDB",
         "HanaDB",
         "PluginManager",
+        "redactSecrets",
       ]) {
         if (typeof lib[name] !== "function") {
           throw new Error(`trex_lib.js is missing export ${name}`);
@@ -80,6 +81,10 @@ fn lazy_load_esm_resolves_the_trex_module_graph() {
       const hana = Deno.core.ops.op_lazy_load_esm("ext:trex/hana_sql.js");
       if (typeof hana.buildHanaScanSql !== "function") {
         throw new Error("hana_sql.js is missing export buildHanaScanSql");
+      }
+      const redact = Deno.core.ops.op_lazy_load_esm("ext:trex/redact.js");
+      if (typeof redact.redactSecrets !== "function") {
+        throw new Error("redact.js is missing export redactSecrets");
       }
       "#,
     )

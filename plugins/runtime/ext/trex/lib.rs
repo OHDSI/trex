@@ -1359,7 +1359,8 @@ deno_core::extension!(
         "trex_lib.js",
         "dbconnection.js",
         "db_resolve.js",
-        "hana_sql.js"
+        "hana_sql.js",
+        "redact.js"
     ]
 );
 

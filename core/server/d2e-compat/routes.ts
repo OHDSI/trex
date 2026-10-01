@@ -51,6 +51,7 @@ import { workerMemoryLimitMb, workerWallClockTimeoutMs } from "../worker-limits.
 // the two cannot disagree about RFC 6749 §2.3.1 form-url-encoding.
 import { encodeBasicCredentials } from "better-auth/oauth2";
 import {
+  bigqueryCredentialsFromRow,
   CACHE_DIR,
   ensureCacheAttached,
   ensureSourceAttached,
@@ -650,16 +651,22 @@ export function mountD2eRoutes(app: Express): void {
           );
           const row = db.rows[0];
           if (!row) throw new Error("enabled connection not found");
-          if (!row.username || !row.password_encrypted) throw new Error("Admin credential not found");
+          // BigQuery has no username/password — its auth is the service-account
+          // JSON in `extra` (ensureSourceAttached rejects it when that is empty).
+          const isBigQuery = normalizeDialect(row.dialect) === "bigquery";
+          if (!isBigQuery && (!row.username || !row.password_encrypted)) {
+            throw new Error("Admin credential not found");
+          }
           const connection: SourceCredential = {
             id: row.id,
             dialect: row.dialect,
             host: row.host,
             port: row.port,
             name: row.databaseName,
-            adminUsername: row.username,
-            adminPassword: await decryptSecret(row.password_encrypted),
+            adminUsername: isBigQuery ? "" : row.username!,
+            adminPassword: isBigQuery ? "" : await decryptSecret(row.password_encrypted!),
             ...(normalizeDialect(row.dialect) === "snowflake" ? snowflakeExtrasFromRow(row.extra) : {}),
+            ...(isBigQuery ? { googleCredentials: bigqueryCredentialsFromRow(row.extra) } : {}),
           };
           const attached = await ensureSourceAttached(connection, { exec: attachExec });
           results.push({

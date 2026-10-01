@@ -1,13 +1,18 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals, assertRejects } from "jsr:@std/assert";
 import {
+  bigqueryCredentialsFromRow,
+  bigquerySecretSql,
   ensureCacheAttached,
   ensureSourceAttached,
+  extraFields,
   MAX_ATTACH_IDS,
   normalizeCacheDir,
   normalizeDialect,
   parseAttachBody,
   redactSecrets,
+  removeGoogleCredentials,
   snowflakeExtrasFromRow,
+  writeGoogleCredentials,
   type SourceCredential,
 } from "./attach.ts";
 
@@ -19,6 +24,13 @@ function captureSql(c: SourceCredential): Promise<string[]> {
   return ensureSourceAttached(c, { exec }).then(() => calls);
 }
 
+const SA_KEY = {
+  type: "service_account",
+  project_id: "my-proj",
+  private_key: "-----BEGIN PRIVATE KEY-----\nMII\n-----END PRIVATE KEY-----\n",
+  client_email: "svc@my-proj.iam.gserviceaccount.com",
+};
+
 const bqBase: SourceCredential = {
   id: "bq",
   dialect: "bigquery",
@@ -26,34 +38,107 @@ const bqBase: SourceCredential = {
   name: "my_dataset",
   adminUsername: "",
   adminPassword: "",
+  googleCredentials: SA_KEY,
 };
 
-Deno.test("bigquery with dataset pins the single dataset", async () => {
-  const calls = await captureSql(bqBase);
-  assertEquals(calls, [
-    "ATTACH IF NOT EXISTS 'project=my-proj dataset=my_dataset' AS bq__srcdb (TYPE bigquery, READ_ONLY)",
+const BQ_SECRET = bigquerySecretSql("bq", "my-proj", SA_KEY);
+
+Deno.test("bigquery creates a project-scoped secret, then attaches with it", async () => {
+  assertEquals(await captureSql(bqBase), [
+    BQ_SECRET,
+    "ATTACH IF NOT EXISTS 'project=my-proj dataset=my_dataset' AS bq__srcdb (TYPE bigquery, SECRET bq__srcdb_secret, READ_ONLY)",
   ]);
 });
 
 Deno.test("bigquery with blank dataset attaches project-level (all schemas)", async () => {
-  const calls = await captureSql({ ...bqBase, name: "" });
-  assertEquals(calls, [
-    "ATTACH IF NOT EXISTS 'project=my-proj' AS bq__srcdb (TYPE bigquery, READ_ONLY)",
-  ]);
+  assertEquals(
+    (await captureSql({ ...bqBase, name: "" }))[1],
+    "ATTACH IF NOT EXISTS 'project=my-proj' AS bq__srcdb (TYPE bigquery, SECRET bq__srcdb_secret, READ_ONLY)",
+  );
 });
 
 Deno.test("bigquery with whitespace-only dataset attaches project-level", async () => {
-  const calls = await captureSql({ ...bqBase, name: "   " });
-  assertEquals(calls, [
-    "ATTACH IF NOT EXISTS 'project=my-proj' AS bq__srcdb (TYPE bigquery, READ_ONLY)",
-  ]);
+  assertEquals(
+    (await captureSql({ ...bqBase, name: "   " }))[1],
+    "ATTACH IF NOT EXISTS 'project=my-proj' AS bq__srcdb (TYPE bigquery, SECRET bq__srcdb_secret, READ_ONLY)",
+  );
 });
 
 Deno.test("bigquery quote-escapes interpolated values", async () => {
-  const calls = await captureSql({ ...bqBase, host: "pro'j", name: "da'ta" });
-  assertEquals(calls, [
-    "ATTACH IF NOT EXISTS 'project=pro''j dataset=da''ta' AS bq__srcdb (TYPE bigquery, READ_ONLY)",
-  ]);
+  assertEquals(
+    (await captureSql({ ...bqBase, host: "pro'j", name: "da'ta" }))[1],
+    "ATTACH IF NOT EXISTS 'project=pro''j dataset=da''ta' AS bq__srcdb (TYPE bigquery, SECRET bq__srcdb_secret, READ_ONLY)",
+  );
+});
+
+Deno.test("bigquerySecretSql quote-escapes the key and the project", () => {
+  const sql = bigquerySecretSql("bq", "pro'j", { ...SA_KEY, client_email: "o'brien@x" });
+  assertEquals(sql.startsWith("CREATE OR REPLACE SECRET bq__srcdb_secret (TYPE bigquery, SERVICE_ACCOUNT_JSON '"), true);
+  assertEquals(sql.includes("SCOPE 'bq://pro''j'"), true);
+  assertEquals(sql.includes("o''brien@x"), true);
+});
+
+Deno.test("bigquery attach never touches the filesystem", async () => {
+  // CI runs this file without GOOGLE_APPLICATION_CREDENTIALS and without /usr/src/data.
+  const before = Deno.env.get("GOOGLE_APPLICATION_CREDENTIALS");
+  Deno.env.set("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent-dir/key.json");
+  try {
+    await captureSql(bqBase);
+  } finally {
+    if (before === undefined) Deno.env.delete("GOOGLE_APPLICATION_CREDENTIALS");
+    else Deno.env.set("GOOGLE_APPLICATION_CREDENTIALS", before);
+  }
+});
+
+Deno.test("redactSecrets strips an inline service-account key", () => {
+  const out = redactSecrets(`Invalid Input Error: failed: ${BQ_SECRET}`);
+  assertEquals(out.includes("BEGIN PRIVATE KEY"), false);
+  assertEquals(out.includes("SERVICE_ACCOUNT_JSON '[REDACTED]'"), true);
+});
+
+Deno.test("bigquery without a service-account key refuses to attach", async () => {
+  await assertRejects(
+    () => ensureSourceAttached({ ...bqBase, googleCredentials: undefined }, { exec: () => {} }),
+    Error,
+    "no service-account key",
+  );
+});
+
+Deno.test("bigqueryCredentialsFromRow unwraps the Internal wrapper", () => {
+  assertEquals(bigqueryCredentialsFromRow({ Internal: SA_KEY }), SA_KEY);
+});
+
+Deno.test("bigqueryCredentialsFromRow returns undefined for an empty/unconfigured row", () => {
+  assertEquals(bigqueryCredentialsFromRow({}), undefined);
+  assertEquals(bigqueryCredentialsFromRow({ Internal: {} }), undefined);
+  assertEquals(bigqueryCredentialsFromRow(null), undefined);
+});
+
+Deno.test("bigqueryCredentialsFromRow parses a JSON-string extra column", () => {
+  assertEquals(bigqueryCredentialsFromRow(JSON.stringify({ Internal: SA_KEY })), SA_KEY);
+});
+
+Deno.test("bigqueryCredentialsFromRow ignores an extra that is not a service-account key", () => {
+  assertEquals(bigqueryCredentialsFromRow({ Internal: { sslmode: "require" } }), undefined);
+  assertEquals(bigqueryCredentialsFromRow({ Internal: { type: "service_account" } }), undefined);
+});
+
+Deno.test("snowflakeExtrasFromRow reads the portal's Internal wrapper", () => {
+  assertEquals(
+    snowflakeExtrasFromRow({ Internal: { warehouse: "WH", privateKey: "PEM" } }).warehouse,
+    "WH",
+  );
+  assertEquals(
+    snowflakeExtrasFromRow(JSON.stringify({ Internal: { privateKey: "PEM" } })).privateKey,
+    "PEM",
+  );
+});
+
+Deno.test("extraFields keeps reading an unwrapped legacy row", () => {
+  assertEquals(extraFields({ warehouse: "WH" }), { warehouse: "WH" });
+  assertEquals(extraFields({ Internal: {}, warehouse: "WH" }), { Internal: {}, warehouse: "WH" });
+  assertEquals(extraFields("not json"), {});
+  assertEquals(extraFields(null), {});
 });
 
 // PR #2835: the HANA boot block attaches a `${code}_cache` catalog and creates
@@ -310,4 +395,36 @@ Deno.test("snowflakeExtrasFromRow — reads extras directly off extra, tolerates
     snowflakeExtrasFromRow(null),
     { warehouse: undefined, schema: undefined, role: undefined, privateKey: undefined, privateKeyPassphrase: undefined },
   );
+});
+
+async function withCredentialsPath(fn: (path: string) => Promise<void>) {
+  const dir = await Deno.makeTempDir();
+  const before = Deno.env.get("GOOGLE_APPLICATION_CREDENTIALS");
+  Deno.env.set("GOOGLE_APPLICATION_CREDENTIALS", `${dir}/google-credentials.json`);
+  try {
+    await fn(`${dir}/google-credentials.json`);
+  } finally {
+    if (before === undefined) Deno.env.delete("GOOGLE_APPLICATION_CREDENTIALS");
+    else Deno.env.set("GOOGLE_APPLICATION_CREDENTIALS", before);
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+
+const exists = (p: string) => Deno.stat(p).then(() => true, () => false);
+
+Deno.test("removeGoogleCredentials deletes a key file trex wrote", async () => {
+  await withCredentialsPath(async (path) => {
+    await writeGoogleCredentials(SA_KEY);
+    await removeGoogleCredentials();
+    assertEquals(await exists(path), false);
+    await removeGoogleCredentials(); // already gone: no error
+  });
+});
+
+Deno.test("removeGoogleCredentials leaves a file trex did not write", async () => {
+  await withCredentialsPath(async (path) => {
+    await Deno.writeTextFile(path, "{}");
+    await removeGoogleCredentials();
+    assertEquals(await exists(path), true);
+  });
 });
