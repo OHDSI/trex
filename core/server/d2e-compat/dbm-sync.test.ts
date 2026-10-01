@@ -1,5 +1,5 @@
 import { assertEquals } from "jsr:@std/assert";
-import { planBigQueryCredentials } from "./dbm-sync.ts";
+import { applyBigQueryPlan, planBigQueryCredentials } from "./dbm-sync.ts";
 
 const key = (email: string) => ({
   type: "service_account",
@@ -39,4 +39,54 @@ Deno.test("a bigquery source without a key is reported, not fatal", () => {
   assertEquals(plan.secrets, []);
   assertEquals(plan.adcKey, undefined);
   assertEquals(plan.warnings.length, 1);
+});
+
+Deno.test("a bigquery id DuckDB cannot name is skipped, not fatal to the rest", () => {
+  const plan = planBigQueryCredentials([
+    { id: "2024_bq", host: "proj-a", dialect: "bigquery", extra: key("a@x") },
+    { id: "bq2", host: "proj-b", dialect: "bigquery", extra: key("a@x") },
+  ]);
+  assertEquals(plan.secrets.length, 1);
+  assertEquals(plan.secrets[0].startsWith("CREATE OR REPLACE SECRET bq2__srcdb_secret"), true);
+  assertEquals(plan.warnings.some((w) => w.includes("2024_bq")), true);
+});
+
+function fakeConn(fail: (sql: string) => boolean) {
+  const ran: string[] = [];
+  let closed = false;
+  return {
+    ran,
+    closed: () => closed,
+    open: () => ({
+      execute: (sql: string) => {
+        if (fail(sql)) throw new Error(`boom: ${sql}`);
+        ran.push(sql);
+      },
+      close: () => { closed = true; },
+    }),
+  };
+}
+
+Deno.test("one failing secret does not stop the others or the ADC write", async () => {
+  const plan = planBigQueryCredentials([
+    { id: "bq1", host: "proj-a", dialect: "bigquery", extra: key("a@x") },
+    { id: "bq2", host: "proj-b", dialect: "bigquery", extra: key("a@x") },
+  ]);
+  const conn = fakeConn((sql) => sql.includes("bq1__srcdb_secret"));
+  let written: unknown;
+  await applyBigQueryPlan(plan, conn.open, (k) => { written = k; });
+  assertEquals(conn.ran.some((s) => s.includes("bq2__srcdb_secret")), true);
+  assertEquals(written, key("a@x"));
+  assertEquals(conn.closed(), true);
+});
+
+Deno.test("the ADC file is written even when the bigquery extension cannot load", async () => {
+  const plan = planBigQueryCredentials([
+    { id: "bq1", host: "proj-a", dialect: "bigquery", extra: key("a@x") },
+  ]);
+  const conn = fakeConn((sql) => /LOAD|INSTALL/.test(sql));
+  let written: unknown;
+  await applyBigQueryPlan(plan, conn.open, (k) => { written = k; });
+  assertEquals(written, key("a@x"));
+  assertEquals(conn.closed(), true);
 });

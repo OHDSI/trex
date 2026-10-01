@@ -15,6 +15,7 @@ import { decryptSecret } from "../auth/crypto.ts";
 import {
   bigqueryCredentialsFromRow,
   bigquerySecretSql,
+  isValidSourceId,
   redactSecrets,
   writeGoogleCredentials,
 } from "./lib/attach.ts";
@@ -147,6 +148,10 @@ export function planBigQueryCredentials(
   let adcKey: Record<string, unknown> | undefined;
   for (const c of creds) {
     if (c.dialect !== "bigquery") continue;
+    if (!isValidSourceId(c.id)) {
+      warnings.push(`bigquery source ${c.id} has an id DuckDB cannot name — skipped`);
+      continue;
+    }
     const key = bigqueryCredentialsFromRow(c.extra);
     if (!key) {
       warnings.push(`bigquery source ${c.id} has no service-account key in extra`);
@@ -170,6 +175,54 @@ export function planBigQueryCredentials(
   return { secrets, adcKey, warnings };
 }
 
+interface SqlConn {
+  execute(sql: string, params: unknown[]): unknown;
+  close?(): void;
+}
+
+/** Creates the scoped secrets on the instance the native manager attaches on
+ *  (its #add_bigquery picks them by SCOPE) and writes WebAPI's ADC file. Each
+ *  step fails on its own, so one bad source cannot strip the others' keys. */
+export async function applyBigQueryPlan(
+  plan: { secrets: string[]; adcKey?: Record<string, unknown> },
+  openConn: () => SqlConn,
+  writeAdc: (key: Record<string, unknown>) => Promise<void> | void,
+): Promise<void> {
+  const fail = (what: string, e: unknown) =>
+    console.error(`[d2e-compat] dbm sync: ${what}: ${redactSecrets(String(e))}`);
+  if (plan.secrets.length > 0) {
+    let conn: SqlConn | undefined;
+    try {
+      conn = openConn();
+      try {
+        await conn.execute("LOAD bigquery", []);
+      } catch {
+        await conn.execute("INSTALL bigquery FROM community", []);
+        await conn.execute("LOAD bigquery", []);
+      }
+      for (const sql of plan.secrets) {
+        try {
+          await conn.execute(sql, []);
+        } catch (e) {
+          fail("bigquery secret not created", e);
+        }
+      }
+    } catch (e) {
+      fail("bigquery extension unavailable", e);
+    } finally {
+      conn?.close?.();
+    }
+  }
+  // WebAPI reads ADC (OAuthType=3) from this file.
+  if (plan.adcKey) {
+    try {
+      await writeAdc(plan.adcKey);
+    } catch (e) {
+      fail("ADC file not written", e);
+    }
+  }
+}
+
 /** Push the trexdb registry into the trex-native DatabaseManager so source DBs
  *  get attached/published. No-op (with a warning) if the native manager is absent
  *  — e.g. a trex build without the ambient global — so the API still functions. */
@@ -186,28 +239,11 @@ export async function syncTrexDatabaseManager(): Promise<void> {
     console.error(`[d2e-compat] dbm sync: failed to read trexdb registry: ${e}`);
     return;
   }
-  // Own try: a BigQuery key problem must not keep the other sources from syncing.
-  try {
-    const plan = planBigQueryCredentials(creds);
-    for (const w of plan.warnings) console.warn(`[d2e-compat] dbm sync: ${w}`);
-    if (plan.secrets.length > 0) {
-      // Same DuckDB instance the native manager attaches on, so its
-      // #add_bigquery picks these up by SCOPE.
-      // deno-lint-ignore no-explicit-any
-      const conn = new (globalThis as any).Trex.TrexDB("memory");
-      try {
-        await conn.execute("LOAD bigquery", []);
-      } catch {
-        await conn.execute("INSTALL bigquery FROM community", []);
-        await conn.execute("LOAD bigquery", []);
-      }
-      for (const sql of plan.secrets) await conn.execute(sql, []);
-    }
-    // WebAPI reads ADC (OAuthType=3) from this file.
-    if (plan.adcKey) await writeGoogleCredentials(plan.adcKey);
-  } catch (e) {
-    console.error(`[d2e-compat] dbm sync: bigquery credentials not prepared: ${redactSecrets(String(e))}`);
-  }
+  // A BigQuery key problem must not keep the other sources from syncing.
+  const plan = planBigQueryCredentials(creds);
+  for (const w of plan.warnings) console.warn(`[d2e-compat] dbm sync: ${w}`);
+  // deno-lint-ignore no-explicit-any
+  await applyBigQueryPlan(plan, () => new (globalThis as any).Trex.TrexDB("memory"), writeGoogleCredentials);
   try {
     console.log(
       `[d2e-compat] syncing ${creds.length} database(s) to Trex.DatabaseManager: [${creds.map((c) => c.id).join(", ")}]`,

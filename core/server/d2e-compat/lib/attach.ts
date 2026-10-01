@@ -8,6 +8,11 @@ export function isValidIdentifier(s: string): boolean {
   return s.length > 0 && s.length <= MAX_IDENTIFIER_LEN && IDENTIFIER_RE.test(s);
 }
 
+/** A source id that `<id>__srcdb` and `<id>__srcdb_secret` can be built from. */
+export function isValidSourceId(id: string): boolean {
+  return isValidIdentifier(id) && id.length <= MAX_SOURCE_ID_LEN;
+}
+
 // Escape a single value for safe inclusion inside a single-quoted SQL string.
 function sqlQuote(s: string): string {
   return s.replace(/'/g, "''");
@@ -192,7 +197,7 @@ export async function ensureSourceAttached(
   c: SourceCredential,
   opts: { exec: ExecFn },
 ): Promise<boolean> {
-  if (!isValidIdentifier(c.id) || c.id.length > MAX_SOURCE_ID_LEN) {
+  if (!isValidSourceId(c.id)) {
     throw new Error(`invalid identifier: ${c.id}`);
   }
   const alias = `${c.id}${SRCDB_SUFFIX}`;
