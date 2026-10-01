@@ -16,6 +16,7 @@ import {
 import { createFailureBudget, isUserInfoRefusal } from "./userinfo-limit.ts";
 import { createJwksLocalReadFetch, providerJwksUrl } from "./jwks-local-read.ts";
 import { upstreamLogoutUrl } from "./upstream-logout.ts";
+import { verifyAccessToken } from "../jwt.ts";
 import {
   annotateLogoutConfirmation,
   type HintVerdict,
@@ -148,6 +149,37 @@ async function verifyHintLocally(hint: string): Promise<HintVerdict> {
   }
 }
 
+/**
+ * The account a logout is being performed for, from trex's own session cookie.
+ *
+ * Deliberately not the id_token_hint's subject. By the time the hop below is
+ * reached the provider has accepted the hint, but what it accepted is that the
+ * token is one trex issued -- an id_token_hint is valid past its expiry by
+ * design, which is what makes it usable for logout at all. That was harmless
+ * while the subject only chose which configured upstream to visit. It is not
+ * harmless now that it also chooses whose stored upstream credential gets
+ * decrypted into a redirect the requester receives: a stale token naming
+ * another account would be enough to lift that account's live upstream
+ * id_token. The cookie is the one credential on this path that must still
+ * verify.
+ *
+ * Readable here even though the end-session branch clears it: sb-access-token
+ * is trex's own rather than Better Auth's, so the handler has not invalidated
+ * it, and res.clearCookie only writes a response header.
+ */
+async function verifiedSubject(req: express.Request): Promise<string | null> {
+  const cookie = req.headers.cookie
+    ?.split(";")
+    .map((c) => c.trim())
+    .find((c) => c.startsWith("sb-access-token="))
+    ?.split("=")
+    .slice(1)
+    .join("=");
+  if (!cookie) return null;
+  const claims = await verifyAccessToken(cookie);
+  return claims?.sub ?? null;
+}
+
 export function oidcHandler(): express.RequestHandler {
   return async (req, res) => {
     const path = new URL(req.originalUrl, "http://localhost").pathname.slice(MOUNT_PATH.length);
@@ -238,8 +270,25 @@ export function oidcHandler(): express.RequestHandler {
     if (isEndSession && response.status >= 300 && response.status < 400) {
       const returnTo = response.headers.get("location");
       if (returnTo) {
-        const sub = subjectFromHint(hint);
-        const upstream = await upstreamLogoutUrl(sub, new URL(returnTo, oidcIssuer()).toString())
+        const sub = await verifiedSubject(req);
+        const hinted = subjectFromHint(hint);
+        if (sub && hinted && hinted !== sub) {
+          // Worth seeing: the hint the provider accepted names someone other
+          // than the session presenting it.
+          console.warn(
+            "[oidc] end-session: id_token_hint subject differs from the session's; using the session",
+          );
+        }
+        if (!sub) {
+          // Fails closed. An end-session call arriving without a verifying
+          // session cookie -- a programmatic caller, or one whose token has
+          // expired -- leaves the upstream session open rather than acting on
+          // an unverified subject.
+          console.warn(
+            "[oidc] end-session: no verifying session cookie; upstream session left open",
+          );
+        }
+        const upstream = !sub ? null : await upstreamLogoutUrl(sub, new URL(returnTo, oidcIssuer()).toString())
           .catch((err) => {
             // Never at the cost of the logout itself: trex's session is
             // already gone by here, and failing now would strand the browser

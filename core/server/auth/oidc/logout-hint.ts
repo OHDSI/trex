@@ -139,12 +139,20 @@ export function hintFromRequest(url: string, body: Buffer | undefined): string |
 /**
  * The account an `id_token_hint` names, without verifying it.
  *
- * Verification belongs to the provider, which has already accepted or rejected
- * the hint by the time this runs, and re-doing it here would only decide
- * whether to offer the extra hop. A forged subject cannot widen anything: the
- * destination is whichever provider that account is configured against, and
- * the return target is the one the provider itself validated. The worst a lie
- * achieves is a logout that visits the wrong configured upstream.
+ * Unverified, so this is NOT the authority for whom a logout acts on. It was
+ * once, and the argument was that a forged subject could not widen anything:
+ * while the subject only chose which configured upstream to visit, a lie
+ * bought the liar a logout at the wrong provider and nothing else.
+ *
+ * That stopped holding when the subject also began selecting a stored upstream
+ * credential to decrypt into the redirect the requester receives. The provider
+ * accepting the hint does not close it either -- what the provider checks is
+ * that trex issued the token, and an id_token_hint is accepted past its expiry
+ * by design. oidc/mount.ts takes the subject from trex's session cookie
+ * instead; verifiedSubject there carries the rest of the reasoning.
+ *
+ * What remains here is diagnosis: the hint's own claim about who it is for,
+ * which mount.ts logs when it disagrees with the session.
  */
 export function subjectFromHint(hint: string | null): string | null {
   if (!hint) return null;
