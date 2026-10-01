@@ -251,6 +251,16 @@ export async function seedServiceClientsFromEnv(
   let seeded = 0;
   for (const spec of specs) {
     try {
+      const existing = await pool.query<{ grantTypes: string[] | null }>(
+        `SELECT "grantTypes" FROM trexdb."oauthClient" WHERE "clientId" = $1`,
+        [spec.clientId],
+      );
+      const grants = existing.rows[0]?.grantTypes;
+      // The upsert would strip an interactive client's redirect URIs and code grant.
+      if (grants && !(grants.length === 1 && grants[0] === "client_credentials")) {
+        console.error(`[oidc] service client ${spec.clientId} already exists as an interactive client — skipped`);
+        continue;
+      }
       await upsertOAuthClient(spec);
       console.log(`[oidc] registered service client ${spec.clientId} (${spec.name})`);
       seeded++;

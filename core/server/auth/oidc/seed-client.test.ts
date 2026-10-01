@@ -10,7 +10,7 @@ import { betterAuth } from "better-auth";
 import { jwt } from "better-auth/plugins";
 import { oauthProvider } from "@better-auth/oauth-provider";
 import { pool } from "../../db.ts";
-import { seedOAuthClientFromEnv, seedServiceClientsFromEnv } from "./seed-client.ts";
+import { seedOAuthClientFromEnv, seedServiceClientsFromEnv, upsertOAuthClient } from "./seed-client.ts";
 
 const DATABASE_URL = Deno.env.get("DATABASE_URL");
 
@@ -290,6 +290,40 @@ test("a service client is registered for client_credentials and nothing else", a
       [SERVICE_ID],
     );
     assertEquals(links.rows.map((r) => r.resourceId), [ISSUER]);
+  } finally {
+    await deleteServiceClient();
+  }
+});
+
+test("a service client id that names an interactive client leaves it alone", async () => {
+  const auth = providerInstance();
+  await auth.$context;
+  try {
+    await upsertOAuthClient({
+      clientId: SERVICE_ID,
+      clientSecret: "x",
+      name: "atlas",
+      redirectUris: ["https://atlas.example/cb"],
+      postLogoutRedirectUris: [],
+      clientRoles: [],
+      allowedScopes: undefined,
+      resourceIdentifier: ISSUER,
+    });
+    assertEquals(await seedServiceClientsFromEnv(SERVICE_ENV), 0);
+    const row = (await pool.query(`SELECT * FROM trexdb."oauthClient" WHERE "clientId" = $1`, [SERVICE_ID])).rows[0];
+    assertEquals(row.redirectUris, ["https://atlas.example/cb"]);
+    assertEquals(row.grantTypes, ["authorization_code", "refresh_token", "client_credentials"]);
+  } finally {
+    await deleteServiceClient();
+  }
+});
+
+test("re-seeding an existing service client still updates it", async () => {
+  const auth = providerInstance();
+  await auth.$context;
+  try {
+    assertEquals(await seedServiceClientsFromEnv(SERVICE_ENV), 1);
+    assertEquals(await seedServiceClientsFromEnv(SERVICE_ENV), 1);
   } finally {
     await deleteServiceClient();
   }
