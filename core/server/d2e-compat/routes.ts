@@ -177,6 +177,8 @@ export function shouldReserializeParsedBody(
 // ---------------------------------------------------------------------------
 // POST /d2e/oauth/token — how the client secret is presented to the IdP
 // ---------------------------------------------------------------------------
+const LENT_SECRET_GRANTS = new Set(["authorization_code", "refresh_token"]);
+
 // Exactly ONE client authentication method may reach the IdP, and which one it
 // is comes from the IdP, not from the caller.
 //
@@ -192,11 +194,28 @@ export function shouldReserializeParsedBody(
 // the header. Stripping rather than leaving it as dead weight is deliberate —
 // this route logs its own parameter names, and a credential that cannot be used
 // should not be carried through a retry loop or written to a log.
+//
+// A caller's own credentials are forwarded unchanged, and the configured secret
+// is never added to a client_credentials grant: it is for the portal's code
+// exchange, and lending it let this public route mint service tokens.
 export function applyClientAuthentication(
   params: URLSearchParams,
   idpCfg: Pick<IdpConfig, "clientId" | "clientSecret" | "tokenEndpointAuthMethod">,
 ): Record<string, string> {
-  const { clientId, clientSecret, tokenEndpointAuthMethod } = idpCfg;
+  const { tokenEndpointAuthMethod } = idpCfg;
+  const callerSecret = params.get("client_secret");
+  if (callerSecret) {
+    if (tokenEndpointAuthMethod !== "client_secret_basic") return {};
+    params.delete("client_secret");
+    const callerId = params.get("client_id") || idpCfg.clientId;
+    return { Authorization: encodeBasicCredentials(callerId, callerSecret) };
+  }
+  // Lent only to the portal's own legs; anything else must bring its own secret.
+  // A repeated grant_type is refused too: the provider reads the last value.
+  const grants = params.getAll("grant_type");
+  if (grants.length !== 1 || !LENT_SECRET_GRANTS.has(grants[0])) return {};
+
+  const { clientId, clientSecret } = idpCfg;
   if (tokenEndpointAuthMethod === "client_secret_basic") {
     params.delete("client_secret");
     // The package's own encoder, not a hand-rolled base64: the provider
@@ -443,8 +462,10 @@ export function mountD2eRoutes(app: Express): void {
       (req as any).body &&
       typeof (req as any).body === "object"
     ) {
-      for (const [k, v] of Object.entries((req as any).body as Record<string, string>)) {
-        params.append(k, v);
+      // qs folds a repeated key into an array; keep every value so the
+      // repeat check below sees it.
+      for (const [k, v] of Object.entries((req as any).body as Record<string, unknown>)) {
+        for (const item of Array.isArray(v) ? v : [v]) params.append(k, String(item));
       }
     } else {
       // Raw body — read stream.
@@ -454,6 +475,16 @@ export function mountD2eRoutes(app: Express): void {
       }
       const buf = await new Blob(chunks as BlobPart[]).arrayBuffer();
       new URLSearchParams(new TextDecoder().decode(buf)).forEach((v, k) => params.append(k, v));
+    }
+
+    // RFC 6749 §3.2: parameters MUST NOT be repeated. This route reads the
+    // first value and the provider the last, so a repeat could steer the lent
+    // secret. `resource` is the exception RFC 8707 makes, and is read as a list.
+    const repeated = [...new Set(params.keys())]
+      .find((k) => k !== "resource" && params.getAll(k).length > 1);
+    if (repeated) {
+      (res as any).status(400).json({ error: "invalid_request", error_description: `${repeated} is repeated` });
+      return;
     }
 
     const resource = idpCfg.resource;
