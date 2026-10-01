@@ -177,6 +177,8 @@ export function shouldReserializeParsedBody(
 // ---------------------------------------------------------------------------
 // POST /d2e/oauth/token — how the client secret is presented to the IdP
 // ---------------------------------------------------------------------------
+const LENT_SECRET_GRANTS = new Set(["authorization_code", "refresh_token"]);
+
 // Exactly ONE client authentication method may reach the IdP, and which one it
 // is comes from the IdP, not from the caller.
 //
@@ -208,7 +210,8 @@ export function applyClientAuthentication(
     const callerId = params.get("client_id") || idpCfg.clientId;
     return { Authorization: encodeBasicCredentials(callerId, callerSecret) };
   }
-  if (params.get("grant_type") === "client_credentials") return {};
+  // Lent only to the portal's own legs; anything else must bring its own secret.
+  if (!LENT_SECRET_GRANTS.has(params.get("grant_type") ?? "")) return {};
 
   const { clientId, clientSecret } = idpCfg;
   if (tokenEndpointAuthMethod === "client_secret_basic") {

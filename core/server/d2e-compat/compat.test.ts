@@ -330,6 +330,46 @@ Deno.test("client_credentials without caller credentials never gets the configur
   }
 });
 
+Deno.test("trex: a secret the caller posts with a code exchange is the one presented", () => {
+  // idp-login.cjs posts its own client_secret on the authorization_code leg.
+  const params = new URLSearchParams({
+    grant_type: "authorization_code",
+    client_id: "d2e-webapi",
+    client_secret: "posted-by-the-caller",
+    code: "abc",
+  });
+  const headers = applyClientAuthentication(params, TREX_CFG);
+  assertEquals(params.has("client_secret"), false);
+  assertEquals(decodeBasicCredentials(headers.Authorization), {
+    clientId: "d2e-webapi",
+    clientSecret: "posted-by-the-caller",
+  });
+});
+
+Deno.test("an unrecognised grant never gets the configured secret", () => {
+  for (const method of ["client_secret_basic", "client_secret_post"] as const) {
+    for (const grant of ["password", "urn:ietf:params:oauth:grant-type:token-exchange", ""]) {
+      const params = new URLSearchParams(grant ? { grant_type: grant } : {});
+      const headers = applyClientAuthentication(params, { ...TREX_CFG, tokenEndpointAuthMethod: method });
+      assertEquals(headers, {}, `${method} ${grant}`);
+      assertEquals(params.has("client_secret"), false, `${method} ${grant}`);
+    }
+  }
+});
+
+Deno.test("logto: a posted secret stays in the body", () => {
+  const params = new URLSearchParams({ grant_type: "client_credentials", client_id: "svc", client_secret: "s" });
+  const headers = applyClientAuthentication(params, { ...TREX_CFG, tokenEndpointAuthMethod: "client_secret_post" });
+  assertEquals(headers, {});
+  assertEquals(params.get("client_secret"), "s");
+});
+
+Deno.test("the configured secret is still lent to a refresh", () => {
+  const params = new URLSearchParams({ grant_type: "refresh_token", refresh_token: "rt" });
+  const headers = applyClientAuthentication(params, TREX_CFG);
+  assertEquals(decodeBasicCredentials(headers.Authorization).clientId, TREX_CFG.clientId);
+});
+
 Deno.test("trex: a secret with reserved characters survives the round trip", () => {
   // RFC 6749 §2.3.1 form-url-encodes each half before base64, and the provider
   // form-url-DECODES each half. A hand-rolled `btoa(id + ":" + secret)` agrees
