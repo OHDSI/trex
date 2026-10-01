@@ -7,22 +7,34 @@
 // that already happens — this only carries the browser one hop further so the
 // upstream can clear its own cookie.
 import { federationFromAppMetadata } from "./claims.ts";
-import { decryptWithDek } from "../dek.ts";
+import { readAccountIdTokenByUser } from "../federation/providers.ts";
 
-/** The upstream id_token stored on the user's federated account, decrypted. */
+/**
+ * Three base64url segments, which is all that has to hold for a value to be
+ * worth sending as an id_token_hint.
+ *
+ * Shape is checked because one corruption does NOT announce itself: a column
+ * that went through the DEK hook twice (account-tokens.ts describes the path)
+ * decrypts cleanly to the inner ciphertext, so the failure is a hint the
+ * upstream silently rejects rather than a throw. Sending nothing is better --
+ * the user gets the confirmation page instead of a dead end, and this logs.
+ */
+function looksLikeCompactJws(value: string): boolean {
+  const parts = value.split(".");
+  return parts.length === 3 && parts.every((p) => /^[A-Za-z0-9_-]+$/.test(p));
+}
+
+/** The upstream id_token stored on the user's federated account, or null. */
 async function upstreamIdToken(userId: string, providerId: string): Promise<string | null> {
-  const { rows } = await (await db()).query<{ idToken: string | null }>(
-    `SELECT "idToken" FROM trexdb.account WHERE "userId" = $1 AND "providerId" = $2 LIMIT 1`,
-    [userId, providerId],
-  );
-  const enc = rows[0]?.idToken;
-  if (!enc) return null;
-  try {
-    return await decryptWithDek(enc);
-  } catch (err) {
-    console.error("[oidc] end-session: could not decrypt upstream id_token:", err);
+  const token = await readAccountIdTokenByUser(await db(), userId, providerId);
+  if (!token) return null;
+  if (!looksLikeCompactJws(token)) {
+    console.error(
+      `[oidc] end-session: stored upstream id_token for ${providerId} is not a JWT; sending no hint`,
+    );
     return null;
   }
+  return token;
 }
 
 /**
