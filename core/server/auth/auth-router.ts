@@ -14,7 +14,7 @@ import {
   generateRefreshToken,
   hashRefreshToken,
 } from "./jwt.ts";
-import { hashPassword } from "./password.ts";
+import { hashPassword, validatePasswordLength } from "./password.ts";
 import { authLimiter, apiLimiter } from "../middleware/rate-limit.ts";
 import { isRefreshTokenExpired } from "./refresh-token-ttl.ts";
 import { loadExternalProviders } from "./settings-providers.ts";
@@ -552,8 +552,9 @@ router.post("/signup", authLimiter, async (req, res) => {
       return;
     }
 
-    if (password.length < 8) {
-      res.status(422).json({ error: "signup_invalid", error_description: "Password must be at least 8 characters" });
+    const signupPasswordError = validatePasswordLength(password);
+    if (signupPasswordError) {
+      res.status(422).json({ error: "signup_invalid", error_description: signupPasswordError });
       return;
     }
 
@@ -1068,8 +1069,9 @@ router.put("/user", apiLimiter, async (req, res) => {
 
     let newHash: string | null = null;
     if (password) {
-      if (password.length < 8) {
-        res.status(422).json({ error: "validation_failed", error_description: "Password must be at least 8 characters" });
+      const passwordError = validatePasswordLength(password);
+      if (passwordError) {
+        res.status(422).json({ error: "validation_failed", error_description: passwordError });
         return;
       }
       newHash = await hashPassword(password);
@@ -1189,8 +1191,9 @@ router.post("/change-password", apiLimiter, async (req, res) => {
       return;
     }
 
-    if (newPassword.length < 8) {
-      res.status(422).json({ error: "Password must be at least 8 characters" });
+    const newPasswordError = validatePasswordLength(newPassword);
+    if (newPasswordError) {
+      res.status(422).json({ error: newPasswordError });
       return;
     }
 
@@ -1426,6 +1429,12 @@ router.post(["/admin/create-user", "/admin/users"], apiLimiter, async (req, res)
       return;
     }
 
+    const passwordError = validatePasswordLength(password);
+    if (passwordError) {
+      res.status(422).json({ error: "validation_failed", error_description: passwordError });
+      return;
+    }
+
     // Asked before anything is written, for the reason /signup and V17 ask it:
     // createUser runs zod's z.email() itself and would refuse the address after
     // the fact, and an administrator who got one past it would have created an
@@ -1484,8 +1493,9 @@ router.put("/admin/users/:id", apiLimiter, async (req, res) => {
       return;
     }
 
-    if (password !== undefined && password.length < 8) {
-      res.status(422).json({ error: "Password must be at least 8 characters" });
+    const passwordError = password === undefined ? null : validatePasswordLength(password);
+    if (passwordError) {
+      res.status(422).json({ error: passwordError });
       return;
     }
 

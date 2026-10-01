@@ -13,6 +13,15 @@ const SCRYPT_PARAMS_ALT = { N: 16384, r: 16, p: 1 };
 const DK_LEN = 64;
 const SALT_LEN = 16;
 
+export const MIN_PASSWORD_LENGTH = 8;
+
+export function validatePasswordLength(password: unknown): string | null {
+  if (typeof password !== "string" || password.length < MIN_PASSWORD_LENGTH) {
+    return `Password must be at least ${MIN_PASSWORD_LENGTH} characters`;
+  }
+  return null;
+}
+
 export async function hashPassword(password: string): Promise<string> {
   const salt = randomBytes(SALT_LEN);
   const saltHex = salt.toString("hex");
