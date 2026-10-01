@@ -51,6 +51,7 @@ import { workerMemoryLimitMb, workerWallClockTimeoutMs } from "../worker-limits.
 // the two cannot disagree about RFC 6749 §2.3.1 form-url-encoding.
 import { encodeBasicCredentials } from "better-auth/oauth2";
 import {
+  bigqueryCredentialsFromRow,
   CACHE_DIR,
   ensureCacheAttached,
   ensureSourceAttached,
@@ -58,7 +59,6 @@ import {
   parseAttachBody,
   redactSecrets,
   snowflakeExtrasFromRow,
-  bigqueryCredentialsFromRow,
   type ExecFn,
   type SourceCredential,
 } from "./lib/attach.ts";

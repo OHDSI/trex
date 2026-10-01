@@ -43,13 +43,13 @@
 // as a plugin: steps 1-3 all complete before WebAPI has created those tables.
 
 import {
+  bigqueryCredentialsFromRow,
   CACHE_DIR,
   ensureAttached,
   ensureCacheAttached,
   normalizeDialect,
   redactSecrets,
   snowflakeExtrasFromRow,
-  bigqueryCredentialsFromRow,
   type ExecFn,
   type SourceCredential,
 } from "./lib/attach.ts";
