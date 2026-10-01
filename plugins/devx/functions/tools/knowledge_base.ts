@@ -7,7 +7,7 @@
 import type { ToolDefinition } from "./types.ts";
 import { EXCLUDED_DIRS, EXCLUDED_FILES } from "./path_safety.ts";
 import { duckdb, escapeSql } from "../duckdb.ts";
-import { join, relative, resolve } from "https://deno.land/std@0.224.0/path/mod.ts";
+import { join, relative, resolve } from "node:path";
 
 // ── Supported repositories ──────────────────────────────────────────
 

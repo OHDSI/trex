@@ -1,7 +1,7 @@
 // @ts-nocheck - Deno edge function
 import type { ToolDefinition } from "./types.ts";
 import { safeJoin, EXCLUDED_DIRS, EXCLUDED_FILES } from "./path_safety.ts";
-import { relative } from "https://deno.land/std@0.224.0/path/mod.ts";
+import { relative } from "node:path";
 
 export const grepTool: ToolDefinition<{
   pattern: string;
