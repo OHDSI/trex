@@ -8,6 +8,7 @@
 import { core } from "ext:core/mod.js";
 import { TrexConnection } from "ext:trex/dbconnection.js";
 import { resolveDialect, resolveFirstPublication } from "ext:trex/db_resolve.js";
+import { redactSecrets } from "ext:trex/redact.js";
 import { buildHanaEvictSessionSql, buildHanaExecuteSql, buildHanaScanSql } from "ext:trex/hana_sql.js";
 
 const ops = core.ops;
@@ -49,24 +50,7 @@ export function registerStaticRoute(urlPrefix, fsPath) {
 	op_register_static_route(urlPrefix, fsPath);
 }
 
-// Redact secrets from a string before logging. SQL we log can embed
-// connection strings - e.g. `ATTACH '... password=mypass' (TYPE postgres)`
-// or `hdbsql://user:pass@host` - and those must never reach stdout in
-// cleartext. Mirrors the key list used by the Rust SwarmLogger::sanitize.
-const SECRET_KEYS = ['password', 'passwd', 'secret', 'token', 'credential', 'authorization'];
-export function redactSecrets(text) {
-	if (typeof text !== 'string') return text;
-	let out = text;
-	// key=value / key:value, optional quotes around the value; stop at the
-	// first whitespace/quote/delimiter so we don't over-redact the rest.
-	for (const key of SECRET_KEYS) {
-		const re = new RegExp(`(${key}\\s*[=:]\\s*)('[^']*'|"[^"]*"|[^\\s'",;)]+)`, 'gi');
-		out = out.replace(re, '$1[REDACTED]');
-	}
-	// URI userinfo: scheme://user:secret@host  ->  scheme://user:[REDACTED]@host
-	out = out.replace(/([a-z][a-z0-9+.-]*:\/\/[^:/?#\s]+:)([^@\s]+)(@)/gi, '$1[REDACTED]$3');
-	return out;
-}
+export { redactSecrets };
 
 
 function map_params(params) {
