@@ -183,9 +183,24 @@ export function googleCredentialsPath(): string {
   return Deno.env.get("GOOGLE_APPLICATION_CREDENTIALS") || "/usr/src/data/google-credentials.json";
 }
 
+// Marks the key file as trex's, so a file an operator put there is never removed.
+const OWNED_SUFFIX = ".trex-owned";
+
 /** WebAPI's BigQuery driver (OAuthType=3) reads Application Default Credentials from this file. */
 export async function writeGoogleCredentials(key: Record<string, unknown>): Promise<void> {
   await Deno.writeTextFile(googleCredentialsPath(), JSON.stringify(key), { mode: 0o600 });
+  await Deno.writeTextFile(googleCredentialsPath() + OWNED_SUFFIX, "");
+}
+
+/** Removes a key file trex wrote, so a deleted or cleared key stops authenticating WebAPI. */
+export async function removeGoogleCredentials(): Promise<void> {
+  const path = googleCredentialsPath();
+  const owned = await Deno.stat(path + OWNED_SUFFIX).then(() => true, () => false);
+  if (!owned) return;
+  await Deno.remove(path).catch((e) => {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  });
+  await Deno.remove(path + OWNED_SUFFIX);
 }
 
 /**

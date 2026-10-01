@@ -10,7 +10,9 @@ import {
   normalizeDialect,
   parseAttachBody,
   redactSecrets,
+  removeGoogleCredentials,
   snowflakeExtrasFromRow,
+  writeGoogleCredentials,
   type SourceCredential,
 } from "./attach.ts";
 
@@ -393,4 +395,36 @@ Deno.test("snowflakeExtrasFromRow — reads extras directly off extra, tolerates
     snowflakeExtrasFromRow(null),
     { warehouse: undefined, schema: undefined, role: undefined, privateKey: undefined, privateKeyPassphrase: undefined },
   );
+});
+
+async function withCredentialsPath(fn: (path: string) => Promise<void>) {
+  const dir = await Deno.makeTempDir();
+  const before = Deno.env.get("GOOGLE_APPLICATION_CREDENTIALS");
+  Deno.env.set("GOOGLE_APPLICATION_CREDENTIALS", `${dir}/google-credentials.json`);
+  try {
+    await fn(`${dir}/google-credentials.json`);
+  } finally {
+    if (before === undefined) Deno.env.delete("GOOGLE_APPLICATION_CREDENTIALS");
+    else Deno.env.set("GOOGLE_APPLICATION_CREDENTIALS", before);
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+
+const exists = (p: string) => Deno.stat(p).then(() => true, () => false);
+
+Deno.test("removeGoogleCredentials deletes a key file trex wrote", async () => {
+  await withCredentialsPath(async (path) => {
+    await writeGoogleCredentials(SA_KEY);
+    await removeGoogleCredentials();
+    assertEquals(await exists(path), false);
+    await removeGoogleCredentials(); // already gone: no error
+  });
+});
+
+Deno.test("removeGoogleCredentials leaves a file trex did not write", async () => {
+  await withCredentialsPath(async (path) => {
+    await Deno.writeTextFile(path, "{}");
+    await removeGoogleCredentials();
+    assertEquals(await exists(path), true);
+  });
 });

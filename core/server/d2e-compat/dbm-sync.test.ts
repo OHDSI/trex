@@ -74,7 +74,7 @@ Deno.test("one failing secret does not stop the others or the ADC write", async 
   ]);
   const conn = fakeConn((sql) => sql.includes("bq1__srcdb_secret"));
   let written: unknown;
-  await applyBigQueryPlan(plan, conn.open, (k) => { written = k; });
+  await applyBigQueryPlan(plan, conn.open, { write: (k) => { written = k; }, remove: () => {} });
   assertEquals(conn.ran.some((s) => s.includes("bq2__srcdb_secret")), true);
   assertEquals(written, key("a@x"));
   assertEquals(conn.closed(), true);
@@ -86,7 +86,24 @@ Deno.test("the ADC file is written even when the bigquery extension cannot load"
   ]);
   const conn = fakeConn((sql) => /LOAD|INSTALL/.test(sql));
   let written: unknown;
-  await applyBigQueryPlan(plan, conn.open, (k) => { written = k; });
+  await applyBigQueryPlan(plan, conn.open, { write: (k) => { written = k; }, remove: () => {} });
   assertEquals(written, key("a@x"));
   assertEquals(conn.closed(), true);
+});
+
+Deno.test("WebAPI's key is chosen by source id, not by row order", () => {
+  const a = { id: "bq_a", host: "proj-a", dialect: "bigquery", extra: key("a@x") };
+  const b = { id: "bq_b", host: "proj-b", dialect: "bigquery", extra: key("b@x") };
+  assertEquals(planBigQueryCredentials([a, b]).adcKey, key("a@x"));
+  assertEquals(planBigQueryCredentials([b, a]).adcKey, key("a@x"));
+});
+
+Deno.test("the ADC file is removed once no bigquery source has a key", async () => {
+  const plan = planBigQueryCredentials([{ id: "pg", host: "db", dialect: "postgres", extra: {} }]);
+  let removed = false;
+  await applyBigQueryPlan(plan, fakeConn(() => false).open, {
+    write: () => { throw new Error("must not write"); },
+    remove: () => { removed = true; },
+  });
+  assertEquals(removed, true);
 });

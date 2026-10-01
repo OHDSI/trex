@@ -17,6 +17,7 @@ import {
   bigquerySecretSql,
   isValidSourceId,
   redactSecrets,
+  removeGoogleCredentials,
   writeGoogleCredentials,
 } from "./lib/attach.ts";
 
@@ -146,7 +147,8 @@ export function planBigQueryCredentials(
   const byProject = new Map<string, string>();
   const emails = new Set<string>();
   let adcKey: Record<string, unknown> | undefined;
-  for (const c of creds) {
+  // Sorted so WebAPI's single key does not flip between syncs with row order.
+  for (const c of [...creds].sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0))) {
     if (c.dialect !== "bigquery") continue;
     if (!isValidSourceId(c.id)) {
       warnings.push(`bigquery source ${c.id} has an id DuckDB cannot name — skipped`);
@@ -165,7 +167,7 @@ export function planBigQueryCredentials(
     byProject.set(c.host, email);
     emails.add(email);
     secrets.push(bigquerySecretSql(c.id, c.host, key));
-    adcKey = key;
+    adcKey ??= key;
   }
   if (emails.size > 1) {
     warnings.push(
@@ -186,7 +188,10 @@ interface SqlConn {
 export async function applyBigQueryPlan(
   plan: { secrets: string[]; adcKey?: Record<string, unknown> },
   openConn: () => SqlConn,
-  writeAdc: (key: Record<string, unknown>) => Promise<void> | void,
+  adcFile: {
+    write: (key: Record<string, unknown>) => Promise<void> | void;
+    remove: () => Promise<void> | void;
+  },
 ): Promise<void> {
   const fail = (what: string, e: unknown) =>
     console.error(`[d2e-compat] dbm sync: ${what}: ${redactSecrets(String(e))}`);
@@ -214,12 +219,11 @@ export async function applyBigQueryPlan(
     }
   }
   // WebAPI reads ADC (OAuthType=3) from this file.
-  if (plan.adcKey) {
-    try {
-      await writeAdc(plan.adcKey);
-    } catch (e) {
-      fail("ADC file not written", e);
-    }
+  try {
+    if (plan.adcKey) await adcFile.write(plan.adcKey);
+    else await adcFile.remove();
+  } catch (e) {
+    fail("ADC file not updated", e);
   }
 }
 
@@ -243,7 +247,10 @@ export async function syncTrexDatabaseManager(): Promise<void> {
   const plan = planBigQueryCredentials(creds);
   for (const w of plan.warnings) console.warn(`[d2e-compat] dbm sync: ${w}`);
   // deno-lint-ignore no-explicit-any
-  await applyBigQueryPlan(plan, () => new (globalThis as any).Trex.TrexDB("memory"), writeGoogleCredentials);
+  await applyBigQueryPlan(plan, () => new (globalThis as any).Trex.TrexDB("memory"), {
+    write: writeGoogleCredentials,
+    remove: removeGoogleCredentials,
+  });
   try {
     console.log(
       `[d2e-compat] syncing ${creds.length} database(s) to Trex.DatabaseManager: [${creds.map((c) => c.id).join(", ")}]`,
