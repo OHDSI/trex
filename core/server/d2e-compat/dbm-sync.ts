@@ -12,7 +12,12 @@
 
 import { pool } from "../db.ts";
 import { decryptSecret } from "../auth/crypto.ts";
-import { bigqueryCredentialsFromRow, writeGoogleCredentials } from "./lib/attach.ts";
+import {
+  bigqueryCredentialsFromRow,
+  bigquerySecretSql,
+  redactSecrets,
+  writeGoogleCredentials,
+} from "./lib/attach.ts";
 
 // Monotonic counter bumped on every deliberate registry sync (boot + /trex/db
 // writes, via syncTrexDatabaseManager). Function workers (plugin/function.ts) read
@@ -130,6 +135,41 @@ export async function readRegistryDecrypted(): Promise<any[]> {
   }
 }
 
+/** What the registry sync must prepare for BigQuery: a scoped DuckDB secret per
+ *  source, and the one key WebAPI's ADC file can hold. Pure, for testing. */
+export function planBigQueryCredentials(
+  creds: Array<{ id: string; host: string; dialect: string; extra?: unknown }>,
+): { secrets: string[]; adcKey?: Record<string, unknown>; warnings: string[] } {
+  const secrets: string[] = [];
+  const warnings: string[] = [];
+  const byProject = new Map<string, string>();
+  const emails = new Set<string>();
+  let adcKey: Record<string, unknown> | undefined;
+  for (const c of creds) {
+    if (c.dialect !== "bigquery") continue;
+    const key = bigqueryCredentialsFromRow(c.extra);
+    if (!key) {
+      warnings.push(`bigquery source ${c.id} has no service-account key in extra`);
+      continue;
+    }
+    const email = String(key.client_email);
+    const seen = byProject.get(c.host);
+    if (seen && seen !== email) {
+      warnings.push(`bigquery project ${c.host} has sources with different keys; the native attach picks one by scope`);
+    }
+    byProject.set(c.host, email);
+    emails.add(email);
+    secrets.push(bigquerySecretSql(c.id, c.host, key));
+    adcKey = key;
+  }
+  if (emails.size > 1) {
+    warnings.push(
+      `GOOGLE_APPLICATION_CREDENTIALS holds one key; WebAPI uses ${String(adcKey?.client_email)} for every BigQuery source`,
+    );
+  }
+  return { secrets, adcKey, warnings };
+}
+
 /** Push the trexdb registry into the trex-native DatabaseManager so source DBs
  *  get attached/published. No-op (with a warning) if the native manager is absent
  *  — e.g. a trex build without the ambient global — so the API still functions. */
@@ -146,23 +186,32 @@ export async function syncTrexDatabaseManager(): Promise<void> {
     console.error(`[d2e-compat] dbm sync: failed to read trexdb registry: ${e}`);
     return;
   }
+  // Own try: a BigQuery key problem must not keep the other sources from syncing.
+  try {
+    const plan = planBigQueryCredentials(creds);
+    for (const w of plan.warnings) console.warn(`[d2e-compat] dbm sync: ${w}`);
+    if (plan.secrets.length > 0) {
+      // Same DuckDB instance the native manager attaches on, so its
+      // #add_bigquery picks these up by SCOPE.
+      // deno-lint-ignore no-explicit-any
+      const conn = new (globalThis as any).Trex.TrexDB("memory");
+      try {
+        await conn.execute("LOAD bigquery", []);
+      } catch {
+        await conn.execute("INSTALL bigquery FROM community", []);
+        await conn.execute("LOAD bigquery", []);
+      }
+      for (const sql of plan.secrets) await conn.execute(sql, []);
+    }
+    // WebAPI reads ADC (OAuthType=3) from this file.
+    if (plan.adcKey) await writeGoogleCredentials(plan.adcKey);
+  } catch (e) {
+    console.error(`[d2e-compat] dbm sync: bigquery credentials not prepared: ${redactSecrets(String(e))}`);
+  }
   try {
     console.log(
       `[d2e-compat] syncing ${creds.length} database(s) to Trex.DatabaseManager: [${creds.map((c) => c.id).join(", ")}]`,
     );
-    // setCredentials makes the native manager ATTACH every bigquery source
-    // (trex_lib.js #add_bigquery), which needs the service-account key on disk
-    // first — otherwise DuckDB raises a FATAL "Cannot open credentials file" and
-    // invalidates the shared database for every dataset until trex restarts.
-    for (const c of creds) {
-      if (c.dialect !== "bigquery") continue;
-      const googleCredentials = bigqueryCredentialsFromRow(c.extra);
-      if (googleCredentials) {
-        await writeGoogleCredentials(googleCredentials);
-      } else {
-        console.warn(`[d2e-compat] dbm sync: bigquery source ${c.id} has no service-account JSON in extra`);
-      }
-    }
     dbm.setCredentials(creds);
     // Signal function workers that the registry changed so they refresh on next call.
     _registrationEpoch++;
