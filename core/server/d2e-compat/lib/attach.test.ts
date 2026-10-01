@@ -3,6 +3,7 @@ import {
   bigqueryCredentialsFromRow,
   ensureCacheAttached,
   ensureSourceAttached,
+  extraFields,
   GOOGLE_APPLICATION_CREDENTIALS_PATH,
   MAX_ATTACH_IDS,
   normalizeCacheDir,
@@ -21,6 +22,13 @@ function captureSql(c: SourceCredential): Promise<string[]> {
   return ensureSourceAttached(c, { exec }).then(() => calls);
 }
 
+const SA_KEY = {
+  type: "service_account",
+  project_id: "my-proj",
+  private_key: "-----BEGIN PRIVATE KEY-----\nMII\n-----END PRIVATE KEY-----\n",
+  client_email: "svc@my-proj.iam.gserviceaccount.com",
+};
+
 const bqBase: SourceCredential = {
   id: "bq",
   dialect: "bigquery",
@@ -28,7 +36,7 @@ const bqBase: SourceCredential = {
   name: "my_dataset",
   adminUsername: "",
   adminPassword: "",
-  googleCredentials: { type: "service_account", project_id: "my-proj" },
+  googleCredentials: SA_KEY,
 };
 
 Deno.test("bigquery with dataset pins the single dataset", async () => {
@@ -79,8 +87,7 @@ Deno.test("bigquery without a service-account key refuses to attach", async () =
 });
 
 Deno.test("bigqueryCredentialsFromRow unwraps the Internal wrapper", () => {
-  const key = { type: "service_account", private_key: "-----BEGIN PRIVATE KEY-----\n..." };
-  assertEquals(bigqueryCredentialsFromRow({ Internal: key }), key);
+  assertEquals(bigqueryCredentialsFromRow({ Internal: SA_KEY }), SA_KEY);
 });
 
 Deno.test("bigqueryCredentialsFromRow returns undefined for an empty/unconfigured row", () => {
@@ -90,8 +97,30 @@ Deno.test("bigqueryCredentialsFromRow returns undefined for an empty/unconfigure
 });
 
 Deno.test("bigqueryCredentialsFromRow parses a JSON-string extra column", () => {
-  const key = { type: "service_account", project_id: "p" };
-  assertEquals(bigqueryCredentialsFromRow(JSON.stringify({ Internal: key })), key);
+  assertEquals(bigqueryCredentialsFromRow(JSON.stringify({ Internal: SA_KEY })), SA_KEY);
+});
+
+Deno.test("bigqueryCredentialsFromRow ignores an extra that is not a service-account key", () => {
+  assertEquals(bigqueryCredentialsFromRow({ Internal: { sslmode: "require" } }), undefined);
+  assertEquals(bigqueryCredentialsFromRow({ Internal: { type: "service_account" } }), undefined);
+});
+
+Deno.test("snowflakeExtrasFromRow reads the portal's Internal wrapper", () => {
+  assertEquals(
+    snowflakeExtrasFromRow({ Internal: { warehouse: "WH", privateKey: "PEM" } }).warehouse,
+    "WH",
+  );
+  assertEquals(
+    snowflakeExtrasFromRow(JSON.stringify({ Internal: { privateKey: "PEM" } })).privateKey,
+    "PEM",
+  );
+});
+
+Deno.test("extraFields keeps reading an unwrapped legacy row", () => {
+  assertEquals(extraFields({ warehouse: "WH" }), { warehouse: "WH" });
+  assertEquals(extraFields({ Internal: {}, warehouse: "WH" }), { Internal: {}, warehouse: "WH" });
+  assertEquals(extraFields("not json"), {});
+  assertEquals(extraFields(null), {});
 });
 
 // PR #2835: the HANA boot block attaches a `${code}_cache` catalog and creates

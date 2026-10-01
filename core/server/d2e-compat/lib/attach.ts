@@ -129,20 +129,27 @@ export interface SourceCredential {
   googleCredentials?: Record<string, unknown>;
 }
 
-// Pulls Snowflake-specific extras out of a trex.db row's `extra` (jsonb). `extra`
-// stores the Internal object's CONTENTS directly — routes persist
-// JSON.stringify(body.extra) and prefect-sync reads extra.<field> directly.
+// The portal saves extra as {Internal: {...}}; rows written straight through
+// the API hold the fields unwrapped. jsonb may also arrive as a string.
+export function extraFields(dbExtra: unknown): Record<string, unknown> {
+  let extra: unknown = dbExtra ?? {};
+  if (typeof extra === "string") {
+    try { extra = JSON.parse(extra || "{}"); } catch { return {}; }
+  }
+  if (!extra || typeof extra !== "object") return {};
+  const inner = (extra as Record<string, unknown>).Internal;
+  if (inner && typeof inner === "object" && Object.keys(inner).length > 0) {
+    return inner as Record<string, unknown>;
+  }
+  return extra as Record<string, unknown>;
+}
+
 export function snowflakeExtrasFromRow(dbExtra: unknown): Pick<
   SourceCredential,
   "warehouse" | "schema" | "role" | "privateKey" | "privateKeyPassphrase"
 > {
-  // `extra` is a jsonb column. Depending on the pg type parser in this runtime it
-  // may arrive already-parsed (object) or as a raw JSON string — normalize both.
   // deno-lint-ignore no-explicit-any
-  let extra: any = dbExtra ?? {};
-  if (typeof extra === "string") {
-    try { extra = JSON.parse(extra || "{}"); } catch { extra = {}; }
-  }
+  const extra: any = extraFields(dbExtra);
   return {
     warehouse: extra.warehouse,
     schema: extra.schema,
@@ -156,14 +163,10 @@ export const GOOGLE_APPLICATION_CREDENTIALS_PATH =
   Deno.env.get("GOOGLE_APPLICATION_CREDENTIALS") || "/usr/src/data/google-credentials.json";
 
 export function bigqueryCredentialsFromRow(dbExtra: unknown): Record<string, unknown> | undefined {
-  // deno-lint-ignore no-explicit-any
-  let extra: any = dbExtra ?? {};
-  if (typeof extra === "string") {
-    try { extra = JSON.parse(extra || "{}"); } catch { extra = {}; }
-  }
-  const inner = extra.Internal ?? extra;
-  return inner && typeof inner === "object" && Object.keys(inner).length > 0
-    ? inner
+  const key = extraFields(dbExtra);
+  const nonEmpty = (v: unknown) => typeof v === "string" && v.trim() !== "";
+  return key.type === "service_account" && nonEmpty(key.private_key) && nonEmpty(key.client_email)
+    ? key
     : undefined;
 }
 

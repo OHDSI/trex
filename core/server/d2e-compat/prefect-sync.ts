@@ -31,6 +31,7 @@
 
 import { pool } from "../db.ts";
 import { decryptSecret } from "../auth/crypto.ts";
+import { extraFields } from "./lib/attach.ts";
 
 const BLOCK_NAME = "database-credentials";
 const SECRET_SLUG = "secret";
@@ -116,7 +117,8 @@ async function buildFlowCredentials(): Promise<any[]> {
       };
       const read = pick("Read");
       const admin = pick("Admin");
-      const extra = row.extra?.Internal ?? row.extra ?? {};
+      // deno-lint-ignore no-explicit-any
+      const extra: any = extraFields(row.extra);
       out.push({
         readUser: read ? read.username : null,
         readPassword: read ? await recoverPassword(read.password, read.password_encrypted) : null,
