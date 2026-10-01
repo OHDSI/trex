@@ -27,7 +27,7 @@ import { nativeIdpEnabled } from "./auth/native-idp.ts";
 import { rolesRouter } from "./auth/roles-api.ts";
 import { federationAdminRouter } from "./auth/federation/admin-api.ts";
 import { oidcProviderEnabled } from "./auth/oidc/config.ts";
-import { seedOAuthClientFromEnv } from "./auth/oidc/seed-client.ts";
+import { seedOAuthClientFromEnv, seedServiceClientsFromEnv } from "./auth/oidc/seed-client.ts";
 import { registerFederationRoutes } from "./auth/federation/router.ts";
 import { fnmap } from "./plugin/function.ts";
 import { apiLimiter } from "./middleware/rate-limit.ts";
@@ -222,6 +222,8 @@ if (oidcProviderEnabled()) {
   // client is only needed once a browser arrives at /authorize, and boot must
   // not wait on the database for it.
   void seedOAuthClientFromEnv();
+  // Machine clients (TREX_OIDC_SERVICE_CLIENTS) for the client_credentials grant.
+  void seedServiceClientsFromEnv();
 }
 
 // Deno doesn't have `global` — polyfill for npm packages that expect Node.js

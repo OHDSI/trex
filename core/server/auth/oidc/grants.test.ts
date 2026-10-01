@@ -426,6 +426,47 @@ test("client_credentials is refused when the client has no configured scopes", a
   assertEquals(refused.body.error, "unauthorized_client");
 });
 
+test("a TREX_OIDC_SERVICE_CLIENTS client gets a token as itself", async (m, flow) => {
+  // Plugin authz grants manifest roles by client id (SERVICE_CLIENT_ROLES).
+  const serviceId = `${flow.clientId}-svc`;
+  const [spec] = m.config.parseServiceClients({
+    TREX_OIDC_SERVICE_CLIENTS: JSON.stringify([
+      { name: "alp-data", id: serviceId, secret: "service-secret" },
+    ]),
+  });
+  await m.seed.upsertOAuthClient({ ...spec, resourceIdentifier: flow.server.issuer });
+  try {
+    const res = await fetch(`${flow.server.url}/oauth2/token`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        authorization: encodeBasicCredentials(serviceId, "service-secret"),
+      },
+      body: new URLSearchParams({ grant_type: "client_credentials" }),
+    });
+    assertEquals(res.status, 200);
+    const { payload } = decodeJwt((await res.json()).access_token);
+    assertEquals(payload.sub, serviceId);
+    assertEquals(payload.client_id, serviceId);
+    assertEquals(payload.scope, m.config.SERVICE_SCOPE);
+    assertEquals(payload.roles, []);
+
+    // And only with its own secret.
+    const wrong = await fetch(`${flow.server.url}/oauth2/token`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        authorization: encodeBasicCredentials(serviceId, CLIENT_SECRET),
+      },
+      body: new URLSearchParams({ grant_type: "client_credentials" }),
+    });
+    assertNotEquals(wrong.status, 200);
+    await wrong.body?.cancel();
+  } finally {
+    await m.db.pool.query(`DELETE FROM trexdb."oauthClient" WHERE "clientId" = $1`, [serviceId]);
+  }
+});
+
 test("the resource default does not reach the other two grants", async (_m, flow) => {
   // The hook is keyed on grant_type, and an authorization_code exchange must
   // keep inheriting the resource the authorize leg bound to the code rather

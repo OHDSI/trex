@@ -3,7 +3,7 @@ import { encryptToken, decryptToken } from "../crypto.ts";
 import { createSseWriter } from "../sse.ts";
 import { getAppWorkspacePath } from "../tools/workspace.ts";
 import { duckdb, escapeSql } from "../duckdb.ts";
-import { join } from "https://deno.land/std@0.224.0/path/mod.ts";
+import { join } from "node:path";
 import {
   resolveTarget,
   deployFunction,

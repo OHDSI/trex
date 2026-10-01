@@ -7,12 +7,13 @@
 // authorize.test.ts for redirect_uri and scope, grants.test.ts for PKCE and the
 // three grants, end-session.test.ts for the post-logout list, and
 // custom-claims.test.ts for the claim set.
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals, assertThrows } from "jsr:@std/assert";
 import {
   issuerUrl,
   loginUrl,
   oidcProviderEnabled,
   parseSeedClient,
+  parseServiceClients,
   readCookie,
 } from "./config.ts";
 // The one cross-module invariant this file pins: the scope list the seeder
@@ -210,4 +211,57 @@ Deno.test("a seeded client without a secret is public and falls back to its id f
   assertEquals(spec?.clientSecret, undefined);
   assertEquals(spec?.name, "atlas");
   assertEquals(spec?.postLogoutRedirectUris, []);
+});
+
+Deno.test("parseServiceClients reads a LOGTO__CLIENT_APPS-shaped JSON array", () => {
+  const specs = parseServiceClients({
+    TREX_OIDC_ISSUER: "https://localhost:8443",
+    // Other LOGTO__CLIENT_APPS keys are ignored.
+    TREX_OIDC_SERVICE_CLIENTS: JSON.stringify([
+      { name: "alp-data", type: "MachineToMachine", id: "data-id", secret: "data-secret" },
+      { name: "other", description: "any second client", id: " other-id ", secret: "other-secret" },
+    ]),
+  });
+  assertEquals(specs.map((s) => [s.name, s.clientId, s.clientSecret]), [
+    ["alp-data", "data-id", "data-secret"],
+    ["other", "other-id", "other-secret"],
+  ]);
+  for (const s of specs) {
+    assertEquals(s.grantTypes, ["client_credentials"]);
+    assertEquals(s.responseTypes, []);
+    assertEquals(s.redirectUris, []);
+    assertEquals(s.resourceIdentifier, "https://localhost:8443/trex/oidc");
+  }
+});
+
+Deno.test("parseServiceClients skips incomplete, duplicate and interactive clients", () => {
+  assertEquals(parseServiceClients({}), []);
+  assertEquals(parseServiceClients({ TREX_OIDC_SERVICE_CLIENTS: "  " }), []);
+  const specs = parseServiceClients({
+    TREX_OIDC_CLIENT_ID: "d2e-webapi",
+    TREX_OIDC_SERVICE_CLIENTS: JSON.stringify([
+      // What an unset variable interpolates to.
+      { name: "unset", id: "", secret: "" },
+      { name: "public", id: "public" },
+      { name: "webapi", id: "d2e-webapi", secret: "x" },
+      "not-an-object",
+      null,
+      { id: "same", secret: "x" },
+      { id: "same", secret: "y" },
+    ]),
+  });
+  assertEquals(specs.map((s) => [s.clientId, s.name]), [["same", "same"]]);
+});
+
+Deno.test("parseServiceClients refuses a value that is not a JSON array", () => {
+  assertThrows(
+    () => parseServiceClients({ TREX_OIDC_SERVICE_CLIENTS: "LOGTO__D2E_DATA" }),
+    Error,
+    "not valid JSON",
+  );
+  assertThrows(
+    () => parseServiceClients({ TREX_OIDC_SERVICE_CLIENTS: '{"id":"a","secret":"b"}' }),
+    Error,
+    "must be a JSON array",
+  );
 });

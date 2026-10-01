@@ -382,6 +382,40 @@ export async function readAccountTokens(
 }
 
 /**
+ * The upstream id_token held for one user at one provider, decrypted.
+ *
+ * Keyed on the user rather than on the identity, for the one caller that has a
+ * trex subject and no upstream accountId: oidc/upstream-logout.ts, which needs
+ * the id_token_hint an end-session call cannot do without.
+ *
+ * trexdb.account is unique on ("providerId","accountId"), not on
+ * (userId, providerId) -- a user re-linked under a new upstream subject at the
+ * same provider holds more than one row, and the newest is the live link. The
+ * ordering is what makes the choice the live one instead of whatever the
+ * planner happens to return.
+ *
+ * Only idToken is opened. The other two are credentials this caller has no use
+ * for, and openToken throws, so decrypting them here would let an unrelated
+ * unreadable column decide whether a logout gets its hint.
+ */
+export async function readAccountIdTokenByUser(
+  client: PgClient,
+  userId: string,
+  providerId: string,
+): Promise<string | null> {
+  const { rows } = await client.query(
+    `SELECT "idToken"
+       FROM trexdb.account
+      WHERE "userId" = $1 AND "providerId" = $2
+      ORDER BY "updatedAt" DESC NULLS LAST
+      LIMIT 1`,
+    [userId, providerId],
+  );
+  if (!rows[0]) return null;
+  return await openToken(rows[0].idToken, "id token");
+}
+
+/**
  * Create or update one account row.
  *
  * The federation ADMIN link is the only caller, and it passes no tokens: the

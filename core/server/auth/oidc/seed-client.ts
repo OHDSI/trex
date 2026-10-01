@@ -16,7 +16,7 @@
 // V19; every `string[]` field is jsonb.
 import type { PoolClient } from "pg";
 import { pool } from "../../db.ts";
-import { parseSeedClient, SERVICE_SCOPE, type SeedClientSpec } from "./config.ts";
+import { parseSeedClient, parseServiceClients, SERVICE_SCOPE, type SeedClientSpec } from "./config.ts";
 
 /**
  * The plugin's `defaultHasher`, reproduced: with the jwt plugin installed
@@ -174,8 +174,8 @@ async function registerClient(
       // moves — it now sends Basic when it is talking to trex's own provider
       // (d2e-compat/routes.ts).
       confidential ? "client_secret_basic" : "none",
-      JSON.stringify(["authorization_code", "refresh_token", "client_credentials"]),
-      JSON.stringify(["code"]),
+      JSON.stringify(spec.grantTypes ?? ["authorization_code", "refresh_token", "client_credentials"]),
+      JSON.stringify(spec.responseTypes ?? ["code"]),
       // There is no column for the roles a client carries. They ride in
       // metadata, which is what customAccessTokenClaims is handed
       // (`parseClientMetadata(client.metadata)`), so a client_credentials token
@@ -235,4 +235,64 @@ export async function seedOAuthClientFromEnv(
     console.error("[oidc] client registration failed (continuing):", (e as Error)?.message ?? e);
     return false;
   }
+}
+
+const SERVICE_CLIENTS_TAG = "TREX_OIDC_SERVICE_CLIENTS";
+
+/** Called at boot, like the above; one bad client does not stop the others. */
+export async function seedServiceClientsFromEnv(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): Promise<number> {
+  let specs: SeedClientSpec[];
+  try {
+    specs = parseServiceClients(env);
+  } catch (e) {
+    console.error("[oidc] service clients not registered:", (e as Error)?.message ?? e);
+    return 0;
+  }
+  let seeded = 0;
+  for (const spec of specs) {
+    try {
+      const existing = await pool.query<{ grantTypes: string[] | null }>(
+        `SELECT "grantTypes" FROM trexdb."oauthClient" WHERE "clientId" = $1`,
+        [spec.clientId],
+      );
+      const grants = existing.rows[0]?.grantTypes;
+      // The upsert would strip an interactive client's redirect URIs and code
+      // grant. A null grantTypes is interactive too: the plugin reads it as code.
+      const serviceOnly = grants?.length === 1 && grants[0] === "client_credentials";
+      if (existing.rows.length > 0 && !serviceOnly) {
+        console.error(`[oidc] service client ${spec.clientId} already exists as an interactive client — skipped`);
+        continue;
+      }
+      await upsertOAuthClient(spec);
+      await pool.query(
+        `UPDATE trexdb."oauthClient"
+            SET "metadata" = COALESCE("metadata", '{}'::jsonb) || jsonb_build_object('seededFrom', $2::text)
+          WHERE "clientId" = $1`,
+        [spec.clientId, SERVICE_CLIENTS_TAG],
+      );
+      console.log(`[oidc] registered service client ${spec.clientId} (${spec.name})`);
+      seeded++;
+    } catch (e) {
+      console.error(
+        `[oidc] service client ${spec.name} registration failed (continuing):`,
+        (e as Error)?.message ?? e,
+      );
+    }
+  }
+  // Dropping a client from the list revokes it (its tokens cascade); clients
+  // registered any other way carry no tag and are never touched.
+  try {
+    const revoked = await pool.query<{ clientId: string }>(
+      `DELETE FROM trexdb."oauthClient"
+        WHERE "metadata"->>'seededFrom' = $1 AND NOT ("clientId" = ANY($2::text[]))
+        RETURNING "clientId"`,
+      [SERVICE_CLIENTS_TAG, specs.map((s) => s.clientId)],
+    );
+    for (const r of revoked.rows) console.log(`[oidc] revoked service client ${r.clientId} (no longer listed)`);
+  } catch (e) {
+    console.error("[oidc] stale service clients not revoked:", (e as Error)?.message ?? e);
+  }
+  return seeded;
 }
