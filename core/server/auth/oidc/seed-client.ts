@@ -256,8 +256,10 @@ export async function seedServiceClientsFromEnv(
         [spec.clientId],
       );
       const grants = existing.rows[0]?.grantTypes;
-      // The upsert would strip an interactive client's redirect URIs and code grant.
-      if (grants && !(grants.length === 1 && grants[0] === "client_credentials")) {
+      // The upsert would strip an interactive client's redirect URIs and code
+      // grant. A null grantTypes is interactive too: the plugin reads it as code.
+      const serviceOnly = grants?.length === 1 && grants[0] === "client_credentials";
+      if (existing.rows.length > 0 && !serviceOnly) {
         console.error(`[oidc] service client ${spec.clientId} already exists as an interactive client — skipped`);
         continue;
       }

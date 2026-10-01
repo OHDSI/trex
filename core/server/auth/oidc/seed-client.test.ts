@@ -318,6 +318,30 @@ test("a service client id that names an interactive client leaves it alone", asy
   }
 });
 
+test("a client whose grantTypes is unset counts as interactive", async () => {
+  // The plugin reads a null grantTypes as ["authorization_code"].
+  const auth = providerInstance();
+  await auth.$context;
+  try {
+    await upsertOAuthClient({
+      clientId: SERVICE_ID,
+      clientSecret: "x",
+      name: "atlas",
+      redirectUris: ["https://atlas.example/cb"],
+      postLogoutRedirectUris: [],
+      clientRoles: [],
+      allowedScopes: undefined,
+      resourceIdentifier: ISSUER,
+    });
+    await pool.query(`UPDATE trexdb."oauthClient" SET "grantTypes" = NULL WHERE "clientId" = $1`, [SERVICE_ID]);
+    assertEquals(await seedServiceClientsFromEnv(SERVICE_ENV), 0);
+    const row = (await pool.query(`SELECT * FROM trexdb."oauthClient" WHERE "clientId" = $1`, [SERVICE_ID])).rows[0];
+    assertEquals(row.redirectUris, ["https://atlas.example/cb"]);
+  } finally {
+    await deleteServiceClient();
+  }
+});
+
 test("re-seeding an existing service client still updates it", async () => {
   const auth = providerInstance();
   await auth.$context;
