@@ -64,3 +64,16 @@ Deno.test("a refresh is forwarded with the configured client's Basic credentials
     assertEquals(decodeBasicCredentials(seen[0].authorization!).clientId, "d2e-webapi");
   });
 });
+
+Deno.test("a repeated resource is forwarded (RFC 8707 allows several)", async () => {
+  await withRoute(async (url, seen) => {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "grant_type=refresh_token&refresh_token=rt&resource=https%3A%2F%2Fa&resource=https%3A%2F%2Fb",
+    });
+    assertEquals(res.status, 200);
+    await res.body?.cancel();
+    assertEquals(new URLSearchParams(seen[0].body).getAll("resource"), ["https://a", "https://b"]);
+  });
+});

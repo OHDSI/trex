@@ -478,8 +478,10 @@ export function mountD2eRoutes(app: Express): void {
     }
 
     // RFC 6749 §3.2: parameters MUST NOT be repeated. This route reads the
-    // first value and the provider the last, so a repeat could steer the lent secret.
-    const repeated = [...new Set(params.keys())].find((k) => params.getAll(k).length > 1);
+    // first value and the provider the last, so a repeat could steer the lent
+    // secret. `resource` is the exception RFC 8707 makes, and is read as a list.
+    const repeated = [...new Set(params.keys())]
+      .find((k) => k !== "resource" && params.getAll(k).length > 1);
     if (repeated) {
       (res as any).status(400).json({ error: "invalid_request", error_description: `${repeated} is repeated` });
       return;
