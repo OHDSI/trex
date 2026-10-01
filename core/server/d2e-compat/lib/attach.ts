@@ -126,6 +126,7 @@ export interface SourceCredential {
   role?: string;
   privateKey?: string;
   privateKeyPassphrase?: string;
+  googleCredentials?: Record<string, unknown>;
 }
 
 // Pulls Snowflake-specific extras out of a trex.db row's `extra` (jsonb). `extra`
@@ -149,6 +150,32 @@ export function snowflakeExtrasFromRow(dbExtra: unknown): Pick<
     privateKey: extra.privateKey,
     privateKeyPassphrase: extra.privateKeyPassphrase,
   };
+}
+
+export const GOOGLE_APPLICATION_CREDENTIALS_PATH =
+  Deno.env.get("GOOGLE_APPLICATION_CREDENTIALS") || "/usr/src/data/google-credentials.json";
+
+export function bigqueryCredentialsFromRow(dbExtra: unknown): Record<string, unknown> | undefined {
+  // deno-lint-ignore no-explicit-any
+  let extra: any = dbExtra ?? {};
+  if (typeof extra === "string") {
+    try { extra = JSON.parse(extra || "{}"); } catch { extra = {}; }
+  }
+  const inner = extra.Internal ?? extra;
+  return inner && typeof inner === "object" && Object.keys(inner).length > 0
+    ? inner
+    : undefined;
+}
+
+/**
+ * Write a BigQuery service-account key to GOOGLE_APPLICATION_CREDENTIALS_PATH,
+ * where the duckdb-bigquery extension and WebAPI (OAuthType=3) both read it.
+ * Must happen before ANY bigquery ATTACH: a missing file is a DuckDB FATAL that
+ * invalidates the whole shared database, not just that attach. One process-wide
+ * file, so with several BigQuery sources the last one written wins.
+ */
+export async function writeGoogleCredentials(googleCredentials: Record<string, unknown>): Promise<void> {
+  await Deno.writeTextFile(GOOGLE_APPLICATION_CREDENTIALS_PATH, JSON.stringify(googleCredentials), { mode: 0o600 });
 }
 
 /**
@@ -179,6 +206,12 @@ export async function ensureSourceAttached(
     return true;
   }
   if (dialect === "bigquery") {
+    if (!c.googleCredentials) {
+      throw new Error(
+        `bigquery source ${c.id} has no service-account credentials configured (extra.Internal is empty)`,
+      );
+    }
+    await writeGoogleCredentials(c.googleCredentials);
     const host = sqlQuote(c.host);
     // An empty/blank dataset attaches the whole project, exposing every dataset
     // as a schema (queryable as `<alias>.<dataset>.<table>`). A specified

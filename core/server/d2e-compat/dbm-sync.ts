@@ -12,6 +12,7 @@
 
 import { pool } from "../db.ts";
 import { decryptSecret } from "../auth/crypto.ts";
+import { bigqueryCredentialsFromRow, writeGoogleCredentials } from "./lib/attach.ts";
 
 // Monotonic counter bumped on every deliberate registry sync (boot + /trex/db
 // writes, via syncTrexDatabaseManager). Function workers (plugin/function.ts) read
@@ -149,6 +150,19 @@ export async function syncTrexDatabaseManager(): Promise<void> {
     console.log(
       `[d2e-compat] syncing ${creds.length} database(s) to Trex.DatabaseManager: [${creds.map((c) => c.id).join(", ")}]`,
     );
+    // setCredentials makes the native manager ATTACH every bigquery source
+    // (trex_lib.js #add_bigquery), which needs the service-account key on disk
+    // first — otherwise DuckDB raises a FATAL "Cannot open credentials file" and
+    // invalidates the shared database for every dataset until trex restarts.
+    for (const c of creds) {
+      if (c.dialect !== "bigquery") continue;
+      const googleCredentials = bigqueryCredentialsFromRow(c.extra);
+      if (googleCredentials) {
+        await writeGoogleCredentials(googleCredentials);
+      } else {
+        console.warn(`[d2e-compat] dbm sync: bigquery source ${c.id} has no service-account JSON in extra`);
+      }
+    }
     dbm.setCredentials(creds);
     // Signal function workers that the registry changed so they refresh on next call.
     _registrationEpoch++;
