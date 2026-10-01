@@ -6,6 +6,12 @@
 // and the user is never asked who they are. Nothing here revokes anything —
 // that already happens — this only carries the browser one hop further so the
 // upstream can clear its own cookie.
+//
+// Two things follow from that hop needing an id_token_hint. This module reads
+// a sealed credential, so it goes through providers.ts rather than touching
+// trexdb.account itself. And the userId it is handed decides WHOSE credential
+// is decrypted into a redirect, so it has to be one the caller verified —
+// oidc/mount.ts takes it from trex's session cookie, not from the hint.
 import { federationFromAppMetadata } from "./claims.ts";
 import { readAccountIdTokenByUser } from "../federation/providers.ts";
 
@@ -225,6 +231,17 @@ async function endSessionEndpoint(providerId: string): Promise<string | null> {
  * it back as the upstream's return target adds no redirect the provider would
  * not itself have performed. Building a target from anything in the request
  * would be exactly the open redirect that validation exists to prevent.
+ *
+ * `userId` must be verified by the caller. It selects the account whose stored
+ * upstream id_token is decrypted and placed in the returned URL, so an
+ * unverified subject here is a way to read someone else's credential.
+ *
+ * Note for the deployments this hint matters to: an upstream that can now
+ * identify the client will also validate the accompanying
+ * post_logout_redirect_uri against that client's registered post-logout URIs.
+ * A Logto app registering only its pre-federation return URI moves from a
+ * confirmation page to an error, so the return target has to be registered
+ * upstream as well.
  */
 export async function upstreamLogoutUrl(
   userId: string | null,
