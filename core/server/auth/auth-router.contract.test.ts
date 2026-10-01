@@ -1972,19 +1972,23 @@ contractTest("POST /admin/create-user returns the literal GoTrue user body", asy
   });
 });
 
-contractTest("POST /admin/create-user enforces no minimum password length", async ({ url, pool }) => {
-  // Unlike /signup and PUT /admin/users/:id, this route has no length check.
+contractTest("POST /admin/create-user is 422 validation_failed and writes nothing for a short password", async ({ url, pool }) => {
   const admin = await createUser(pool, { role: "admin" });
   const email = uniqueEmail("adminshort");
 
   const res = await post(
     `${url}/admin/create-user`,
-    { email, password: "x" },
+    { email, password: "1234567" },
     await tokenFor(admin),
   );
-  assertEquals(res.status, 200);
-  const body = await res.json();
-  assertEquals(body.email, email);
+  assertEquals(res.status, 422);
+  assertEquals(await res.json(), {
+    error: "validation_failed",
+    error_description: "Password must be at least 8 characters",
+  });
+
+  const rows = await pool.query(`SELECT id FROM trexdb."user" WHERE email = $1`, [email]);
+  assertEquals(rows.rowCount, 0);
 });
 
 contractTest("POST /admin/create-user validates the body after authorization", async ({ url, pool }) => {
