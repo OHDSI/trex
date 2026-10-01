@@ -1,7 +1,9 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals, assertRejects } from "jsr:@std/assert";
 import {
+  bigqueryCredentialsFromRow,
   ensureCacheAttached,
   ensureSourceAttached,
+  GOOGLE_APPLICATION_CREDENTIALS_PATH,
   MAX_ATTACH_IDS,
   normalizeCacheDir,
   normalizeDialect,
@@ -26,6 +28,7 @@ const bqBase: SourceCredential = {
   name: "my_dataset",
   adminUsername: "",
   adminPassword: "",
+  googleCredentials: { type: "service_account", project_id: "my-proj" },
 };
 
 Deno.test("bigquery with dataset pins the single dataset", async () => {
@@ -54,6 +57,41 @@ Deno.test("bigquery quote-escapes interpolated values", async () => {
   assertEquals(calls, [
     "ATTACH IF NOT EXISTS 'project=pro''j dataset=da''ta' AS bq__srcdb (TYPE bigquery, READ_ONLY)",
   ]);
+});
+
+Deno.test("bigquery writes the service-account key to GOOGLE_APPLICATION_CREDENTIALS_PATH before attaching", async () => {
+  // GOOGLE_APPLICATION_CREDENTIALS_PATH is a real path (from the env var, or
+  // the container default) with no test seam in ensureSourceAttached itself —
+  // run this file with GOOGLE_APPLICATION_CREDENTIALS pointed at a writable
+  // temp file so this assertion (and every other bigquery test above, which
+  // all pass through the same write) doesn't touch /usr/src/data.
+  await ensureSourceAttached(bqBase, { exec: () => {} });
+  const written = JSON.parse(await Deno.readTextFile(GOOGLE_APPLICATION_CREDENTIALS_PATH));
+  assertEquals(written, bqBase.googleCredentials);
+});
+
+Deno.test("bigquery without a service-account key refuses to attach", async () => {
+  await assertRejects(
+    () => ensureSourceAttached({ ...bqBase, googleCredentials: undefined }, { exec: () => {} }),
+    Error,
+    "no service-account credentials configured",
+  );
+});
+
+Deno.test("bigqueryCredentialsFromRow unwraps the Internal wrapper", () => {
+  const key = { type: "service_account", private_key: "-----BEGIN PRIVATE KEY-----\n..." };
+  assertEquals(bigqueryCredentialsFromRow({ Internal: key }), key);
+});
+
+Deno.test("bigqueryCredentialsFromRow returns undefined for an empty/unconfigured row", () => {
+  assertEquals(bigqueryCredentialsFromRow({}), undefined);
+  assertEquals(bigqueryCredentialsFromRow({ Internal: {} }), undefined);
+  assertEquals(bigqueryCredentialsFromRow(null), undefined);
+});
+
+Deno.test("bigqueryCredentialsFromRow parses a JSON-string extra column", () => {
+  const key = { type: "service_account", project_id: "p" };
+  assertEquals(bigqueryCredentialsFromRow(JSON.stringify({ Internal: key })), key);
 });
 
 // PR #2835: the HANA boot block attaches a `${code}_cache` catalog and creates
