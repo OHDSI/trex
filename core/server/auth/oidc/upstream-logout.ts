@@ -58,9 +58,95 @@ async function providerForUser(userId: string): Promise<string | null> {
   return federationFromAppMetadata(rows[0].app_metadata).idpProvider ?? null;
 }
 
+/** One trexdb.sso_provider row, as much of it as end-session resolution needs. */
+export interface EndSessionRow {
+  issuer: string | null;
+  discovery_url: string | null;
+  authorization_endpoint: string | null;
+  oidcConfig: Record<string, unknown> | null;
+}
+
+/** The origin of a URL-shaped string, or null when it is not one. */
+function originOf(value: string | null): string | null {
+  if (!value) return null;
+  try {
+    return new URL(value).origin;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * The upstream's end-session endpoint, from the row when it was persisted and
- * from discovery otherwise.
+ * The same endpoint, moved to the origin a browser can actually reach.
+ *
+ * V13's authorization_endpoint is used to make the endpoint reachable, not to
+ * derive it: the PATH stays whatever the upstream itself published, so a
+ * provider whose end-session path is not Logto's `/oidc/session/end` keeps its
+ * own. Deriving the path instead would fabricate a URL — Keycloak publishes
+ * `.../protocol/openid-connect/auth` but ends sessions at `.../logout`, and a
+ * guess there sends the browser somewhere that does not exist.
+ *
+ * Only an endpoint on the ISSUER's origin is moved. That is the one the
+ * upstream's own internal view produced; a persisted value on some other
+ * origin is the operator saying where the browser should go, and rewriting it
+ * would discard the answer.
+ */
+function browserFacing(endpoint: string, row: EndSessionRow, providerId: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return null;
+  }
+
+  // Trimmed, and a value left empty by the trim treated as absent: the rule
+  // sso-config.ts applies to this same column, for the hand-edited rows and
+  // backfills V13's override exists to serve.
+  const override = row.authorization_endpoint?.trim();
+  if (!override) return url.toString();
+
+  const authorizeOrigin = originOf(override);
+  if (!authorizeOrigin || authorizeOrigin === url.origin) return url.toString();
+
+  const issuerOrigin = originOf(row.issuer);
+  if (!issuerOrigin || url.origin !== issuerOrigin) return url.toString();
+
+  const moved = new URL(url.pathname + url.search + url.hash, authorizeOrigin).toString();
+  // Once per provider per process, since the result is cached. An operator
+  // debugging a split deployment otherwise has no way to see that the endpoint
+  // the upstream published was not the one the browser was sent to.
+  console.log(
+    `[oidc] end-session: ${providerId} publishes ${url.origin}, sending the browser to ${authorizeOrigin}`,
+  );
+  return moved;
+}
+
+/**
+ * The browser-facing end-session endpoint for a provider row, or null.
+ *
+ * `discovered` is the discovery document's `end_session_endpoint`, already
+ * fetched, or null when there was none to fetch or the fetch failed. Pure so
+ * the precedence and the origin rewrite are testable without a database or a
+ * network: endSessionEndpoint below is the part that needs both.
+ *
+ * Precedence is the operator's persisted value, then discovery. An upstream
+ * that publishes neither has no end-session endpoint and the hop is skipped.
+ */
+export function resolveEndSessionEndpoint(
+  row: EndSessionRow,
+  discovered: string | null,
+  providerId = "provider",
+): string | null {
+  const persisted = row.oidcConfig?.["end_session_endpoint"];
+  const endpoint = typeof persisted === "string" && persisted.trim()
+    ? persisted.trim()
+    : (discovered && discovered.trim() ? discovered.trim() : null);
+  if (!endpoint) return null;
+  return browserFacing(endpoint, row, providerId);
+}
+
+/**
+ * The upstream's end-session endpoint, resolved and cached.
  *
  * A provider that publishes none is cached as "none" rather than re-fetched on
  * every logout: absence is a property of the upstream, not a transient failure,
@@ -70,12 +156,7 @@ async function endSessionEndpoint(providerId: string): Promise<string | null> {
   const cached = endSessionCache.get(providerId);
   if (cached !== undefined) return cached;
 
-  const { rows } = await (await db()).query<{
-    issuer: string | null;
-    discovery_url: string | null;
-    authorization_endpoint: string | null;
-    oidcConfig: Record<string, unknown> | null;
-  }>(
+  const { rows } = await (await db()).query<EndSessionRow>(
     `SELECT issuer, discovery_url, authorization_endpoint, "oidcConfig"
        FROM trexdb.sso_provider
       WHERE id = $1 AND enabled = true`,
@@ -85,22 +166,14 @@ async function endSessionEndpoint(providerId: string): Promise<string | null> {
     endSessionCache.set(providerId, null);
     return null;
   }
-
   const row = rows[0];
-  // Prefer deriving from the PUBLIC authorization_endpoint the browser was sent
-  // to at sign-in (`.../oidc/auth` -> `.../oidc/session/end`). The issuer and
-  // its discovery document name the INTERNAL host, which a browser cannot reach
-  // in a split public/internal deployment; only this column is browser-facing.
-  if (typeof row.authorization_endpoint === "string" && /\/auth\/?$/.test(row.authorization_endpoint)) {
-    const derived = row.authorization_endpoint.replace(/\/auth\/?$/, "/session/end");
-    endSessionCache.set(providerId, derived);
-    return derived;
-  }
 
+  // The persisted value settles it without a fetch.
   const persisted = row.oidcConfig?.["end_session_endpoint"];
-  if (typeof persisted === "string" && persisted) {
-    endSessionCache.set(providerId, persisted);
-    return persisted;
+  if (typeof persisted === "string" && persisted.trim()) {
+    const resolved = resolveEndSessionEndpoint(row, null, providerId);
+    endSessionCache.set(providerId, resolved);
+    return resolved;
   }
 
   const discovery = row.discovery_url ??
@@ -115,7 +188,11 @@ async function endSessionEndpoint(providerId: string): Promise<string | null> {
     if (!res.ok) throw new Error(String(res.status));
     const doc = await res.json();
     const url = doc?.end_session_endpoint;
-    const resolved = typeof url === "string" && url ? url : null;
+    const resolved = resolveEndSessionEndpoint(
+      row,
+      typeof url === "string" ? url : null,
+      providerId,
+    );
     endSessionCache.set(providerId, resolved);
     return resolved;
   } catch (err) {
