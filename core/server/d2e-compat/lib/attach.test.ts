@@ -1,10 +1,10 @@
 import { assertEquals, assertRejects } from "jsr:@std/assert";
 import {
   bigqueryCredentialsFromRow,
+  bigquerySecretSql,
   ensureCacheAttached,
   ensureSourceAttached,
   extraFields,
-  GOOGLE_APPLICATION_CREDENTIALS_PATH,
   MAX_ATTACH_IDS,
   normalizeCacheDir,
   normalizeDialect,
@@ -39,50 +39,66 @@ const bqBase: SourceCredential = {
   googleCredentials: SA_KEY,
 };
 
-Deno.test("bigquery with dataset pins the single dataset", async () => {
-  const calls = await captureSql(bqBase);
-  assertEquals(calls, [
-    "ATTACH IF NOT EXISTS 'project=my-proj dataset=my_dataset' AS bq__srcdb (TYPE bigquery, READ_ONLY)",
+const BQ_SECRET = bigquerySecretSql("bq", "my-proj", SA_KEY);
+
+Deno.test("bigquery creates a project-scoped secret, then attaches with it", async () => {
+  assertEquals(await captureSql(bqBase), [
+    BQ_SECRET,
+    "ATTACH IF NOT EXISTS 'project=my-proj dataset=my_dataset' AS bq__srcdb (TYPE bigquery, SECRET bq__srcdb_secret, READ_ONLY)",
   ]);
 });
 
 Deno.test("bigquery with blank dataset attaches project-level (all schemas)", async () => {
-  const calls = await captureSql({ ...bqBase, name: "" });
-  assertEquals(calls, [
-    "ATTACH IF NOT EXISTS 'project=my-proj' AS bq__srcdb (TYPE bigquery, READ_ONLY)",
-  ]);
+  assertEquals(
+    (await captureSql({ ...bqBase, name: "" }))[1],
+    "ATTACH IF NOT EXISTS 'project=my-proj' AS bq__srcdb (TYPE bigquery, SECRET bq__srcdb_secret, READ_ONLY)",
+  );
 });
 
 Deno.test("bigquery with whitespace-only dataset attaches project-level", async () => {
-  const calls = await captureSql({ ...bqBase, name: "   " });
-  assertEquals(calls, [
-    "ATTACH IF NOT EXISTS 'project=my-proj' AS bq__srcdb (TYPE bigquery, READ_ONLY)",
-  ]);
+  assertEquals(
+    (await captureSql({ ...bqBase, name: "   " }))[1],
+    "ATTACH IF NOT EXISTS 'project=my-proj' AS bq__srcdb (TYPE bigquery, SECRET bq__srcdb_secret, READ_ONLY)",
+  );
 });
 
 Deno.test("bigquery quote-escapes interpolated values", async () => {
-  const calls = await captureSql({ ...bqBase, host: "pro'j", name: "da'ta" });
-  assertEquals(calls, [
-    "ATTACH IF NOT EXISTS 'project=pro''j dataset=da''ta' AS bq__srcdb (TYPE bigquery, READ_ONLY)",
-  ]);
+  assertEquals(
+    (await captureSql({ ...bqBase, host: "pro'j", name: "da'ta" }))[1],
+    "ATTACH IF NOT EXISTS 'project=pro''j dataset=da''ta' AS bq__srcdb (TYPE bigquery, SECRET bq__srcdb_secret, READ_ONLY)",
+  );
 });
 
-Deno.test("bigquery writes the service-account key to GOOGLE_APPLICATION_CREDENTIALS_PATH before attaching", async () => {
-  // GOOGLE_APPLICATION_CREDENTIALS_PATH is a real path (from the env var, or
-  // the container default) with no test seam in ensureSourceAttached itself —
-  // run this file with GOOGLE_APPLICATION_CREDENTIALS pointed at a writable
-  // temp file so this assertion (and every other bigquery test above, which
-  // all pass through the same write) doesn't touch /usr/src/data.
-  await ensureSourceAttached(bqBase, { exec: () => {} });
-  const written = JSON.parse(await Deno.readTextFile(GOOGLE_APPLICATION_CREDENTIALS_PATH));
-  assertEquals(written, bqBase.googleCredentials);
+Deno.test("bigquerySecretSql quote-escapes the key and the project", () => {
+  const sql = bigquerySecretSql("bq", "pro'j", { ...SA_KEY, client_email: "o'brien@x" });
+  assertEquals(sql.startsWith("CREATE OR REPLACE SECRET bq__srcdb_secret (TYPE bigquery, SERVICE_ACCOUNT_JSON '"), true);
+  assertEquals(sql.includes("SCOPE 'bq://pro''j'"), true);
+  assertEquals(sql.includes("o''brien@x"), true);
+});
+
+Deno.test("bigquery attach never touches the filesystem", async () => {
+  // CI runs this file without GOOGLE_APPLICATION_CREDENTIALS and without /usr/src/data.
+  const before = Deno.env.get("GOOGLE_APPLICATION_CREDENTIALS");
+  Deno.env.set("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent-dir/key.json");
+  try {
+    await captureSql(bqBase);
+  } finally {
+    if (before === undefined) Deno.env.delete("GOOGLE_APPLICATION_CREDENTIALS");
+    else Deno.env.set("GOOGLE_APPLICATION_CREDENTIALS", before);
+  }
+});
+
+Deno.test("redactSecrets strips an inline service-account key", () => {
+  const out = redactSecrets(`Invalid Input Error: failed: ${BQ_SECRET}`);
+  assertEquals(out.includes("BEGIN PRIVATE KEY"), false);
+  assertEquals(out.includes("SERVICE_ACCOUNT_JSON '[REDACTED]'"), true);
 });
 
 Deno.test("bigquery without a service-account key refuses to attach", async () => {
   await assertRejects(
     () => ensureSourceAttached({ ...bqBase, googleCredentials: undefined }, { exec: () => {} }),
     Error,
-    "no service-account credentials configured",
+    "no service-account key",
   );
 });
 

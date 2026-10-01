@@ -52,6 +52,8 @@ export function redactSecrets(text: string): string {
   }
   // Snowflake: PRIVATE_KEY '-----BEGIN ...', PRIVATE_KEY_PASSPHRASE 'pp'.
   out = out.replace(/(PRIVATE_KEY(?:_PASSPHRASE)?\s+)('[^']*'|"[^"]*")/gi, "$1[REDACTED]");
+  // BigQuery: SERVICE_ACCOUNT_JSON '{...}', with '' escapes inside the literal.
+  out = out.replace(/(SERVICE_ACCOUNT_JSON\s+)'(?:[^']|'')*'/gi, "$1'[REDACTED]'");
   // URI userinfo: scheme://user:secret@host
   return out.replace(/([a-z][a-z0-9+.-]*:\/\/[^:/?#\s]+:)([^@\s]+)(@)/gi, "$1[REDACTED]$3");
 }
@@ -159,9 +161,6 @@ export function snowflakeExtrasFromRow(dbExtra: unknown): Pick<
   };
 }
 
-export const GOOGLE_APPLICATION_CREDENTIALS_PATH =
-  Deno.env.get("GOOGLE_APPLICATION_CREDENTIALS") || "/usr/src/data/google-credentials.json";
-
 export function bigqueryCredentialsFromRow(dbExtra: unknown): Record<string, unknown> | undefined {
   const key = extraFields(dbExtra);
   const nonEmpty = (v: unknown) => typeof v === "string" && v.trim() !== "";
@@ -170,15 +169,18 @@ export function bigqueryCredentialsFromRow(dbExtra: unknown): Record<string, unk
     : undefined;
 }
 
-/**
- * Write a BigQuery service-account key to GOOGLE_APPLICATION_CREDENTIALS_PATH,
- * where the duckdb-bigquery extension and WebAPI (OAuthType=3) both read it.
- * Must happen before ANY bigquery ATTACH: a missing file is a DuckDB FATAL that
- * invalidates the whole shared database, not just that attach. One process-wide
- * file, so with several BigQuery sources the last one written wins.
- */
-export async function writeGoogleCredentials(googleCredentials: Record<string, unknown>): Promise<void> {
-  await Deno.writeTextFile(GOOGLE_APPLICATION_CREDENTIALS_PATH, JSON.stringify(googleCredentials), { mode: 0o600 });
+export function bigquerySecretSql(id: string, project: string, key: Record<string, unknown>): string {
+  return `CREATE OR REPLACE SECRET ${id}${SRCDB_SUFFIX}_secret (TYPE bigquery, ` +
+    `SERVICE_ACCOUNT_JSON '${sqlQuote(JSON.stringify(key))}', SCOPE 'bq://${sqlQuote(project)}')`;
+}
+
+export function googleCredentialsPath(): string {
+  return Deno.env.get("GOOGLE_APPLICATION_CREDENTIALS") || "/usr/src/data/google-credentials.json";
+}
+
+/** WebAPI's BigQuery driver (OAuthType=3) reads Application Default Credentials from this file. */
+export async function writeGoogleCredentials(key: Record<string, unknown>): Promise<void> {
+  await Deno.writeTextFile(googleCredentialsPath(), JSON.stringify(key), { mode: 0o600 });
 }
 
 /**
@@ -210,11 +212,11 @@ export async function ensureSourceAttached(
   }
   if (dialect === "bigquery") {
     if (!c.googleCredentials) {
-      throw new Error(
-        `bigquery source ${c.id} has no service-account credentials configured (extra.Internal is empty)`,
-      );
+      throw new Error(`bigquery source ${c.id} has no service-account key in extra`);
     }
-    await writeGoogleCredentials(c.googleCredentials);
+    // A secret per source: the process-wide ADC file holds one key, so with two
+    // sources the second would attach as the first's service account.
+    await opts.exec(bigquerySecretSql(c.id, c.host, c.googleCredentials));
     const host = sqlQuote(c.host);
     // An empty/blank dataset attaches the whole project, exposing every dataset
     // as a schema (queryable as `<alias>.<dataset>.<table>`). A specified
@@ -223,9 +225,9 @@ export async function ensureSourceAttached(
     const conn = dataset
       ? `project=${host} dataset=${sqlQuote(dataset)}`
       : `project=${host}`;
-    const sql =
-      `ATTACH IF NOT EXISTS '${conn}' AS ${alias} (TYPE bigquery, READ_ONLY)`;
-    await opts.exec(sql);
+    await opts.exec(
+      `ATTACH IF NOT EXISTS '${conn}' AS ${alias} (TYPE bigquery, SECRET ${alias}_secret, READ_ONLY)`,
+    );
     return true;
   }
   if (dialect === "snowflake") {
