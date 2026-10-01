@@ -237,6 +237,8 @@ export async function seedOAuthClientFromEnv(
   }
 }
 
+const SERVICE_CLIENTS_TAG = "TREX_OIDC_SERVICE_CLIENTS";
+
 /** Called at boot, like the above; one bad client does not stop the others. */
 export async function seedServiceClientsFromEnv(
   env: Record<string, string | undefined> = Deno.env.toObject(),
@@ -264,6 +266,12 @@ export async function seedServiceClientsFromEnv(
         continue;
       }
       await upsertOAuthClient(spec);
+      await pool.query(
+        `UPDATE trexdb."oauthClient"
+            SET "metadata" = COALESCE("metadata", '{}'::jsonb) || jsonb_build_object('seededFrom', $2::text)
+          WHERE "clientId" = $1`,
+        [spec.clientId, SERVICE_CLIENTS_TAG],
+      );
       console.log(`[oidc] registered service client ${spec.clientId} (${spec.name})`);
       seeded++;
     } catch (e) {
@@ -272,6 +280,19 @@ export async function seedServiceClientsFromEnv(
         (e as Error)?.message ?? e,
       );
     }
+  }
+  // Dropping a client from the list revokes it (its tokens cascade); clients
+  // registered any other way carry no tag and are never touched.
+  try {
+    const revoked = await pool.query<{ clientId: string }>(
+      `DELETE FROM trexdb."oauthClient"
+        WHERE "metadata"->>'seededFrom' = $1 AND NOT ("clientId" = ANY($2::text[]))
+        RETURNING "clientId"`,
+      [SERVICE_CLIENTS_TAG, specs.map((s) => s.clientId)],
+    );
+    for (const r of revoked.rows) console.log(`[oidc] revoked service client ${r.clientId} (no longer listed)`);
+  } catch (e) {
+    console.error("[oidc] stale service clients not revoked:", (e as Error)?.message ?? e);
   }
   return seeded;
 }

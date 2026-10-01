@@ -353,6 +353,57 @@ test("re-seeding an existing service client still updates it", async () => {
   }
 });
 
+test("a service client dropped from the list is revoked", async () => {
+  const auth = providerInstance();
+  await auth.$context;
+  try {
+    assertEquals(await seedServiceClientsFromEnv(SERVICE_ENV), 1);
+    await seedServiceClientsFromEnv({ ...SERVICE_ENV, TREX_OIDC_SERVICE_CLIENTS: "[]" });
+    const rows = await pool.query(`SELECT 1 FROM trexdb."oauthClient" WHERE "clientId" = $1`, [SERVICE_ID]);
+    assertEquals(rows.rows.length, 0);
+  } finally {
+    await deleteServiceClient();
+  }
+});
+
+test("revocation only touches clients the service list registered", async () => {
+  const auth = providerInstance();
+  await auth.$context;
+  try {
+    // A client_credentials-only client registered some other way.
+    await upsertOAuthClient({
+      clientId: SERVICE_ID,
+      clientSecret: "x",
+      name: "manual",
+      redirectUris: [],
+      postLogoutRedirectUris: [],
+      clientRoles: [],
+      allowedScopes: undefined,
+      resourceIdentifier: ISSUER,
+      grantTypes: ["client_credentials"],
+      responseTypes: [],
+    });
+    await seedServiceClientsFromEnv({ ...SERVICE_ENV, TREX_OIDC_SERVICE_CLIENTS: "[]" });
+    const rows = await pool.query(`SELECT 1 FROM trexdb."oauthClient" WHERE "clientId" = $1`, [SERVICE_ID]);
+    assertEquals(rows.rows.length, 1);
+  } finally {
+    await deleteServiceClient();
+  }
+});
+
+test("a malformed list revokes nothing", async () => {
+  const auth = providerInstance();
+  await auth.$context;
+  try {
+    assertEquals(await seedServiceClientsFromEnv(SERVICE_ENV), 1);
+    await seedServiceClientsFromEnv({ ...SERVICE_ENV, TREX_OIDC_SERVICE_CLIENTS: "not json" });
+    const rows = await pool.query(`SELECT 1 FROM trexdb."oauthClient" WHERE "clientId" = $1`, [SERVICE_ID]);
+    assertEquals(rows.rows.length, 1);
+  } finally {
+    await deleteServiceClient();
+  }
+});
+
 test("a malformed service client list is logged, and boot carries on", async () => {
   // Boot does not await it, so it must not throw.
   assertEquals(await seedServiceClientsFromEnv({ TREX_OIDC_SERVICE_CLIENTS: "alp-data" }), 0);
