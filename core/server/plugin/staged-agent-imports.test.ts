@@ -98,34 +98,12 @@ Deno.test("the rule exempts type-only imports and catches value imports", () => 
 // again, for the same reason wearing a different specifier.
 //
 // Path helpers must come from `node:path` (a runtime builtin, so it needs
-// neither the network nor anything under the stage). The walk below follows
-// only relative imports, so it reports exactly what a staged agent would
-// actually try to load — a plugin's own function files included.
+// neither the network nor anything under the stage). stageGraphOffenders below
+// follows relative imports AND the `eve/...` specifiers the generated map
+// points back into the staged core, so it reports what a staged agent would
+// actually try to load — a plugin's own function files and core's own modules
+// included.
 import { dirname as pdirname, join as pjoin, normalize as pnormalize } from "jsr:@std/path";
-
-const REL_RE = /(?:^|\n)\s*(?:import|export)(?:\s+type)?[\s\S]*?from\s*["'](\.[^"']+)["']/g;
-const REMOTE_RE = /(?:^|\n)\s*(?:import|export)(?:\s+type)?[\s\S]*?from\s*["'](https?:\/\/[^"']+)["']/g;
-
-/** Every file a staged agent can reach by following relative imports. */
-async function reachableFrom(entries: string[]): Promise<Set<string>> {
-  const seen = new Set<string>();
-  const queue = [...entries];
-  while (queue.length) {
-    const f = queue.pop()!;
-    if (seen.has(f)) continue;
-    let src: string;
-    try {
-      src = await Deno.readTextFile(f);
-    } catch {
-      continue; // a specifier we cannot resolve on disk is not ours to police here
-    }
-    seen.add(f);
-    for (const m of src.matchAll(REL_RE)) {
-      queue.push(pnormalize(pjoin(pdirname(f), m[1])));
-    }
-  }
-  return seen;
-}
 
 // Resolution rules a staged worker actually has, in one place. `strip` removes
 // comments AND template literals first: prompts.ts embeds example React/zod
