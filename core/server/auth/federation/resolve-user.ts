@@ -34,6 +34,7 @@ import type {
 import { decideLink, normaliseDomains } from "./link.ts";
 import type { ExistingUser } from "./link.ts";
 import type { UpstreamIdentity } from "./types.ts";
+import { provisionUser } from "./providers.ts";
 
 const reject = (code: string): SSOUserResolution => ({ action: "reject", code });
 
@@ -245,49 +246,30 @@ export const resolveSsoUser = async (
     return { action: "link", userId: decision.userId, profile: "preserve" };
   }
 
-  // decideLink says "provision", and under its original caller that meant
-  // `provisionUser`, which owns the address: it synthesises <slug>@d2e.local
-  // for an identity that asserted none and sets is_placeholder_email. Under
-  // the plugin it means something else — handleOAuthUserInfo creates the user
-  // with `providerUser.email`, which is whatever mapping.email selected, and
-  // that is NOT the address this function just judged.
+  // decideLink says "provision". Provision through `provisionUser` rather than
+  // letting the plugin do it: provisionUser OWNS the address — it writes
+  // identity.email, or synthesises <slug>@d2e.local with is_placeholder_email
+  // set when the upstream asserted none — whereas the plugin's
+  // handleOAuthUserInfo would create the user with `providerUser.email`, which
+  // is whatever mapping.email selected and NOT the address this function judged.
   //
   // Measured on a real database: with auto_provision on and
-  // claim_map {"email":"username"}, the created row is email = 'alice',
-  // is_placeholder_email = false — a bare username in a UNIQUE NOT NULL
-  // address column, flagged as a legitimate link candidate, which is precisely
-  // the row V17 spent a migration eliminating. Worse, in the variant where the
-  // id_token ALSO carries a real verified address, the allowlist and
-  // isEngineAddressable both passed on that address and 'alice' was still what
-  // got written — so every address check above is vacuous on this branch
-  // unless the value the engine will store is the value that was checked.
+  // claim_map {"email":"username"}, the plugin path writes email = 'alice',
+  // is_placeholder_email = false — a bare username in a UNIQUE NOT NULL address
+  // column, flagged as a legitimate link candidate, which is precisely the row
+  // V17 spent a migration eliminating. Worse, where the id_token ALSO carries a
+  // real verified address, the allowlist and isEngineAddressable both passed on
+  // that address and 'alice' was still what got written. Routing through
+  // provisionUser sidesteps that: the engine stores the address the policy saw.
   //
-  // Hence the guard, and it is equality rather than mere addressability: a
-  // mapping naming some other address-shaped claim would store an address the
-  // allowlist and the elevated-account guard never saw. The engine must write
-  // the address the policy judged, or nothing.
-  //
-  // Refusing rather than synthesising a placeholder here, deliberately. The
-  // resolver is a decision, not a writer: is_placeholder_email is declared
-  // `input: false` so the adapter strips it from a create, which means a
-  // placeholder minted through context.database would be written unflagged —
-  // the same defect in a new place. Writing it any other way would put a
-  // second provisioning path, with its own slug and collision rules, beside
-  // provisionUser's.
-  //
-  // What it costs, stated plainly: auto-provision through the plugin now works
-  // only where mapping.email names the upstream's real address claim. Since
-  // oidcConfigFor falls back to "sub", that means a provider must set
-  // claim_map.email to a genuine address claim to provision at all. Every
-  // other configuration refuses a first-time identity instead of minting an
-  // account nobody can authenticate as. Pre-linked identities — all 64 of the
-  // migrated ones — are untouched: they never reach this branch.
-  const mapped = input.providerUser.email;
-  if (
-    identity.email === null || typeof mapped !== "string" ||
-    mapped.trim().toLowerCase() !== identity.email.trim().toLowerCase()
-  ) {
-    return reject("upstream_email_unusable");
+  // Provision under the upstream subject (identity.sub) so the trex user id
+  // equals the token `sub` — the key role assignment and usermgmt linkage are
+  // keyed by downstream. Any decision other than "provision" is refused as
+  // before; pre-linked identities never reach this branch.
+  if (decision.action === "provision") {
+    const { pool } = await import("../../db.ts");
+    const userId = await provisionUser(pool, identity, { id: identity.sub });
+    return { action: "link", userId, profile: "preserve" };
   }
-  return { action: "continue" };
+  return reject("upstream_email_unusable");
 };
