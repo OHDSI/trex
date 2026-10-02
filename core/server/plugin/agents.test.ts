@@ -549,3 +549,35 @@ Deno.test("rebuildAgentMount swaps the live config to a freshly staged dir (and 
     _clearAgentMountsForTest();
   }
 });
+
+// An agent worker gets only the env vars PASSTHROUGH_ENV names — unlike a
+// function worker, which inherits the host environment. Anything the agents
+// loop needs at runtime has to be on that list, and a credential key missing
+// from it does not fail at boot: the agent starts fine and then every turn
+// dies when it tries to open the user's provider key.
+Deno.test("buildAgentWorkerConfig passes the secrets the agents loop needs to decrypt a provider key", async () => {
+  const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
+  const sentinels: Record<string, string> = {
+    // Opens devx's encrypted provider API key (functions/provider_key.ts).
+    DEVX_ENCRYPTION_KEY: "0".repeat(64),
+    // Already passed through; asserted alongside so a future trim of the list
+    // cannot quietly drop one of the two and still look tested.
+    TREX_ROOT_KEY: "root-key-sentinel",
+  };
+  const saved = new Map<string, string | undefined>();
+  for (const k of Object.keys(sentinels)) {
+    saved.set(k, Deno.env.get(k));
+    Deno.env.set(k, sentinels[k]);
+  }
+  try {
+    const cfg = await buildAgentWorkerConfig(toyPlugin, { name: "toy", dir: "agent" }, "@trex/toy-agent");
+    for (const [k, v] of Object.entries(sentinels)) {
+      assertEquals(cfg.env[k], v, `${k} must reach the agent worker, or every turn fails on it`);
+    }
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) Deno.env.delete(k);
+      else Deno.env.set(k, v);
+    }
+  }
+});

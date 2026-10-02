@@ -57,6 +57,18 @@ const PASSTHROUGH_ENV = [
   // → the broker stays unwired and oauth connections are skipped (see
   // service/index.ts) — every non-oauth agent still boots.
   "TREX_ROOT_KEY",
+  // devx stores a user's provider API key encrypted at rest and opens it with
+  // this key (functions/provider_key.ts). A function worker inherits the host
+  // env and so always had it; an agent worker only gets what this list names,
+  // so without it readProviderKey threw "provider API key is encrypted but
+  // DEVX_ENCRYPTION_KEY is not configured" and EVERY agents-loop turn failed —
+  // the coder reported "code stream failed: 500" the moment real work started,
+  // while the browser loop on the same credential kept working.
+  //
+  // Not derivable worker-side: it is an HKDF subkey of TREX_ROOT_KEY
+  // (scripts/derive-secrets.ts), and nothing in the worker reproduces that
+  // derivation. Pass it through instead.
+  "DEVX_ENCRYPTION_KEY",
 ];
 
 // Resolve the on-disk agents runtime dir (core/server/agents). import.meta.url
