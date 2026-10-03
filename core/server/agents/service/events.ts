@@ -69,7 +69,10 @@ export type AgentEvent =
   | { type: "message.completed"; data: { turnId: string; message: string; finishReason: string } }
   | { type: "actions.requested"; data: { turnId: string; actions: ActionRequestItem[] } }
   | { type: "action.result"; data: { turnId: string; result: ActionResultData; status: "completed" | "failed" } }
-  | { type: "input.requested"; data: { turnId: string; requests: InputRequestItem[] } }
+  // `reminder` marks a RE-announcement of a request already asked (see
+  // approval-gate.ts): same requestId, so a relay can re-post the card
+  // without a consumer mistaking it for a second, distinct request.
+  | { type: "input.requested"; data: { turnId: string; requests: InputRequestItem[]; reminder?: boolean } }
   // usage/finishReason are additive here (eve puts them on step.completed,
   // which we don't implement — see COMPAT.md) rather than turn.completed.
   | { type: "turn.completed"; data: { turnId: string; usage?: { inputTokens?: number; outputTokens?: number }; finishReason?: string } }

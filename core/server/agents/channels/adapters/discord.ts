@@ -638,8 +638,11 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
       // Join for multi-select (max_values > 1); a single pick is just one value.
       const value = buttonChoice || (interaction.values ?? []).join(", ");
       if (value) {
+        // Always an array: labelsForSelection returns one, and the confirmation
+        // below joins it. A button has no option label to look up, so its own
+        // value is the label.
         const labels = buttonChoice
-          ? value
+          ? [value]
           : labelsForSelection(interaction.raw, interaction.customId, interaction.values);
         try {
           await args.send(`The team selected: ${value}`, {
