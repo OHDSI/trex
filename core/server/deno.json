@@ -4,6 +4,7 @@
     "ai": "npm:ai@^6",
     "ai/test": "npm:ai@^6/test",
     "@ai-sdk/anthropic": "npm:@ai-sdk/anthropic@^3",
+    "@ai-sdk/azure": "npm:@ai-sdk/azure@^3",
     "@ai-sdk/openai": "npm:@ai-sdk/openai@^3",
     "@ai-sdk/google": "npm:@ai-sdk/google@^3",
     "@ai-sdk/amazon-bedrock": "npm:@ai-sdk/amazon-bedrock@^4.0.115",

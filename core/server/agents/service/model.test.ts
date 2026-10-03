@@ -22,6 +22,18 @@ Deno.test("resolveModel falls back to TREX_AGENTS_DEFAULT_MODEL", () => {
   assertEquals(m.modelId, "gpt-5.4-mini");
 });
 
+Deno.test("resolveModel builds an Azure chat model from D2E Azure settings", () => {
+  const env = (k: string) =>
+    ({
+      AZURE_OPENAI_API_KEY: "azure-key",
+      AZURE_OPENAI_API_INSTANCE_NAME: "test-resource",
+      AZURE_OPENAI_API_VERSION: "2024-08-01-preview",
+    } as Record<string, string>)[k];
+  const m = resolveModel("azure/gpt-4o", env);
+  assertEquals(m.provider, "azure.chat");
+  assertEquals(m.modelId, "gpt-4o");
+});
+
 Deno.test("resolveModel throws with no model and no default", () => {
   assertThrows(() => resolveModel(undefined, () => undefined));
 });

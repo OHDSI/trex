@@ -178,6 +178,7 @@ into the agent worker when set):
 
 | Provider prefix | Env var(s) | Notes |
 |---|---|---|
+| `azure` | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_API_ENDPOINT`, `AZURE_OPENAI_API_INSTANCE_NAME`, `AZURE_OPENAI_API_VERSION` | Uses the Azure OpenAI chat API with deployment-based URLs; the model id is the Azure deployment name. Either endpoint or instance name may identify the resource. |
 | `anthropic` | `ANTHROPIC_API_KEY` | |
 | `openai` (default/fallback prefix) | `OPENAI_API_KEY`, `OPENAI_BASE_URL` | `OPENAI_BASE_URL` is optional, for OpenAI-compatible endpoints. |
 | `google` | `GOOGLE_GENERATIVE_AI_API_KEY` | |
@@ -185,7 +186,7 @@ into the agent worker when set):
 | — | `TREX_AGENTS_DEFAULT_MODEL` | Fallback model string when `agent.ts`/`agent.edn` declares none. |
 | — | `DATABASE_URL` | Also forwarded; used by the agent runtime's own session store, not by tools directly. |
 
-Any provider prefix other than `anthropic`, `google`, or `bedrock` resolves through the OpenAI
+Any provider prefix other than `azure`, `anthropic`, `google`, or `bedrock` resolves through the OpenAI
 provider (so OpenAI-compatible gateways work by setting `OPENAI_BASE_URL`).
 
 Only the variables above are passed from the host environment into the worker — an agent's tools
