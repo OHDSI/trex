@@ -13,6 +13,8 @@ import { coarseScopeKey } from "./scope-key.ts";
 // Exported for tests. An explicit approvalPollMs stays flat (tests depend on a
 // deterministic cadence); the default doubles to a 5s ceiling, cutting a
 // 30-minute park from ~3600 round-trips to ~370.
+// How long an unanswered gate waits before it is announced again.
+const REMINDER_MS = 5 * 60_000;
 export const INITIAL_POLL_MS = 500;
 export function nextPollDelay(current: number, flat: number | undefined): number {
   // A non-positive flat value (e.g. approvalPollMs: 0) is not a valid flat
@@ -119,12 +121,35 @@ export async function runApprovalGate(o: ApprovalGateOpts): Promise<{ error: str
     // 0ms either — see nextPollDelay's own guard above.
     let wait = flat !== undefined && flat > 0 ? flat : INITIAL_POLL_MS;
     let decision: string | null = null;
+    // Re-announce an unanswered gate periodically. A channel moves on: the card
+    // scrolls away, or the person who could answer it was not looking when it
+    // was posted, and the gate then expires in silence. Re-emitting the SAME
+    // requestId is idempotent for the relay — a consumer re-posts the card and
+    // the decision still resolves the original request.
+    //
+    // Only reaches a channel while something is attached to the stream (the
+    // live-only input.requested is not replayed, by design — see events.ts), so
+    // it covers the case where the coder parks again mid-turn with the relay
+    // still reading. The first gate of a turn, posted after the relay has
+    // detached, is not re-announced by this alone.
+    let nextReminder = Date.now() + REMINDER_MS;
     while (Date.now() < deadline) {
       // Checked at the top of the tick rather than racing the sleep: one
       // poll interval of lateness is cheaper than a second timer per wait.
       if (o.signal?.aborted) return { error: "turn aborted" };
       decision = await store.getApprovalDecision(requestId);
       if (decision) break;
+      if (Date.now() >= nextReminder) {
+        nextReminder = Date.now() + REMINDER_MS;
+        emit({
+          type: "input.requested",
+          data: {
+            turnId,
+            requests: [{ requestId, action: { kind: "tool-call", callId: requestId, toolName, input } }],
+            reminder: true,
+          },
+        });
+      }
       await new Promise((r) => setTimeout(r, wait));
       wait = nextPollDelay(wait, flat);
     }

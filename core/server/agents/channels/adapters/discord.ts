@@ -625,11 +625,22 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     // A/B/C choice can't ride them — instead it drives a turn via args.send, the
     // same primitive a /trex command uses, keyed to the identical
     // channelId:conversationId token the session was opened with.
-    if (interaction.customId === CHOICE_CUSTOM_ID) {
+    // Two shapes resume the same way. A select sends its picks in `values`; a
+    // BUTTON carries no values at all, so its choice rides in the custom_id as
+    // "eve_choice:<value>" (claw's approval gate renders buttons — a select
+    // needed two taps and left its pick on screen, which read as nothing
+    // having happened). Both end up as the same
+    // "The team selected: <value>" resume message.
+    const buttonChoice = interaction.customId.startsWith(`${CHOICE_CUSTOM_ID}:`)
+      ? interaction.customId.slice(CHOICE_CUSTOM_ID.length + 1)
+      : "";
+    if (interaction.customId === CHOICE_CUSTOM_ID || buttonChoice) {
       // Join for multi-select (max_values > 1); a single pick is just one value.
-      const value = interaction.values.join(", ");
+      const value = buttonChoice || (interaction.values ?? []).join(", ");
       if (value) {
-        const labels = labelsForSelection(interaction.raw, interaction.customId, interaction.values);
+        const labels = buttonChoice
+          ? value
+          : labelsForSelection(interaction.raw, interaction.customId, interaction.values);
         try {
           await args.send(`The team selected: ${value}`, {
             auth: toChannelAuth(interaction as unknown as DiscordCommandInteraction),

@@ -15,6 +15,10 @@ import {
   withModelRetry,
 } from "./retry.ts";
 import { publish, subscribe, ndjsonEncode } from "./stream.ts";
+
+// One newline, sent as a stream's first chunk so the response headers reach
+// the consumer immediately (see the stream route for why that matters).
+const PRIMING_CHUNK = new TextEncoder().encode("\n");
 import { buildSdkTools, buildSystemPrompt, resolveInstructions, restrictChildSkills, restrictChildTools } from "./toolset.ts";
 import { cacheProviderOptions, parseModelString, resolveModelForTurn, withSystemCachePoint } from "./model.ts";
 import type { AgentEvent } from "./events.ts";
@@ -1762,6 +1766,24 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       let unsub: (() => void) | undefined;
       const body = new ReadableStream({
         async start(controller) {
+          // Flush a byte before anything that can await. The response headers
+          // do not reach the client until the body produces its first chunk,
+          // and this body often produces none for a while: a consumer
+          // re-attaching at its own cursor replays an EMPTY slice, and a turn
+          // parked on an approval gate publishes nothing until the gate is
+          // answered. The attach then hangs instead of returning.
+          //
+          // That cost a 30-minute deadlock in production. claw attaches the
+          // stream BEFORE sending an approval decision (deliberately — see
+          // resolveCoderApproval.ts: a later attach can miss the next gate's
+          // live-only input.requested), so an attach that never returns means
+          // the decision is never sent, the coder stays parked, and the gate
+          // expires on a decision the human made seconds after it was posted.
+          //
+          // A bare newline is a no-op line for every consumer here (they trim
+          // and skip empties — e.g. code-session.ts's reader), so it primes
+          // the headers without entering the event vocabulary.
+          controller.enqueue(PRIMING_CHUNK);
           // Subscribe to the live tail BEFORE awaiting listEvents(): if we
           // replayed first and subscribed after, an event published in
           // that window (between the listEvents query and the subscribe

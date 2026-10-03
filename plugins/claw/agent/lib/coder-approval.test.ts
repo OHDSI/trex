@@ -10,7 +10,7 @@ function fakeFetch(status = 200) {
   return { fn, posts };
 }
 
-Deno.test("postApprovalRequest posts an eve_choice select whose values carry the decision and the requestId", async () => {
+Deno.test("postApprovalRequest posts eve_choice BUTTONS whose custom_ids carry the decision and requestId", async () => {
   const { fn, posts } = fakeFetch();
   await postApprovalRequest(fn, {
     botToken: "tok",
@@ -20,15 +20,15 @@ Deno.test("postApprovalRequest posts an eve_choice select whose values carry the
 
   assertEquals(posts.length, 1);
   assertStringIncludes(posts[0].url, "/channels/chan-1/messages");
-  const row = (posts[0].body.components as Array<{ components: Array<Record<string, unknown>> }>)[0].components[0];
+  const row = (posts[0].body.components as Array<{ components: Array<Record<string, unknown>> }>)[0].components;
+  // Buttons (type 2), not a select (type 3): one tap, and the chosen state does
+  // not linger on screen looking like nothing happened.
+  assertEquals(row.map((c) => c.type), [2, 2]);
   // Must match the Discord adapter's handleComponent branch, or the pick never
-  // resumes claw.
-  assertEquals(row.custom_id, "eve_choice");
-  assertEquals(row.type, 3);
-  const options = row.options as Array<{ value: string; label: string }>;
-  assertEquals(options.map((o) => o.value), ["approve req-1", "deny req-1"]);
-  assert(options.every((o) => o.value.length <= 100));
-  assertStringIncludes(options[0].label, "runCommand");
+  // resumes claw. A button has no `values`, so the choice rides in custom_id.
+  assertEquals(row.map((c) => c.custom_id), ["eve_choice:approve req-1", "eve_choice:deny req-1"]);
+  assert(row.every((c) => String(c.custom_id).length <= 100));
+  assertEquals(row.map((c) => c.label), ["Approve", "Deny"]);
   // The arguments the human is deciding on are shown, not just the tool name.
   assertStringIncludes(String((posts[0].body.embeds as Array<{ description: string }>)[0].description), "rm -rf build");
 });
@@ -101,4 +101,37 @@ Deno.test("parkedReply still hands the requestIds over when the gate could not b
   const text = parkedReply([{ requestId: "req-1", toolName: "runCommand", input: {} }], false);
   assertStringIncludes(text, "req-1");
   assertStringIncludes(text, "resolveCoderApproval");
+});
+
+// The gate renders BUTTONS. A select needed two interactions and left its pick
+// on screen afterwards, which read as "nothing happened" to the people
+// answering; and a button carries no `values`, so the decision has to ride in
+// the custom_id for the adapter to recover it.
+Deno.test("postApprovalRequest renders approve/deny buttons carrying the decision in custom_id", async () => {
+  let body: Record<string, unknown> = {};
+  const fakeFetch = ((_u: string | URL | Request, init?: RequestInit) => {
+    body = JSON.parse(String(init?.body ?? "{}"));
+    return Promise.resolve(new Response(JSON.stringify({ id: "msg-1" }), { status: 200 }));
+  }) as unknown as typeof fetch;
+
+  await postApprovalRequest(fakeFetch, {
+    botToken: "t",
+    channelId: "c",
+    pending: { requestId: "req-9", toolName: "Bash", input: { command: "ls" } },
+  });
+
+  const row = (body.components as { components: Record<string, unknown>[] }[])[0];
+  assertEquals(row.components.length, 2);
+  // type 2 is a button; a string select would be type 3.
+  assertEquals(row.components.map((c) => c.type), [2, 2]);
+  assertEquals(row.components.map((c) => c.label), ["Approve", "Deny"]);
+  for (const c of row.components) {
+    const id = String(c.custom_id);
+    assertStringIncludes(id, "req-9");
+    assert(id.startsWith("eve_choice:"), `the adapter keys on this prefix: ${id}`);
+    assert(id.length <= 100, "Discord rejects a custom_id over 100 chars");
+  }
+  // The decision must be recoverable from the id alone — no `values` on a button.
+  assertStringIncludes(String(row.components[0].custom_id), "approve");
+  assertStringIncludes(String(row.components[1].custom_id), "deny");
 });
