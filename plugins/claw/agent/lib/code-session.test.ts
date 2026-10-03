@@ -1,7 +1,7 @@
 // plugins/claw/agent/lib/code-session.test.ts
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "jsr:@std/assert";
 import { FakeTime } from "jsr:@std/testing/time";
-import { attachCodeStream, CODE_BASE, reattachCodeTurn, resolveCodeApproval, runCodeTurn, type TokioClient } from "./code-session.ts";
+import { attachCodeStream, CODE_BASE, openEventStream, reattachCodeTurn, resolveCodeApproval, runCodeTurn, type TokioClient } from "./code-session.ts";
 
 function ndjson(...events: unknown[]): Response {
   const body = events.map((e) => JSON.stringify(e)).join("\n") + "\n";
@@ -62,6 +62,11 @@ function fakeClient(responses: Response[], opts: { pendingApproval?: { requestId
         );
       }
       return Promise.resolve(responses.shift()!);
+    },
+    // The stream is a loopback fetch in production; drive it from the same
+    // scripted responses here so these tests need no live mount.
+    stream(url, init) {
+      return client.req(url, { ...init });
     },
   };
   return { client, reqs };
@@ -745,4 +750,55 @@ Deno.test("an oversized error body is truncated", async () => {
   const err = await assertRejects(() => runCodeTurn(client, { message: "go", startCursor: 0 }), Error);
   assertStringIncludes(err.message, "code create failed: 500");
   assert(err.message.length < 1200, `error message not capped: ${err.message.length} chars`);
+});
+
+// ---------------------------------------------------------------------------
+// The event stream must NOT ride Trex.req. The channel buffers a whole
+// response under an op_req timeout a coding turn outlives, so attaching
+// through it returned a bodyless 500: the hand-off reported "code stream
+// failed: 500" while the coder's turn kept running, orphaned. code-stream.ts
+// documented this for the legacy path; the eve path has to honour it too.
+// ---------------------------------------------------------------------------
+
+Deno.test("openEventStream goes to the loopback mount, not the Trex.req placeholder host", async () => {
+  const seen: { url: string; headers: Record<string, string> }[] = [];
+  const fakeFetch = ((url: string | URL | Request, init?: RequestInit) => {
+    seen.push({
+      url: String(url),
+      headers: Object.fromEntries(new Headers(init?.headers).entries()),
+    });
+    return Promise.resolve(new Response("", { status: 200 }));
+  }) as unknown as typeof fetch;
+
+  await openEventStream(
+    { codeSessionId: "code-1", startCursor: 7, userId: "u1" },
+    fakeFetch,
+    () => Promise.resolve("minted-token"),
+  );
+
+  assertEquals(seen.length, 1);
+  // A real loopback host, never CODE_BASE's inert "localhost" placeholder.
+  assertStringIncludes(seen[0].url, "/plugins/trex/devx-agent/eve/v1/session/code-1/stream");
+  assertStringIncludes(seen[0].url, "startIndex=7");
+  assert(
+    !seen[0].url.startsWith("http://localhost/"),
+    `must not reuse the Trex.req placeholder base: ${seen[0].url}`,
+  );
+  // The agent mount enforces verify_jwt, so the minted token has to ride along
+  // — and x-user-id stays, which is the identity the channel asserted before.
+  assertEquals(seen[0].headers["authorization"], "Bearer minted-token");
+  assertEquals(seen[0].headers["x-user-id"], "u1");
+});
+
+Deno.test("openEventStream mints nothing when there is no user id", async () => {
+  let minted = 0;
+  const fakeFetch = (() => Promise.resolve(new Response("", { status: 401 }))) as unknown as typeof fetch;
+  const res = await openEventStream(
+    { codeSessionId: "code-1", startCursor: 0 },
+    fakeFetch,
+    () => { minted++; return Promise.resolve("t"); },
+  );
+  assertEquals(minted, 0, "no user id means there is nothing to mint for");
+  // The mount's rejection is reported by the caller rather than masked here.
+  assertEquals(res.status, 401);
 });

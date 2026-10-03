@@ -420,6 +420,11 @@ Deno.test("a claude-code session opened through the eve transport declares appro
       ].map((e) => JSON.stringify(e)).join("\n") + "\n";
       return Promise.resolve(new Response(events, { headers: { "content-type": "application/x-ndjson" } }));
     },
+    // Production streams over a loopback fetch (see openEventStream); this seam
+    // keeps the stream on the fake so the test needs no live mount or token.
+    stream(url, init) {
+      return client.req(url, { ...init });
+    },
   };
   // No runEve stub: this drives code-session.ts's real runCodeTurn.
   const out = await routeCodeTurn(baseArgs(), 0, {
