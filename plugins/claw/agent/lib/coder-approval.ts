@@ -60,27 +60,30 @@ export async function postApprovalRequest(
       "\n\nThe coding agent is paused until someone decides.",
     color: AMBER,
   };
+  // Buttons, not a select. A select needs two interactions (open, then pick)
+  // and silently keeps its chosen value displayed afterwards, which read as
+  // "nothing happened" to people answering these gates; one tap on a labelled
+  // button is unambiguous. The decision rides in the custom_id because a
+  // button interaction carries no `values` — the adapter splits it back off
+  // (see CHOICE_CUSTOM_ID there) and resumes with the same
+  // "The team selected: <value>" message the select produced, so the relay
+  // path downstream is unchanged.
   const components = [{
     type: 1, // action row
-    components: [{
-      type: 3, // string select
-      custom_id: CHOICE_CUSTOM_ID,
-      placeholder: "Approve or deny…",
-      min_values: 1,
-      max_values: 1,
-      options: [
-        {
-          label: `Approve ${pending.toolName}`.slice(0, 100),
-          value: approvalChoiceValue("approve", pending.requestId),
-          description: "Let the coder run it",
-        },
-        {
-          label: `Deny ${pending.toolName}`.slice(0, 100),
-          value: approvalChoiceValue("deny", pending.requestId),
-          description: "Refuse; the coder is told and continues",
-        },
-      ],
-    }],
+    components: [
+      {
+        type: 2, // button
+        style: 3, // success
+        custom_id: `${CHOICE_CUSTOM_ID}:${approvalChoiceValue("approve", pending.requestId)}`.slice(0, 100),
+        label: "Approve".slice(0, 80),
+      },
+      {
+        type: 2,
+        style: 4, // danger
+        custom_id: `${CHOICE_CUSTOM_ID}:${approvalChoiceValue("deny", pending.requestId)}`.slice(0, 100),
+        label: "Deny".slice(0, 80),
+      },
+    ],
   }];
   return await postChannelMessage(fetchFn, {
     botToken: opts.botToken,

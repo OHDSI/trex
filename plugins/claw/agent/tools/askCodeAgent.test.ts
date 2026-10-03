@@ -223,7 +223,9 @@ Deno.test("askCore posts the coder's approval gate to the thread and reports the
     assertEquals(posts.length, 1);
     assertStringIncludes(posts[0].url, "/channels/chan-1/messages");
     const row = (posts[0].body.components as Array<{ components: Array<Record<string, unknown>> }>)[0].components[0];
-    assertEquals(row.custom_id, "eve_choice");
+    // Buttons now, so the decision rides in the custom_id after the prefix
+    // the adapter keys on.
+    assertEquals(row.custom_id, "eve_choice:approve req-1");
     assertStringIncludes(out.reply, "req-1");
     assertStringIncludes(out.reply, "PAUSED");
     assertEquals(out.trailer, null);
@@ -419,6 +421,11 @@ Deno.test("a claude-code session opened through the eve transport declares appro
         { type: "turn.completed", data: {} },
       ].map((e) => JSON.stringify(e)).join("\n") + "\n";
       return Promise.resolve(new Response(events, { headers: { "content-type": "application/x-ndjson" } }));
+    },
+    // Production streams over a loopback fetch (see openEventStream); this seam
+    // keeps the stream on the fake so the test needs no live mount or token.
+    stream(url, init) {
+      return client.req(url, { ...init });
     },
   };
   // No runEve stub: this drives code-session.ts's real runCodeTurn.

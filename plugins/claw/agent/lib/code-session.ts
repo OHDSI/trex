@@ -1,4 +1,6 @@
 // plugins/claw/agent/lib/code-session.ts
+// mintToken is shared with the legacy path, which mints the same user token.
+import { mintToken } from "./code-stream.ts";
 export const CODE_SERVICE = "devx/agents/devx-agent";
 // Absolute base: the request rides the intra-cluster Trex.req channel, where the
 // listener rebuilds it via `new Request(url)` — which rejects a bare path. Routing
@@ -8,6 +10,13 @@ export const CODE_BASE = "http://localhost/plugins/trex/devx-agent";
 
 export interface TokioClient {
   req(url: string, init: { method: string; headers?: Record<string, string>; body?: string }): Promise<Response>;
+  /**
+   * Optional override for the event stream only. Production leaves it unset so
+   * attachCodeStream uses the loopback fetch (see openEventStream for why the
+   * channel cannot carry a stream); tests set it to drive the stream from a
+   * fake without a live mount.
+   */
+  stream?(url: string, init: { method: string; headers?: Record<string, string> }): Promise<Response>;
 }
 
 export interface RunArgs {
@@ -305,14 +314,58 @@ export interface AttachedStream {
   cancel(): Promise<void>;
 }
 
+// The coder's event stream goes over a DIRECT loopback fetch, not Trex.req.
+//
+// Trex.req is right for the short request/response calls above (create,
+// continue, approvals): the channel asserts claw's identity with x-user-id and
+// needs no token. It is wrong for a stream. The inter-service channel
+// (core/server/plugin/function.ts) buffers a whole response before handing it
+// back, under an op_req timeout a coding turn outlives — so attaching the
+// event stream through it came back as a BODYLESS 500. The hand-off then
+// reported "code stream failed: 500" while the coder's turn carried on
+// running, orphaned, in the background: the session row said `running` long
+// after the channel had given up.
+//
+// code-stream.ts reached this same conclusion for the legacy path (see its
+// header): a plain HTTP connection streams the turn with no such cap. That
+// lesson was lost when the coder moved to the eve session path, which routed
+// every call — this one included — through the channel.
+//
+// The agent mount enforces verify_jwt, so the fetch carries a minted user
+// token, granting claw nothing beyond the CLAW_CODE_USER_ID identity it
+// already asserts via x-user-id.
+export function agentLoopbackBase(): string {
+  const root = Deno.env.get("DISCORD_GATEWAY_LOOPBACK_URL")?.trim() || "http://127.0.0.1:33001";
+  return `${root.replace(/\/+$/, "")}/plugins/trex/devx-agent`;
+}
+
+/** Open the turn's event stream. fetchImpl/mint are injected for tests. */
+export async function openEventStream(
+  args: { codeSessionId: string; startCursor: number; userId?: string },
+  fetchImpl: typeof fetch = fetch,
+  mint: (userId: string) => Promise<string> = mintToken,
+): Promise<Response> {
+  const url =
+    `${agentLoopbackBase()}/eve/v1/session/${args.codeSessionId}/stream?startIndex=${args.startCursor}`;
+  const h: Record<string, string> = { ...headers(args.userId) };
+  // No user id means nothing to mint for; let the mount reject it so the caller
+  // reports that status rather than throwing something less informative here.
+  if (args.userId) h["authorization"] = `Bearer ${await mint(args.userId)}`;
+  return await fetchImpl(url, { method: "GET", headers: h });
+}
+
 export async function attachCodeStream(client: TokioClient, args: StreamArgs): Promise<AttachedStream> {
   // startIndex counts the session's persisted events and so does nextCursor
   // (see REPLAYABLE) — a re-attach resumes exactly where the last one stopped,
   // replaying nothing it has already seen and skipping nothing it has not.
-  const res = await client.req(
-    `${CODE_BASE}/eve/v1/session/${args.codeSessionId}/stream?startIndex=${args.startCursor}`,
-    { method: "GET", headers: headers(args.userId) },
-  );
+  // client.stream is a test seam; unset in production, where the stream must
+  // not ride the channel.
+  const res = client.stream
+    ? await client.stream(
+      `${CODE_BASE}/eve/v1/session/${args.codeSessionId}/stream?startIndex=${args.startCursor}`,
+      { method: "GET", headers: headers(args.userId) },
+    )
+    : await openEventStream(args);
   if (!res.ok || !res.body) throw new Error(`code stream failed: ${res.status}${res.ok ? "" : await serverDetail(res)}`);
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   return {

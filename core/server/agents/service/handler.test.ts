@@ -5431,3 +5431,46 @@ Deno.test("a turn reads approverReachable back off the session and hands it to t
   const read = db.calls.find((c) => c.sql.includes("SELECT approver_reachable FROM agents.sessions"));
   assert(read, "the turn must read the flag back off the session row");
 });
+
+// A stream that has nothing to say yet must still hand back a readable body.
+//
+// Response headers do not reach the consumer until the body yields its first
+// chunk, and this body legitimately yields none for a while: a consumer
+// re-attaching at its own cursor replays an EMPTY slice, and a turn parked on
+// an approval gate publishes nothing until someone answers. Without a priming
+// chunk the attach hangs, which deadlocked claw for 30 minutes in production —
+// it attaches BEFORE sending an approval decision (deliberately, so a later
+// attach cannot miss the next gate's live-only input.requested), so an attach
+// that never returns means the decision is never delivered and the gate
+// expires on an answer the human gave seconds after it was asked.
+Deno.test("GET /stream yields a first chunk even with nothing to replay", async () => {
+  const { handler, db } = await makeHandler();
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => settled(db));
+
+  // startIndex past the end: the replay slice is empty, exactly like a relay
+  // re-attaching at the cursor it already consumed to.
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}/stream?startIndex=9999`));
+  assertEquals(res.headers.get("content-type"), "application/x-ndjson");
+  const reader = res.body!.getReader();
+  try {
+    // Must resolve without waiting for an event to be published. A hang here
+    // is the deadlock; the timeout is what distinguishes the two.
+    const first = await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("stream produced no chunk")), 5_000)),
+    ]);
+    assert(!first.done, "the stream closed instead of staying open for live events");
+    // The priming chunk is a blank line: framing-neutral, and every consumer
+    // here trims and skips empties rather than parsing it.
+    const text = new TextDecoder().decode(first.value);
+    assertEquals(text.trim(), "");
+  } finally {
+    await reader.cancel();
+  }
+});
