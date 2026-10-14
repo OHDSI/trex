@@ -18,7 +18,7 @@
   [dialect host port database-name user password])
 
 (defrecord DatamartConfig
-  [database-code schema-name target-schema-name source-credentials table-filter patient-filter timestamp-filter fts-tables cache-path parallel-copy])
+  [database-code schema-name target-schema-name source-credentials table-filter patient-filter timestamp-filter fts-tables cache-path parallel-copy vocab-schema-name])
 
 (defrecord TableResult
   [table-name rows-copied indexes-created])
@@ -142,7 +142,8 @@
       :timestamp-filter (:timestamp-filter clj-map)
       :fts-tables (or (:fts-tables clj-map) ["concept" "concept_synonym"])
       :cache-path (or (:cache-path clj-map) "./data/cache")
-      :parallel-copy (boolean (:parallel-copy clj-map))})))
+      :parallel-copy (boolean (:parallel-copy clj-map))
+      :vocab-schema-name (:vocab-schema-name clj-map)})))
 
 (defn table-result->java-map
   "Convert TableResult record to Java HashMap."
@@ -397,8 +398,38 @@
         {copied true failed false} (group-by #(instance? TableResult %) results)]
     {:tables-copied (vec copied) :tables-failed (vec failed)}))
 
+;; OMOP vocabulary tables. Mirrors VOCAB_TABLES in d2e's create_cachedb_file
+;; flow (plugins/flows/base/create_cachedb_file_plugin/utils.py).
+(def vocab-tables
+  #{"concept" "vocabulary" "concept_relationship" "concept_synonym" "concept_ancestor"
+    "concept_class" "relationship" "domain" "drug_strength" "source_to_concept_map"})
+
+(defn separate-vocab-schema
+  "The vocabulary schema to copy alongside the CDM schema, or nil when the
+   vocabulary lives in the CDM schema itself."
+  [{:keys [schema-name vocab-schema-name]}]
+  (when (and (not (str/blank? vocab-schema-name))
+             (not= vocab-schema-name schema-name))
+    vocab-schema-name))
+
+(defn- copy-vocab-tables
+  "Copy the vocabulary tables of a separate vocabulary schema into the cache
+   under the CDM schema name, the layout d2e's cache flow produces and the
+   cohort count, vocabulary search and FTS paths read. Patient and timestamp
+   filters do not apply: vocabulary tables carry no person_id."
+  [db source-alias cache-alias vocab-schema target-schema config]
+  (db/validate-identifier! vocab-schema "vocab-schema-name")
+  (let [tables (->> (get-source-tables db source-alias vocab-schema)
+                    (filter vocab-tables)
+                    (#(apply-table-filter % (:table-filter config))))
+        vocab-config (assoc config :patient-filter nil :timestamp-filter nil)]
+    (log/info (format "Copying %d vocabulary table(s) from %s into %s"
+                      (count tables) vocab-schema target-schema))
+    (copy-tables-sequential db source-alias cache-alias vocab-schema target-schema tables vocab-config)))
+
 (defn copy-schema
-  "Copy all (filtered) tables from the source schema into the cache catalog.
+  "Copy all (filtered) tables from the source schema into the cache catalog,
+   plus the vocabulary tables when they live in a separate schema.
    Returns {:tables-copied [...] :tables-failed [...]}."
   [db source-alias cache-alias config]
   ;; Cache mirrors the source schema (target-schema-name is not honored, matching
@@ -420,9 +451,18 @@
         (when-not (re-find #"(?i)already exists" (.getMessage e))
           (log/warn (format "Failed to create schema %s.%s: %s"
                             cache-alias target-schema (.getMessage e))))))
-    (if parallel-copy
-      (copy-tables-parallel db source-alias cache-alias schema-name target-schema tables-to-copy config)
-      (copy-tables-sequential db source-alias cache-alias schema-name target-schema tables-to-copy config))))
+    (let [cdm-result (if parallel-copy
+                       (copy-tables-parallel db source-alias cache-alias schema-name target-schema tables-to-copy config)
+                       (copy-tables-sequential db source-alias cache-alias schema-name target-schema tables-to-copy config))]
+      (if-let [vocab-schema (separate-vocab-schema config)]
+        ;; Copied after the CDM tables so the vocabulary daimon's tables replace
+        ;; any same-named stubs in the CDM schema.
+        (let [vocab-result (copy-vocab-tables db source-alias cache-alias vocab-schema target-schema config)
+              replaced (set (map :table-name (:tables-copied vocab-result)))]
+          {:tables-copied (into (vec (remove #(replaced (:table-name %)) (:tables-copied cdm-result)))
+                                (:tables-copied vocab-result))
+           :tables-failed (into (vec (:tables-failed cdm-result)) (:tables-failed vocab-result))})
+        cdm-result))))
 
 ;; Mirrors d2e's DUCKDB_FULLTEXT_SEARCH_CONFIG
 ;; (plugins/flows/base/create_cachedb_file_plugin/utils.py). Tables without a
@@ -684,6 +724,9 @@
    (create-cache db config nil))
   ([db config progress-fn]
    (let [dialect (get-in config [:source-credentials :dialect])
+         _ (when (and (separate-vocab-schema config) (not (native-scanner-dialect? dialect)))
+             (log/warn (format "Vocabulary schema %s is not copied for dialect %s; cohort counts on this cache need the vocabulary in schema %s"
+                               (:vocab-schema-name config) dialect (:schema-name config))))
          result (if (native-scanner-dialect? dialect)
                   (create-cache-native db config)
                   (batch/create-cache-jdbc db (convert-config-for-jdbc config) progress-fn))
