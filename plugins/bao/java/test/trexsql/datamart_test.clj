@@ -277,3 +277,55 @@
     (is (false? (datamart/native-scanner-dialect? "oracle")))
     (is (false? (datamart/native-scanner-dialect? "sql server")))
     (is (false? (datamart/native-scanner-dialect? nil)))))
+
+;; Separate vocabulary schema
+
+(deftest java-map-to-datamart-config-vocab-schema-test
+  (testing "vocab-schema-name is carried over from the java map"
+    (let [config (datamart/java-map->datamart-config
+                  (java.util.HashMap. {"database-code" "testdb"
+                                       "schema-name" "cdm"
+                                       "vocab-schema-name" "vocab"}))]
+      (is (= "vocab" (:vocab-schema-name config))))))
+
+(deftest separate-vocab-schema-test
+  (testing "only a vocabulary schema that differs from the CDM schema is copied separately"
+    (is (= "vocab" (datamart/separate-vocab-schema {:schema-name "cdm" :vocab-schema-name "vocab"})))
+    (is (nil? (datamart/separate-vocab-schema {:schema-name "cdm" :vocab-schema-name "cdm"})))
+    (is (nil? (datamart/separate-vocab-schema {:schema-name "cdm" :vocab-schema-name nil})))
+    (is (nil? (datamart/separate-vocab-schema {:schema-name "cdm" :vocab-schema-name ""})))))
+
+(defn- run-copy-schema
+  "copy-schema against stubbed source tables; returns [result copy-calls]."
+  [source-tables config]
+  (let [calls (atom [])]
+    (with-redefs [datamart/get-source-tables (fn [_ _ schema] (get source-tables schema))
+                  datamart/copy-table (fn [_ _ _ schema target table cfg]
+                                        (swap! calls conj {:schema schema :target target :table table
+                                                           :patient-filter (:patient-filter cfg)})
+                                        (datamart/->TableResult table 1 0))
+                  trexsql.db/execute! (fn [& _] nil)]
+      [(datamart/copy-schema nil "src" "cache" config) @calls])))
+
+(deftest copy-schema-copies-separate-vocab-schema-test
+  (let [[result calls] (run-copy-schema
+                        {"cdm" ["person" "drug_exposure" "concept"]
+                         "vocab" ["concept" "concept_ancestor" "unrelated_table"]}
+                        {:schema-name "cdm" :vocab-schema-name "vocab" :patient-filter [1 2]})]
+    (testing "vocabulary tables are read from the vocab schema and written under the CDM schema"
+      (is (= #{{:schema "vocab" :target "cdm" :table "concept" :patient-filter nil}
+               {:schema "vocab" :target "cdm" :table "concept_ancestor" :patient-filter nil}}
+             (set (filter #(= "vocab" (:schema %)) calls)))))
+    (testing "non-vocabulary tables of the vocab schema are skipped"
+      (is (not-any? #(= "unrelated_table" (:table %)) calls)))
+    (testing "CDM tables keep the patient filter"
+      (is (= [1 2] (:patient-filter (first (filter #(= "person" (:table %)) calls))))))
+    (testing "the vocab copy replaces the CDM schema's same-named table in the result"
+      (is (= ["person" "drug_exposure" "concept" "concept_ancestor"]
+             (mapv :table-name (:tables-copied result)))))))
+
+(deftest copy-schema-without-separate-vocab-schema-test
+  (let [[result calls] (run-copy-schema {"cdm" ["person" "concept"]}
+                                        {:schema-name "cdm" :vocab-schema-name "cdm"})]
+    (is (every? #(= "cdm" (:schema %)) calls))
+    (is (= ["person" "concept"] (mapv :table-name (:tables-copied result))))))

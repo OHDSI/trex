@@ -69,6 +69,12 @@
   (when source
     (.getTableQualifier source (get-daimon-type "CDM"))))
 
+(defn- get-vocab-schema
+  "Get Vocabulary schema from source daimons, or nil when none is configured."
+  [source]
+  (when source
+    (.getTableQualifierOrNull source (get-daimon-type "Vocabulary"))))
+
 (defn- get-results-schema
   "Get Results schema from source daimons, falls back to CDM schema."
   [source]
@@ -215,13 +221,14 @@
     (when (:jdbc-url credentials) (.put m "jdbc-url" (:jdbc-url credentials)))
     m))
 
-(defn- build-datamart-config [database-code schema-name cache-path credentials request]
+(defn- build-datamart-config [database-code schema-name vocab-schema-name cache-path credentials request]
   (let [config (doto (HashMap.)
                  (.put "database-code" database-code)
                  (.put "schema-name" schema-name)
                  (.put "cache-path" cache-path)
                  (.put "source-credentials" (build-credentials-map credentials))
                  (.put "fts-tables" (let [^java.util.Collection c (or (:ftsTables request) ["concept"])] (ArrayList. c))))]
+    (when-not (str/blank? vocab-schema-name) (.put config "vocab-schema-name" vocab-schema-name))
     (when-let [v (:targetSchemaName request)] (.put config "target-schema-name" v))
     (when-let [v (:tables request)] (.put config "tables" (ArrayList. ^java.util.Collection v)))
     (when-let [v (:patientFilter request)] (.put config "patient-filter" (ArrayList. ^java.util.Collection v)))
@@ -302,7 +309,8 @@
                 (try
                   (let [cache-path (or (:cachePath params) (get-cache-path-from-config))
                         credentials (source->credentials source)
-                        config-map (build-datamart-config database-code (:schemaName request)
+                        vocab-schema (or (:vocabSchemaName request) (get-vocab-schema source))
+                        config-map (build-datamart-config database-code (:schemaName request) vocab-schema
                                                           cache-path credentials request)
                         validated-config (datamart/java-map->datamart-config config-map)]
                     (when-let [error (datamart/validate-config validated-config)]
@@ -838,7 +846,8 @@
             (try
               (let [cache-path (or (:cachePath query-params) (get-cache-path-from-config))
                     credentials (source->credentials source)
-                    config-map (build-datamart-config database-code (:schemaName body-params)
+                    vocab-schema (or (:vocabSchemaName body-params) (get-vocab-schema source))
+                    config-map (build-datamart-config database-code (:schemaName body-params) vocab-schema
                                                       cache-path credentials body-params)
                     validated-config (datamart/java-map->datamart-config config-map)]
                 (when-let [error (datamart/validate-config validated-config)]
