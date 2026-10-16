@@ -34,6 +34,8 @@ import type {
 import { decideLink, normaliseDomains } from "./link.ts";
 import type { ExistingUser } from "./link.ts";
 import type { UpstreamIdentity } from "./types.ts";
+import { provisionUserWith } from "./providers.ts";
+import type { UserWriter } from "./providers.ts";
 
 const reject = (code: string): SSOUserResolution => ({ action: "reject", code });
 
@@ -245,49 +247,80 @@ export const resolveSsoUser = async (
     return { action: "link", userId: decision.userId, profile: "preserve" };
   }
 
-  // decideLink says "provision", and under its original caller that meant
-  // `provisionUser`, which owns the address: it synthesises <slug>@d2e.local
-  // for an identity that asserted none and sets is_placeholder_email. Under
-  // the plugin it means something else — handleOAuthUserInfo creates the user
-  // with `providerUser.email`, which is whatever mapping.email selected, and
-  // that is NOT the address this function just judged.
-  //
-  // Measured on a real database: with auto_provision on and
-  // claim_map {"email":"username"}, the created row is email = 'alice',
-  // is_placeholder_email = false — a bare username in a UNIQUE NOT NULL
-  // address column, flagged as a legitimate link candidate, which is precisely
-  // the row V17 spent a migration eliminating. Worse, in the variant where the
-  // id_token ALSO carries a real verified address, the allowlist and
+  // decideLink says "provision", and the row is written here rather than by
+  // the plugin. handleOAuthUserInfo would create the user with
+  // `providerUser.email`, which is whatever mapping.email selected and NOT the
+  // address this function judged. Measured on a real database: with
+  // auto_provision on and claim_map {"email":"username"} the plugin path wrote
+  // email = 'alice', is_placeholder_email = false — a bare username in a UNIQUE
+  // NOT NULL address column, flagged as a legitimate link candidate, which is
+  // precisely the row V17 spent a migration eliminating; and where the id_token
+  // ALSO carried a real verified address, the allowlist and
   // isEngineAddressable both passed on that address and 'alice' was still what
-  // got written — so every address check above is vacuous on this branch
-  // unless the value the engine will store is the value that was checked.
+  // got written. provisionUserWith owns the address instead: identity.email,
+  // or a synthesised <slug>@d2e.local flagged is_placeholder_email when the
+  // upstream asserted none — the same policy the admin link path provisions
+  // under, so there is still one provisioning path, with two writers.
   //
-  // Hence the guard, and it is equality rather than mere addressability: a
-  // mapping naming some other address-shaped claim would store an address the
-  // allowlist and the elevated-account guard never saw. The engine must write
-  // the address the policy judged, or nothing.
+  // Written through context.database, which is the callback's own transaction
+  // (runWithTransaction around resolveUser, the account write and the session,
+  // @better-auth/sso dist/index.mjs:3960-4019). A user written on a separate
+  // connection would survive a rollback later in the callback with no account
+  // pointing at it; for an address-less identity nothing would ever match it
+  // again, and the retry would collide with its own leftover placeholder on
+  // every sign-in after. Through the adapter the row commits with the account
+  // or not at all. `input: false` on is_placeholder_email does not stand in the
+  // way: it is enforced by the public endpoints' input parsing
+  // (better-auth dist/db/schema.mjs parseInputData), not by the adapter's
+  // create, which writes every declared field.
   //
-  // Refusing rather than synthesising a placeholder here, deliberately. The
-  // resolver is a decision, not a writer: is_placeholder_email is declared
-  // `input: false` so the adapter strips it from a create, which means a
-  // placeholder minted through context.database would be written unflagged —
-  // the same defect in a new place. Writing it any other way would put a
-  // second provisioning path, with its own slug and collision rules, beside
-  // provisionUser's.
-  //
-  // What it costs, stated plainly: auto-provision through the plugin now works
-  // only where mapping.email names the upstream's real address claim. Since
-  // oidcConfigFor falls back to "sub", that means a provider must set
-  // claim_map.email to a genuine address claim to provision at all. Every
-  // other configuration refuses a first-time identity instead of minting an
-  // account nobody can authenticate as. Pre-linked identities — all 64 of the
-  // migrated ones — are untouched: they never reach this branch.
-  const mapped = input.providerUser.email;
-  if (
-    identity.email === null || typeof mapped !== "string" ||
-    mapped.trim().toLowerCase() !== identity.email.trim().toLowerCase()
-  ) {
-    return reject("upstream_email_unusable");
-  }
-  return { action: "continue" };
+  // A fresh id, not the upstream subject: subjects are unique per provider
+  // only, and the trex token's `sub` is the trex user id whatever its value, so
+  // nothing downstream needs the two to coincide. The address is stored
+  // lower-cased, as Better Auth's own createUser stores it and as findCandidate
+  // looks it up.
+  const userId = await provisionUserWith(adapterUserWriter(context.database), {
+    ...identity,
+    email: identity.email?.toLowerCase() ?? null,
+    name: nonEmpty(input.providerUser.name),
+  });
+  return { action: "link", userId, profile: "preserve" };
 };
+
+function nonEmpty(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+/**
+ * provisionUserWith's reads and writes, through the callback's adapter.
+ *
+ * The taken-check is an exact match on the lower-cased address, for the reason
+ * findCandidate gives: the adapter cannot say `lower(email) = $1`. Every
+ * address this path writes is already lower-case, and V16's unique index on
+ * lower(email) still refuses a mixed-case twin at insert — inside the
+ * transaction, so a refusal there costs one sign-in and leaves nothing behind.
+ */
+function adapterUserWriter(database: SSOUserResolutionContext["database"]): UserWriter {
+  return {
+    emailTaken: async (address) =>
+      (await database.findOne({
+        model: "user",
+        where: [{ field: "email", value: address.toLowerCase() }],
+      })) !== null,
+    insert: async (row) => {
+      await database.create({
+        model: "user",
+        forceAllowId: true,
+        data: {
+          id: row.id,
+          name: row.name,
+          email: row.email,
+          emailVerified: row.emailVerified,
+          email_confirmed_at: row.emailVerified ? new Date() : null,
+          role: "user",
+          is_placeholder_email: row.isPlaceholderEmail,
+        },
+      });
+    },
+  };
+}

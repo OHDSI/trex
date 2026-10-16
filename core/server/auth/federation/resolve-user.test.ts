@@ -39,17 +39,34 @@ function matches(row: Row, where: Where[]): boolean {
 interface Fake {
   findOne: <T>(a: { model: string; where: Where[] }) => Promise<T | null>;
   findMany: <T>(a: { model: string; where?: Where[]; limit?: number }) => Promise<T[]>;
+  create: <T>(a: { model: string; data: Row; forceAllowId?: boolean }) => Promise<T>;
   reads: string[];
+  /** Rows created through the adapter, in order — the only way the resolver may write. */
+  created: Row[];
 }
 
 function fakeDb(tables: { ssoProvider?: Row[]; user?: Row[]; account?: Row[] }): Fake {
   const reads: string[] = [];
+  const created: Row[] = [];
   const table = (model: string): Row[] => {
     if (!KNOWN_MODELS.has(model)) throw new Error(`unknown model ${model}`);
     return (tables as Record<string, Row[] | undefined>)[model] ?? [];
   };
   return {
     reads,
+    created,
+    // deno-lint-ignore no-explicit-any
+    create: ((a: { model: string; data: Row; forceAllowId?: boolean }) => {
+      // Only a user may be created, and only with the id the resolver chose:
+      // without forceAllowId the real adapter drops a supplied id and mints
+      // its own, so the placeholder derived from the id would name nobody.
+      if (a.model !== "user") throw new Error(`resolver may not create ${a.model}`);
+      if (!a.forceAllowId) throw new Error("create without forceAllowId discards the id");
+      const row = { ...a.data };
+      created.push(row);
+      ((tables as Record<string, Row[]>).user ??= []).push(row);
+      return Promise.resolve(row);
+    }) as any,
     // deno-lint-ignore no-explicit-any
     findOne: ((a: { model: string; where: Where[] }) => {
       reads.push(`${a.model}:${a.where.map((w) => `${w.field}=${String(w.value)}`).join(",")}`);
@@ -101,6 +118,12 @@ const input = (over: Record<string, unknown> = {}): any => ({
 
 // deno-lint-ignore no-explicit-any
 const resolve = (i: any, db: Fake) => resolveSsoUser!(i, { database: db as any });
+
+/** The user a resolution links to, failing the test when it is not a link. */
+function linkedId(result: Awaited<ReturnType<typeof resolve>>): string {
+  if (result.action !== "link") throw new Error(`expected a link, got ${JSON.stringify(result)}`);
+  return result.userId;
+}
 
 Deno.test("a disabled provider refuses every sign-in", async () => {
   // sso_provider.enabled is what the sign-in button is built from and what an
@@ -288,16 +311,20 @@ Deno.test("with no link and no address, no candidate is looked up at all", async
   // Nothing to look one up by. The query is skipped rather than run with null
   // and left to match whatever `lower(NULL)` would — or, through the adapter,
   // whatever `String(undefined)` would. A user row is seeded precisely so a
-  // resolver that asked anyway would link to it and fail here.
+  // resolver that asked anyway would link to it and fail here. The one user
+  // read that remains is the placeholder's collision check, by the address
+  // being minted.
   const db = fakeDb({
     ssoProvider: [{ ...PROVIDER, auto_provision: true }],
     user: [{ id: "u-anyone", email: "alice-username", role: "user" }],
   });
-  assertEquals(
-    await resolve(input({ verifiedIdTokenClaims: { sub: "sub-1" } }), db),
-    { action: "reject", code: "upstream_email_unusable" },
-  );
-  assertEquals(db.reads, ["ssoProvider:id=logto", "account:providerId=logto,accountId=sub-1"]);
+  const userId = linkedId(await resolve(input({ verifiedIdTokenClaims: { sub: "sub-1" } }), db));
+  assertEquals(userId === "u-anyone", false);
+  assertEquals(db.reads.slice(0, 2), [
+    "ssoProvider:id=logto",
+    "account:providerId=logto,accountId=sub-1",
+  ]);
+  for (const read of db.reads.slice(2)) assertEquals(read, "user:email=sub-1@d2e.local");
 });
 
 Deno.test("a first-time identity with an unverified address never links", async () => {
@@ -823,64 +850,92 @@ Deno.test("a first-time identity with no matching user and no auto-provision is 
   );
 });
 
-Deno.test("auto-provision returns continue only when the engine will store the judged address", async () => {
-  // continue hands the write to handleOAuthUserInfo, which uses
-  // providerUser.email — mapping.email's value. It is safe exactly when that
-  // value IS the address this function judged, which is the case a provider
-  // whose claim_map.email names a real address claim produces.
+Deno.test("auto-provision creates the user itself and links the identity to it", async () => {
+  // Written through the adapter it was handed — the callback's transaction —
+  // and returned as a link, so the plugin attaches the account to this row
+  // instead of creating one of its own from providerUser.
   const db = fakeDb({ ssoProvider: [{ ...PROVIDER, auto_provision: true }], user: [] });
+  const result = await resolve(
+    input({
+      providerUser: { email: "Alice@Allowed.test", emailVerified: false, name: "Alice" },
+      verifiedIdTokenClaims: { sub: "sub-1", email: "Alice@Allowed.test", email_verified: true },
+    }),
+    db,
+  );
+  assertEquals(db.created.length, 1);
+  const row = db.created[0];
+  assertEquals(linkedId(result), row.id);
   assertEquals(
-    await resolve(
-      input({
-        providerUser: { email: "Alice@Allowed.test", emailVerified: false, name: "Alice" },
-        verifiedIdTokenClaims: { sub: "sub-1", email: "alice@allowed.test", email_verified: true },
-      }),
-      db,
-    ),
-    { action: "continue" },
+    {
+      email: row.email,
+      emailVerified: row.emailVerified,
+      is_placeholder_email: row.is_placeholder_email,
+      role: row.role,
+      name: row.name,
+      confirmed: row.email_confirmed_at instanceof Date,
+    },
+    {
+      // Lower-cased, as Better Auth's createUser stores it and as findCandidate
+      // will look it up on the next first-time identity asserting it.
+      email: "alice@allowed.test",
+      emailVerified: true,
+      is_placeholder_email: false,
+      role: "user",
+      name: "Alice",
+      confirmed: true,
+    },
   );
 });
 
-Deno.test("auto-provision refuses when the engine would store the mapped claim", async () => {
-  // The defect this guard closes, measured on a real database before it
-  // existed: with claim_map {"email":"username"} the created row was
-  // email = 'alice', is_placeholder_email = false — a bare username in a
-  // UNIQUE NOT NULL address column, flagged as a legitimate link candidate,
-  // which is the row V17 spent a migration eliminating.
+Deno.test("the provisioned user's id is not the upstream subject", async () => {
+  // Subjects are unique per provider only; two connectors issuing the same one
+  // would otherwise collide on the primary key, and the second person would
+  // get a 500 on every sign-in.
   const db = fakeDb({ ssoProvider: [{ ...PROVIDER, auto_provision: true }], user: [] });
-  assertEquals(
-    await resolve(
-      input({
-        providerUser: { email: "alice-username", emailVerified: false, name: "Alice" },
-        verifiedIdTokenClaims: { sub: "sub-1", email: "alice@allowed.test", email_verified: true },
-      }),
-      db,
-    ),
-    { action: "reject", code: "upstream_email_unusable" },
+  const result = await resolve(
+    input({
+      verifiedIdTokenClaims: { sub: "sub-1", email: "alice@allowed.test", email_verified: true },
+    }),
+    db,
   );
+  assertEquals(linkedId(result) === "sub-1", false);
 });
 
-Deno.test("the address checks are not vacuous: a judged address is not enough", async () => {
-  // The sharper half. Here the allowlist AND isEngineAddressable both passed,
-  // on a real verified address the id_token carries — and Better Auth would
-  // still have written 'alice'. So every check above this branch is vacuous
-  // unless the value the engine stores is the value that was checked. Hence
-  // equality, not mere addressability: a mapping naming some OTHER
-  // address-shaped claim would store an address the allowlist never saw.
+Deno.test("auto-provision stores the judged address, never the mapped claim", async () => {
+  // The defect the old refusal closed, measured on a real database: with
+  // claim_map {"email":"username"} the plugin created email = 'alice',
+  // is_placeholder_email = false — a bare username in a UNIQUE NOT NULL
+  // address column, flagged as a legitimate link candidate, which is the row
+  // V17 spent a migration eliminating. Provisioning here writes the address
+  // the policy judged instead, so the mapped claim never reaches the row.
+  const db = fakeDb({ ssoProvider: [{ ...PROVIDER, auto_provision: true }], user: [] });
+  await resolve(
+    input({
+      providerUser: { email: "alice-username", emailVerified: false, name: "Alice" },
+      verifiedIdTokenClaims: { sub: "sub-1", email: "alice@allowed.test", email_verified: true },
+    }),
+    db,
+  );
+  assertEquals(db.created.map((r) => r.email), ["alice@allowed.test"]);
+});
+
+Deno.test("the address checks are not vacuous: the stored address is the allowlisted one", async () => {
+  // The sharper half. The allowlist AND isEngineAddressable passed on the
+  // verified address the id_token carries, while the mapping named some other
+  // address-shaped claim. Better Auth would have stored that other address,
+  // which no check ever saw; the row has to hold the one that was checked.
   const db = fakeDb({
     ssoProvider: [{ ...PROVIDER, auto_provision: true, email_domain_allowlist: ["allowed.test"] }],
     user: [],
   });
-  assertEquals(
-    await resolve(
-      input({
-        providerUser: { email: "elsewhere@other.test", emailVerified: false, name: "Alice" },
-        verifiedIdTokenClaims: { sub: "sub-1", email: "alice@allowed.test", email_verified: true },
-      }),
-      db,
-    ),
-    { action: "reject", code: "upstream_email_unusable" },
+  await resolve(
+    input({
+      providerUser: { email: "elsewhere@other.test", emailVerified: false, name: "Alice" },
+      verifiedIdTokenClaims: { sub: "sub-1", email: "alice@allowed.test", email_verified: true },
+    }),
+    db,
   );
+  assertEquals(db.created.map((r) => r.email), ["alice@allowed.test"]);
 });
 
 Deno.test("auto-provision still refuses an address the engine cannot serve", async () => {
@@ -899,17 +954,45 @@ Deno.test("auto-provision still refuses an address the engine cannot serve", asy
   );
 });
 
-Deno.test("an address-less identity is never provisioned through the plugin", async () => {
-  // decideLink's address-less branch means "provision a synthesised
-  // placeholder", which is provisionUser's job and something the plugin cannot
-  // do: is_placeholder_email is declared `input: false`, so a row created
-  // through the adapter would be written unflagged — an unclaimable address
-  // that is nonetheless a link candidate. Refused on both settings of
-  // auto_provision, for two different reasons, and the codes say which.
+Deno.test("an address-less identity is provisioned under a flagged placeholder", async () => {
+  // The username-only connectors (physionet and the like) this path exists
+  // for. The row carries <slug>@d2e.local and is_placeholder_email, which is
+  // what keeps findCandidate from ever treating the address as a claim, and
+  // it is never confirmed: nobody asserted it.
   const off = fakeDb({ ssoProvider: [PROVIDER] });
   assertEquals(await resolve(input(), off), { action: "reject", code: "no_account" });
+  assertEquals(off.created, []);
+
   const on = fakeDb({ ssoProvider: [{ ...PROVIDER, auto_provision: true }] });
-  assertEquals(await resolve(input(), on), { action: "reject", code: "upstream_email_unusable" });
+  const result = await resolve(input(), on);
+  assertEquals(on.created.length, 1);
+  const row = on.created[0];
+  assertEquals(linkedId(result), row.id);
+  assertEquals(
+    {
+      email: row.email,
+      is_placeholder_email: row.is_placeholder_email,
+      emailVerified: row.emailVerified,
+      email_confirmed_at: row.email_confirmed_at,
+    },
+    {
+      email: "sub-1@d2e.local",
+      is_placeholder_email: true,
+      emailVerified: false,
+      email_confirmed_at: null,
+    },
+  );
+});
+
+Deno.test("a placeholder slug already held falls back to the new user's id", async () => {
+  // Two subjects can slugify to the same local part. The second gets an
+  // address from its own id rather than the first one's row.
+  const on = fakeDb({
+    ssoProvider: [{ ...PROVIDER, auto_provision: true }],
+    user: [{ id: "u-first", email: "sub-1@d2e.local", is_placeholder_email: true, role: "user" }],
+  });
+  const result = await resolve(input(), on);
+  assertEquals(on.created.map((r) => r.email), [`${linkedId(result)}@d2e.local`]);
 });
 
 Deno.test("auto_provision that is not exactly true is off", async () => {
@@ -1300,6 +1383,98 @@ dbTest("an upstream address in another case still resolves through the real adap
     assertEquals(await signIn(stored), { action: "link", userId: uid, profile: "preserve" });
   } finally {
     await pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [uid]);
+    await pool.query(`DELETE FROM trexdb.sso_provider WHERE id = $1`, [id]);
+  }
+});
+
+dbTest("a first-time address-less identity is provisioned through the real adapter, flag and all", async ({ auth, pool }) => {
+  // The claim the in-transaction provisioning rests on: is_placeholder_email
+  // is declared `input: false`, and that is enforced by the public endpoints'
+  // input parsing, not by the adapter's create. If the adapter dropped it, the
+  // row would hold an unclaimable address that is nonetheless a link
+  // candidate — so this is shown against the real adapter, not the fake.
+  const id = slug();
+  const sub = slug();
+  await seedProvider(pool, id, { auto_provision: true });
+  let userId: string | undefined;
+  try {
+    const ctx = await auth.$context;
+    const result = await resolveSsoUser!(
+      input({
+        providerId: id,
+        providerReference: {
+          providerId: id,
+          source: { type: "persisted", recordId: id },
+          authenticationConfigurationFingerprint: "fp",
+        },
+        accountKey: { issuer: "https://up.test/oidc", accountId: sub },
+        providerUser: { email: "alice-username", emailVerified: false, name: "Alice" },
+        verifiedIdTokenClaims: { sub },
+      }),
+      // deno-lint-ignore no-explicit-any
+      { database: ctx.adapter as any },
+    );
+    if (result.action !== "link") throw new Error(`expected a link, got ${JSON.stringify(result)}`);
+    userId = result.userId;
+    const { rows } = await pool.query(
+      `SELECT email, "emailVerified", email_confirmed_at, role, is_placeholder_email, name
+         FROM trexdb."user" WHERE id = $1`,
+      [userId],
+    );
+    assertEquals(rows, [{
+      email: `${sub}@d2e.local`,
+      emailVerified: false,
+      email_confirmed_at: null,
+      role: "user",
+      is_placeholder_email: true,
+      name: "Alice",
+    }]);
+  } finally {
+    if (userId) await pool.query(`DELETE FROM trexdb."user" WHERE id = $1`, [userId]);
+    await pool.query(`DELETE FROM trexdb.sso_provider WHERE id = $1`, [id]);
+  }
+});
+
+dbTest("a provisioned user rolls back with the sign-in that created it", async ({ auth, pool }) => {
+  // The plugin runs resolveUser, the account write and the session in one
+  // transaction. A failure after the resolver must not leave the user behind:
+  // an address-less leftover would match nothing on the retry, and the retry
+  // would mint a second account beside it.
+  const id = slug();
+  const sub = slug();
+  await seedProvider(pool, id, { auto_provision: true });
+  try {
+    const ctx = await auth.$context;
+    await assertRejects(
+      () =>
+        ctx.adapter.transaction(async (trx) => {
+          const result = await resolveSsoUser!(
+            input({
+              providerId: id,
+              providerReference: {
+                providerId: id,
+                source: { type: "persisted", recordId: id },
+                authenticationConfigurationFingerprint: "fp",
+              },
+              accountKey: { issuer: "https://up.test/oidc", accountId: sub },
+              verifiedIdTokenClaims: { sub },
+            }),
+            // deno-lint-ignore no-explicit-any
+            { database: trx as any },
+          );
+          assertEquals(result.action, "link");
+          throw new Error("account write failed after the resolver");
+        }),
+      Error,
+      "account write failed after the resolver",
+    );
+    const { rows } = await pool.query(
+      `SELECT id FROM trexdb."user" WHERE email = $1`,
+      [`${sub}@d2e.local`],
+    );
+    assertEquals(rows, []);
+  } finally {
+    await pool.query(`DELETE FROM trexdb."user" WHERE email = $1`, [`${sub}@d2e.local`]);
     await pool.query(`DELETE FROM trexdb.sso_provider WHERE id = $1`, [id]);
   }
 });

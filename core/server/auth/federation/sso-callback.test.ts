@@ -376,39 +376,51 @@ dbTest("a banned user cannot sign in through the link they already have", async 
   }
 });
 
-// ── The provision guard, measured rather than argued ────────────────────────
+// ── Auto-provision, measured rather than argued ─────────────────────────────
 
-dbTest("auto-provision cannot write a mapped username into the address column", async (l) => {
-  // Measured before the guard existed: this created a row with
-  // email = 'alice', is_placeholder_email = false — a bare username in a
+/** The trex user each account of this provider is linked to. */
+async function linkedUsers(pool: Pg, providerId: string) {
+  const { rows } = await pool.query(
+    `SELECT u.email, u.is_placeholder_email, u."emailVerified"
+       FROM trexdb.account a JOIN trexdb."user" u ON u.id = a."userId"
+      WHERE a."providerId" = $1`,
+    [providerId],
+  );
+  return rows;
+}
+
+dbTest("auto-provision never writes a mapped username into the address column", async (l) => {
+  // Measured before the resolver owned the write: the plugin created a row
+  // with email = 'alice', is_placeholder_email = false — a bare username in a
   // UNIQUE NOT NULL address column, flagged as a legitimate link candidate,
-  // exactly the shape V17 spent a migration eliminating. The assertion is on
-  // the table, not on the redirect, because the row is the damage.
+  // exactly the shape V17 spent a migration eliminating. Now the sign-in
+  // succeeds and the row carries a flagged placeholder instead. The assertion
+  // is on the table, not only on the redirect, because the row is the damage.
   const id = slug();
   const sub = `${id}-subject`;
   const up = await startUpstream(() => ({ sub, username: "alice" }));
   try {
     await seedProvider(l, id, up.origin, { auto_provision: true });
     const out = await signIn(engineTrusting(l.auth, up.origin), l.auth.options.baseURL, id);
-    assertEquals(out.error, "upstream_email_unusable");
+    assertEquals({ error: out.error, status: out.status }, { error: null, status: 302 });
     assertEquals(await usersMatching(l.pool, "alice"), []);
-    const { rows } = await l.pool.query(
-      `SELECT count(*)::int AS n FROM trexdb.account WHERE "providerId" = $1`,
-      [id],
-    );
-    assertEquals(rows[0].n, 0);
+    assertEquals(await linkedUsers(l.pool, id), [{
+      email: `${sub}@d2e.local`,
+      is_placeholder_email: true,
+      emailVerified: false,
+    }]);
   } finally {
     await cleanUp(l.pool, id);
     await up.close();
   }
 });
 
-dbTest("a judged address does not license writing a different one", async (l) => {
-  // The sharper half, and the reason the guard is an equality rather than an
-  // addressability test. Here the id_token carries a real, verified address
-  // inside the allowlist — so the allowlist passed, and isEngineAddressable
-  // passed, on `real@allowed.test`. Before the guard, 'alice' is what got
-  // written. Every address check in the resolver was vacuous.
+dbTest("a judged address is the one written, not the mapped claim", async (l) => {
+  // The sharper half. The id_token carries a real, verified address inside the
+  // allowlist, so the allowlist and isEngineAddressable passed on
+  // `real@allowed.test` — and when the plugin did the write, 'alice' is what
+  // got stored, which made every address check in the resolver vacuous. The
+  // row has to hold the address that was checked.
   const id = slug();
   const sub = `${id}-subject`;
   const up = await startUpstream(() => ({
@@ -423,9 +435,13 @@ dbTest("a judged address does not license writing a different one", async (l) =>
       email_domain_allowlist: ["allowed.test"],
     });
     const out = await signIn(engineTrusting(l.auth, up.origin), l.auth.options.baseURL, id);
-    assertEquals(out.error, "upstream_email_unusable");
+    assertEquals({ error: out.error, status: out.status }, { error: null, status: 302 });
     assertEquals(await usersMatching(l.pool, "alice"), []);
-    assertEquals(await usersMatching(l.pool, "real@allowed.test"), []);
+    assertEquals(await linkedUsers(l.pool, id), [{
+      email: "real@allowed.test",
+      is_placeholder_email: false,
+      emailVerified: true,
+    }]);
   } finally {
     await cleanUp(l.pool, id);
     await up.close();

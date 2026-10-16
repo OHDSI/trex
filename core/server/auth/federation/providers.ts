@@ -8,8 +8,9 @@
 // which make the same decisions in the same order through Better Auth's
 // adapter. What stays is what still has a live caller: provisionUser and
 // upsertAccount for the federation ADMIN link (admin-store.ts), findLinkedUser
-// for the same, and readAccountTokens, which is the only sanctioned reader of
-// the three ciphertext token columns.
+// for the same, provisionUserWith for sign-in auto-provision (resolve-user.ts),
+// and readAccountTokens, which is the only sanctioned reader of the three
+// ciphertext token columns.
 import { decryptWithDek, encryptWithDek } from "../dek.ts";
 import { isPlaceholderAddress, PLACEHOLDER_EMAIL_DOMAIN } from "../engine-address.ts";
 // Re-exported: the domain and the predicate moved beside the engine-address
@@ -160,23 +161,10 @@ function isSeparator(character: string): boolean {
  * resolved in anyone's favour.
  */
 async function synthesisePlaceholderEmail(
-  client: PgClient,
+  taken: (address: string) => Promise<boolean>,
   subject: string,
   userId: string,
 ): Promise<string> {
-  const taken = async (address: string): Promise<boolean> => {
-    // Case-insensitively, matching V16's user_email_lower_key: an address that
-    // differs from a real one only in case is a lookalike, and handing one out
-    // is the thing this whole path exists to avoid. Asking the same way the
-    // index does means this refuses before the INSERT rather than after it,
-    // with an error naming the address instead of a constraint name.
-    const { rows } = await client.query(
-      `SELECT 1 FROM trexdb."user" WHERE lower(email) = $1 LIMIT 1`,
-      [address],
-    );
-    return rows.length > 0;
-  };
-
   // The id is the only identifier guaranteed distinct, so it is the backbone
   // of the scheme rather than merely a fallback: without a usable one there is
   // nothing left to fall back to.
@@ -249,42 +237,93 @@ async function synthesisePlaceholderEmail(
  * lookup second, so a re-run finds the rows it created however they are
  * flagged; only the sign-in path here excludes them, which is the whole point.
  */
-export async function provisionUser(
+export function provisionUser(
   client: PgClient,
   identity: UpstreamIdentity,
   // Only the admin link path passes an id: a migrated user keeps the id it had
   // at its previous identity provider, because that is its token `sub`.
   opts: { id?: string } = {},
 ): Promise<string> {
+  return provisionUserWith(pgUserWriter(client), identity, opts);
+}
+
+/** The new user row provisionUser decides on; how it is stored is the writer's. */
+export interface NewUserRow {
+  id: string;
+  name: string;
+  email: string;
+  /** Also decides email_confirmed_at: a placeholder is never confirmed. */
+  emailVerified: boolean;
+  isPlaceholderEmail: boolean;
+}
+
+/**
+ * Where provisionUser reads and writes. Two implementations, one rule: the
+ * admin link path writes through its own pg client (pgUserWriter), and the
+ * sign-in resolver writes through Better Auth's adapter so the row commits or
+ * rolls back with the account and session the same callback creates
+ * (resolve-user.ts). Everything that decides what the row holds — the
+ * placeholder scheme, its collision rule, the flag — stays in
+ * provisionUserWith, so there is still only one provisioning policy.
+ */
+export interface UserWriter {
+  /** Whether any user already holds this address, compared as V16's index does. */
+  emailTaken(address: string): Promise<boolean>;
+  insert(row: NewUserRow): Promise<void>;
+}
+
+function pgUserWriter(client: PgClient): UserWriter {
+  return {
+    emailTaken: async (address) => {
+      // Case-insensitively, matching V16's user_email_lower_key: an address that
+      // differs from a real one only in case is a lookalike, and handing one out
+      // is the thing this whole path exists to avoid. Asking the same way the
+      // index does means this refuses before the INSERT rather than after it,
+      // with an error naming the address instead of a constraint name.
+      const { rows } = await client.query(
+        `SELECT 1 FROM trexdb."user" WHERE lower(email) = $1 LIMIT 1`,
+        [address],
+      );
+      return rows.length > 0;
+    },
+    insert: async (row) => {
+      await client.query(
+        `INSERT INTO trexdb."user" (id, name, email, "emailVerified", email_confirmed_at, role,
+                                    is_placeholder_email)
+         VALUES ($1, $2, $3, $4::boolean, CASE WHEN $4::boolean THEN NOW() END, 'user', $5::boolean)`,
+        [row.id, row.name, row.email, row.emailVerified, row.isPlaceholderEmail],
+      );
+    },
+  };
+}
+
+export async function provisionUserWith(
+  writer: UserWriter,
+  identity: UpstreamIdentity,
+  opts: { id?: string } = {},
+): Promise<string> {
   const id = opts.id ?? crypto.randomUUID();
-  const placeholder = identity.email === null
-    ? await synthesisePlaceholderEmail(client, identity.sub, id)
-    : null;
-  const address = placeholder ?? identity.email;
+  const address = identity.email ??
+    await synthesisePlaceholderEmail((a) => writer.emailTaken(a), identity.sub, id);
   // Two ways to be a placeholder, and the row must not be able to tell them
   // apart: one this function synthesised because the identity asserted no
   // address, and one the caller supplied that is in the placeholder domain
   // anyway. The second is how a migration with nothing to give writes 66 rows
   // (see isPlaceholderAddress), and before this it wrote them as genuine.
-  const synthetic = placeholder !== null || isPlaceholderAddress(address);
-  await client.query(
-    // A placeholder was asserted by nobody, so it is never confirmed. That is a
-    // true statement about the row and not a protection: see the note above for
-    // what the link path does and does not read.
-    `INSERT INTO trexdb."user" (id, name, email, "emailVerified", email_confirmed_at, role,
-                                is_placeholder_email)
-     VALUES ($1, $2, $3, $4::boolean, CASE WHEN $4::boolean THEN NOW() END, 'user', $5::boolean)`,
+  const synthetic = identity.email === null || isPlaceholderAddress(address);
+  // A placeholder was asserted by nobody, so it is never confirmed. That is a
+  // true statement about the row and not a protection: see the note above for
+  // what the link path does and does not read.
+  await writer.insert({
+    id,
     // The subject is the last fallback for the name: a row has to be
     // identifiable in an administrator's list even with neither name nor
     // address.
-    [
-      id,
-      identity.name ?? identity.email ?? identity.sub,
-      address,
-      !synthetic,
-      synthetic,
-    ],
-  );
+    name: identity.name ?? identity.email ?? identity.sub,
+    email: address,
+    emailVerified: !synthetic,
+    isPlaceholderEmail: synthetic,
+  });
   return id;
 }
 
