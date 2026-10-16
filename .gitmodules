@@ -10,7 +10,7 @@
 [submodule "plugins/runtime/trex-runtime"]
 	path = plugins/runtime/trex-runtime
 	url = https://github.com/OHDSI/trex-runtime.git
-	branch = main
+	branch = develop
 [submodule "plugins/storage/supabase-storage"]
 	path = plugins/storage/supabase-storage
 	url = https://github.com/p-hoffmann/storage.git
