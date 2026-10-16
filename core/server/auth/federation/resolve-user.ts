@@ -34,7 +34,8 @@ import type {
 import { decideLink, normaliseDomains } from "./link.ts";
 import type { ExistingUser } from "./link.ts";
 import type { UpstreamIdentity } from "./types.ts";
-import { provisionUser } from "./providers.ts";
+import { provisionUserWith } from "./providers.ts";
+import type { UserWriter } from "./providers.ts";
 
 const reject = (code: string): SSOUserResolution => ({ action: "reject", code });
 
@@ -246,30 +247,80 @@ export const resolveSsoUser = async (
     return { action: "link", userId: decision.userId, profile: "preserve" };
   }
 
-  // decideLink says "provision". Provision through `provisionUser` rather than
-  // letting the plugin do it: provisionUser OWNS the address — it writes
-  // identity.email, or synthesises <slug>@d2e.local with is_placeholder_email
-  // set when the upstream asserted none — whereas the plugin's
-  // handleOAuthUserInfo would create the user with `providerUser.email`, which
-  // is whatever mapping.email selected and NOT the address this function judged.
+  // decideLink says "provision", and the row is written here rather than by
+  // the plugin. handleOAuthUserInfo would create the user with
+  // `providerUser.email`, which is whatever mapping.email selected and NOT the
+  // address this function judged. Measured on a real database: with
+  // auto_provision on and claim_map {"email":"username"} the plugin path wrote
+  // email = 'alice', is_placeholder_email = false — a bare username in a UNIQUE
+  // NOT NULL address column, flagged as a legitimate link candidate, which is
+  // precisely the row V17 spent a migration eliminating; and where the id_token
+  // ALSO carried a real verified address, the allowlist and
+  // isEngineAddressable both passed on that address and 'alice' was still what
+  // got written. provisionUserWith owns the address instead: identity.email,
+  // or a synthesised <slug>@d2e.local flagged is_placeholder_email when the
+  // upstream asserted none — the same policy the admin link path provisions
+  // under, so there is still one provisioning path, with two writers.
   //
-  // Measured on a real database: with auto_provision on and
-  // claim_map {"email":"username"}, the plugin path writes email = 'alice',
-  // is_placeholder_email = false — a bare username in a UNIQUE NOT NULL address
-  // column, flagged as a legitimate link candidate, which is precisely the row
-  // V17 spent a migration eliminating. Worse, where the id_token ALSO carries a
-  // real verified address, the allowlist and isEngineAddressable both passed on
-  // that address and 'alice' was still what got written. Routing through
-  // provisionUser sidesteps that: the engine stores the address the policy saw.
+  // Written through context.database, which is the callback's own transaction
+  // (runWithTransaction around resolveUser, the account write and the session,
+  // @better-auth/sso dist/index.mjs:3960-4019). A user written on a separate
+  // connection would survive a rollback later in the callback with no account
+  // pointing at it; for an address-less identity nothing would ever match it
+  // again, and the retry would collide with its own leftover placeholder on
+  // every sign-in after. Through the adapter the row commits with the account
+  // or not at all. `input: false` on is_placeholder_email does not stand in the
+  // way: it is enforced by the public endpoints' input parsing
+  // (better-auth dist/db/schema.mjs parseInputData), not by the adapter's
+  // create, which writes every declared field.
   //
-  // Provision under the upstream subject (identity.sub) so the trex user id
-  // equals the token `sub` — the key role assignment and usermgmt linkage are
-  // keyed by downstream. Any decision other than "provision" is refused as
-  // before; pre-linked identities never reach this branch.
-  if (decision.action === "provision") {
-    const { pool } = await import("../../db.ts");
-    const userId = await provisionUser(pool, identity, { id: identity.sub });
-    return { action: "link", userId, profile: "preserve" };
-  }
-  return reject("upstream_email_unusable");
+  // A fresh id, not the upstream subject: subjects are unique per provider
+  // only, and the trex token's `sub` is the trex user id whatever its value, so
+  // nothing downstream needs the two to coincide. The address is stored
+  // lower-cased, as Better Auth's own createUser stores it and as findCandidate
+  // looks it up.
+  const userId = await provisionUserWith(adapterUserWriter(context.database), {
+    ...identity,
+    email: identity.email?.toLowerCase() ?? null,
+    name: nonEmpty(input.providerUser.name),
+  });
+  return { action: "link", userId, profile: "preserve" };
 };
+
+function nonEmpty(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+/**
+ * provisionUserWith's reads and writes, through the callback's adapter.
+ *
+ * The taken-check is an exact match on the lower-cased address, for the reason
+ * findCandidate gives: the adapter cannot say `lower(email) = $1`. Every
+ * address this path writes is already lower-case, and V16's unique index on
+ * lower(email) still refuses a mixed-case twin at insert — inside the
+ * transaction, so a refusal there costs one sign-in and leaves nothing behind.
+ */
+function adapterUserWriter(database: SSOUserResolutionContext["database"]): UserWriter {
+  return {
+    emailTaken: async (address) =>
+      (await database.findOne({
+        model: "user",
+        where: [{ field: "email", value: address.toLowerCase() }],
+      })) !== null,
+    insert: async (row) => {
+      await database.create({
+        model: "user",
+        forceAllowId: true,
+        data: {
+          id: row.id,
+          name: row.name,
+          email: row.email,
+          emailVerified: row.emailVerified,
+          email_confirmed_at: row.emailVerified ? new Date() : null,
+          role: "user",
+          is_placeholder_email: row.isPlaceholderEmail,
+        },
+      });
+    },
+  };
+}
