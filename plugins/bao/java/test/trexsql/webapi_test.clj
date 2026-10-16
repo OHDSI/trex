@@ -223,3 +223,125 @@
   (testing "a non-parsed InputStream carrying JSON is forwarded verbatim, not re-encoded"
     (let [stream (java.io.ByteArrayInputStream. (.getBytes "{\"x\":1}"))]
       (is (= "{\"x\":1}" (#'webapi/normalize-proxy-body stream))))))
+
+;; Live-preview queue (cache/count, cache/inclusion): overlapping previews
+;; wait for a slot instead of failing with `session <n> busy`.
+
+(defn- preview-request
+  ([caller] (preview-request caller "src"))
+  ([caller source]
+   {:db :shared
+    :headers {"authorization" (str "Bearer " caller)}
+    :path-params {:source-key source}
+    :uri (str "/" source "/cache/count")}))
+
+(defn- run-concurrently
+  "Call (f i) from n threads at once; return the results."
+  [n f]
+  (->> (range n) (mapv (fn [i] (future (f i)))) (mapv deref)))
+
+(defn- tracking-handler
+  "Handler recording peak concurrency and the :db it was called with."
+  [active peak seen-dbs]
+  (fn [request]
+    (swap! peak max (swap! active inc))
+    (swap! seen-dbs conj (:db request))
+    (Thread/sleep 30)
+    (swap! active dec)
+    {:status 200}))
+
+(defmacro ^:private with-gate [[slots capacity] & body]
+  `(let [gate# (#'webapi/make-preview-gate ~slots ~capacity)]
+     (try
+       (with-redefs [webapi/preview-gate (delay gate#)]
+         ~@body)
+       (finally (.shutdownNow ^java.util.concurrent.ExecutorService (:executor gate#))))))
+
+(defn- await-true [pred]
+  (loop [n 0] (when (and (not (pred)) (< n 200)) (Thread/sleep 10) (recur (inc n)))))
+
+(deftest queued-preview-single-slot-test
+  (with-gate [1 64]
+    (let [active (atom 0) peak (atom 0) seen (atom [])
+          preview (#'webapi/queued-preview (tracking-handler active peak seen))]
+      (testing "by default previews run one at a time, and all succeed"
+        (is (every? #(= 200 (:status %)) (run-concurrently 6 #(preview (preview-request (str "u" %))))))
+        (is (= 1 @peak)))
+      (testing "on the shared handle, without opening sessions"
+        (is (every? #{:shared} @seen)))
+      (testing "no caller entries are left behind"
+        (is (empty? @@#'webapi/preview-latest))))))
+
+(deftest queued-preview-isolated-test
+  (with-gate [3 64]
+    (let [active (atom 0) peak (atom 0) seen (atom [])
+          preview (#'webapi/queued-preview (tracking-handler active peak seen))]
+      (with-redefs [trexsql.db/with-request-session (fn [_db f] (f :own-session))]
+        (testing "with more slots, at most that many run at once"
+          (is (every? #(= 200 (:status %)) (run-concurrently 9 #(preview (preview-request (str "u" %))))))
+          (is (<= 2 @peak 3)))
+        (testing "each on a session of its own"
+          (is (every? #{:own-session} @seen)))))))
+
+(deftest queued-preview-supersede-test
+  (with-gate [1 64]
+    (let [release (promise)
+          ran (atom [])
+          preview (#'webapi/queued-preview
+                    (fn [req]
+                      (swap! ran conj (get-in req [:headers "authorization"]))
+                      (when (= "Bearer blocker" (get-in req [:headers "authorization"])) @release)
+                      {:status 200}))
+          blocker (future (preview (preview-request "blocker")))
+          _ (await-true #(= ["Bearer blocker"] @ran))
+          older (future (preview (preview-request "u1")))
+          _ (Thread/sleep 50)
+          other-source (future (preview (preview-request "u1" "other")))
+          newer (future (preview (preview-request "u1")))]
+      (testing "a waiting preview is released at once when the same caller sends a newer one"
+        (is (= 409 (:status (deref older 2000 :still-waiting)))))
+      (deliver release true)
+      (testing "the newer one, the blocker and the other source still run"
+        (is (= 200 (:status @newer)))
+        (is (= 200 (:status @blocker)))
+        (is (= 200 (:status @other-source)))
+        (is (= 3 (count @ran))))
+      (testing "no caller entries are left behind"
+        (is (empty? @@#'webapi/preview-latest))))))
+
+(deftest queued-preview-bounds-test
+  (testing "a full queue is rejected at once"
+    (with-gate [1 1]
+      (let [release (promise)
+            started (promise)
+            preview (#'webapi/queued-preview (fn [_] (deliver started true) @release {:status 200}))
+            running (future (preview (preview-request "a")))
+            _ @started
+            queued (future (preview (preview-request "b")))
+            _ (Thread/sleep 50)]
+        (is (= 500 (:status (preview (preview-request "c")))))
+        (deliver release true)
+        (is (= 200 (:status @running)))
+        (is (= 200 (:status @queued))))))
+  (testing "no slot within the timeout -> 500, handler not run"
+    (with-gate [1 64]
+      (let [release (promise)
+            started (promise)
+            called (atom [])
+            preview (#'webapi/queued-preview
+                      (fn [req]
+                        (swap! called conj (:uri req))
+                        (deliver started true) @release {:status 200}))]
+        (with-redefs [webapi/preview-queue-timeout-ms 50]
+          (let [running (future (preview (preview-request "a")))]
+            @started
+            (is (= 500 (:status (preview (assoc (preview-request "b") :uri "/late")))))
+            (is (not-any? #{"/late"} @called))
+            (deliver release true)
+            (is (= 200 (:status @running))))))))
+  (testing "a throwing handler still frees its slot"
+    (with-gate [1 64]
+      (let [boom (#'webapi/queued-preview (fn [_] (throw (ex-info "boom" {}))))
+            ok (#'webapi/queued-preview (fn [_] {:status 200}))]
+        (is (= 500 (:status (boom (preview-request "a")))))
+        (is (= 200 (:status (deref (future (ok (preview-request "b"))) 2000 :stuck))))))))

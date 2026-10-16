@@ -14,6 +14,9 @@
             [clojure.tools.logging :as log]
             [reitit.ring :as ring])
   (:import [java.util HashMap ArrayList Map]
+           [java.util.concurrent Callable Future LinkedBlockingQueue RejectedExecutionException
+                                 ThreadFactory ThreadPoolExecutor TimeUnit]
+           [java.util.concurrent.atomic AtomicLong]
            [java.io File]
            [java.sql DriverManager Connection PreparedStatement ResultSet]))
 
@@ -968,6 +971,120 @@
    "cohort_rows"
    "final_cohort"])
 
+(defn- preview-max-concurrent
+  "TREXSQL_PREVIEW_MAX_CONCURRENT: how many live previews may run at once.
+   Default 1 (one at a time, on the shared WebAPI handle); at least 1."
+  ^long []
+  (let [raw (System/getenv "TREXSQL_PREVIEW_MAX_CONCURRENT")
+        n (try (Long/parseLong (str/trim (str raw))) (catch Exception _ 1))]
+    (max 1 n)))
+
+;; Live preview (cache/count, cache/inclusion) fires on every filter change.
+;; Previews used to run straight on the shared handle's single pool session,
+;; so any overlap failed with `session <n> busy`; with a class editing cohorts
+;; at once most previews failed. They now queue for one of
+;; TREXSQL_PREVIEW_MAX_CONCURRENT slots instead.
+;;
+;; With the default of one slot previews keep the single shared connection.
+;; More slots run each preview on a pool session of its own (see
+;; db/with-request-session) -- required, since circe's SQL uses fixed-name
+;; temp tables.
+;;
+;; A slot is a thread of `executor` parked until the request is done; the
+;; handler itself still runs on the request thread, so WebAPI's thread-bound
+;; state (JPA session, security context) is unchanged. The executor's queue
+;; gives arrival order and lets a waiting request be cancelled, which matters
+;; because the frontend's abort only cancels the browser fetch: a request the
+;; browser has already dropped would otherwise keep a request thread waiting
+;; for up to the timeout, and a few users editing quickly could tie up every
+;; WebAPI request thread. So a newer preview from the same caller for the same
+;; source and endpoint supersedes one still waiting (409, which nobody reads),
+;; and the queue is bounded.
+;;
+;; A delay so the env var is read and the threads made at runtime, not at
+;; native-image build time.
+(def ^:private preview-queue-capacity 64)
+
+(def ^:private preview-queue-timeout-ms 60000)
+
+(defn- make-preview-gate [^long slots ^long capacity]
+  (let [counter (AtomicLong.)
+        factory (reify ThreadFactory
+                  (newThread [_ r]
+                    (doto (Thread. ^Runnable r (str "trexsql-preview-slot-" (.incrementAndGet counter)))
+                      (.setDaemon true))))]
+    {:executor (ThreadPoolExecutor. (int slots) (int slots) 60 TimeUnit/SECONDS
+                                    (LinkedBlockingQueue. (int capacity))
+                                    ^ThreadFactory factory)
+     :isolate? (> slots 1)}))
+
+(def ^:private preview-gate
+  (delay (make-preview-gate (preview-max-concurrent) preview-queue-capacity)))
+
+;; caller key -> the entry of that caller's newest waiting/running preview
+(defonce ^:private preview-latest (atom {}))
+
+(defn- preview-caller-key
+  "Previews from the same caller for the same source and endpoint supersede
+   each other; nil (no Authorization header) never supersedes."
+  [request]
+  (when-let [auth (get-in request [:headers "authorization"])]
+    (when-not (str/blank? auth)
+      [auth (get-in request [:path-params :source-key]) (:uri request)])))
+
+(defn- supersede!
+  "Release a preview that is still waiting for its slot. `started` is the
+   race: whichever of slot-start and supersede delivers first wins, so a
+   preview that has already started is left alone."
+  [{:keys [started done ^Future fut ^ThreadPoolExecutor executor]}]
+  (deliver started ::superseded)
+  (when (= ::superseded @started)
+    (deliver done true)
+    (.cancel fut false)
+    ;; cancel alone leaves the dead task holding a queue place until a slot
+    ;; dequeues it
+    (.remove executor ^Runnable fut)))
+
+(defn- queued-preview
+  "Run a live-preview handler once a preview slot is free."
+  [handler]
+  (fn [request]
+    (let [{:keys [^ThreadPoolExecutor executor isolate?]} @preview-gate
+          started (promise)
+          done (promise)
+          ^Callable slot (fn [] (deliver started ::run) @done nil)
+          fut (try (.submit executor slot)
+                   (catch RejectedExecutionException _ nil))]
+      (if-not fut
+        (internal-error "Live preview queue is full")
+        (let [k (preview-caller-key request)
+              entry {:started started :done done :fut fut :executor executor}
+              [prev _] (when k (swap-vals! preview-latest assoc k entry))]
+          (when-let [old (get prev k)] (supersede! old))
+          (try
+            (let [state (deref started preview-queue-timeout-ms ::timeout)
+                  state (if (= ::timeout state)
+                          (do (deliver started ::timeout) @started)
+                          state)]
+              (case state
+                ::superseded (conflict "Superseded by a newer live preview")
+                ::timeout (internal-error (format "Live preview queue: no slot free within %ds"
+                                                  (quot (long preview-queue-timeout-ms) 1000)))
+                ::run (try
+                        (if isolate?
+                          (db/with-request-session (:db request)
+                            (fn [session-db] (handler (assoc request :db session-db))))
+                          (handler request))
+                        (catch Exception e
+                          (log/error e "Live preview failed")
+                          (internal-error (.getMessage e))))))
+            (finally
+              (deliver done true)
+              (.cancel ^Future fut false)
+              (.remove executor ^Runnable fut)
+              (when k
+                (swap! preview-latest (fn [m] (if (identical? entry (get m k)) (dissoc m k) m)))))))))))
+
 (defn- count-patients-handler
   [{:keys [db path-params body-params trex-config]}]
   (let [source-key (:source-key path-params)
@@ -1568,8 +1685,8 @@
         ["/cache" {:post {:handler create-cache-handler}
                    :delete {:handler delete-cache-handler}}]
         ["/cache/status" {:get {:handler get-cache-status-handler}}]
-        ["/cache/count" {:post {:handler count-patients-handler}}]
-        ["/cache/inclusion" {:post {:handler count-inclusion-handler}}]
+        ["/cache/count" {:post {:handler (queued-preview count-patients-handler)}}]
+        ["/cache/inclusion" {:post {:handler (queued-preview count-inclusion-handler)}}]
         ["/cache/table1" {:post {:handler table1-handler}}]
         ["/cache/job" {:delete {:handler cancel-cache-job-handler}}]
         ["/study/execute" {:post {:handler execute-study-handler}}]
