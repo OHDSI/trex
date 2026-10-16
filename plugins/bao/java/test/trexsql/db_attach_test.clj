@@ -76,3 +76,73 @@
                   (swap! attempts inc)
                   (throw (ex-info "ATTACH ...: session 20 busy" {}))))))
         (is (= 5 @attempts))))))
+
+;; Live preview (cache/count, cache/inclusion) runs circe's multi-statement SQL
+;; over fixed-name temp tables, so each request needs a session of its own
+;; rather than the WebAPI handle's shared one — see with-request-session.
+(defn- with-pool-property [value f]
+  (let [prev (System/getProperty "trexsql.use.pool")]
+    (if value
+      (System/setProperty "trexsql.use.pool" value)
+      (System/clearProperty "trexsql.use.pool"))
+    (try (f)
+         (finally
+           (if prev
+             (System/setProperty "trexsql.use.pool" prev)
+             (System/clearProperty "trexsql.use.pool"))))))
+
+(deftest with-request-session-pool-test
+  (let [base (db/make-database :base-handle {:k :v})
+        next-id (atom 0)
+        opened (atom [])
+        closed (atom [])]
+    (swap! (:extensions-loaded base) conj "circe")
+    (with-redefs [trexsql.native/open-pool-session
+                  (fn [] (let [h (keyword (str "session-" (swap! next-id inc)))]
+                           (swap! opened conj h)
+                           h))
+                  trexsql.native/close! (fn [h] (swap! closed conj h))]
+      (with-pool-property "true"
+        (fn []
+          (testing "each call runs on a fresh session handle, not the shared one"
+            (let [handles (->> (range 8)
+                               (mapv (fn [_] (future (db/with-request-session base :handle))))
+                               (mapv deref))]
+              (is (= 8 (count (distinct handles))))
+              (is (not-any? #{:base-handle} handles))))
+
+          (testing "every session is closed afterwards and the shared one never is"
+            (is (= (set @opened) (set @closed)))
+            (is (not-any? #{:base-handle} @closed))
+            (is (false? (db/closed? base))))
+
+          (testing "the session inherits config and the loaded-extension set"
+            (let [s (db/with-request-session base identity)]
+              (is (= {:k :v} (:config s)))
+              (is (db/extension-loaded? s "circe"))))
+
+          (testing "the session is closed when f throws, and the error propagates"
+            (reset! closed [])
+            (is (thrown-with-msg?
+                  clojure.lang.ExceptionInfo #"boom"
+                  (db/with-request-session base (fn [_] (throw (ex-info "boom" {}))))))
+            (is (= 1 (count @closed)))))))))
+
+(deftest with-request-session-standalone-test
+  (with-pool-property nil
+    (fn []
+      (let [base (db/make-database :base-handle {})
+            active (atom 0)
+            peak (atom 0)]
+        (testing "without the pool, calls reuse the shared db one at a time"
+          (->> (range 8)
+               (mapv (fn [_]
+                       (future
+                         (db/with-request-session base
+                           (fn [d]
+                             (is (identical? base d))
+                             (swap! peak max (swap! active inc))
+                             (Thread/sleep 20)
+                             (swap! active dec))))))
+               (run! deref))
+          (is (= 1 @peak)))))))

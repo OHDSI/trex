@@ -14,6 +14,7 @@
             [clojure.tools.logging :as log]
             [reitit.ring :as ring])
   (:import [java.util HashMap ArrayList Map]
+           [java.util.concurrent Semaphore TimeUnit]
            [java.io File]
            [java.sql DriverManager Connection PreparedStatement ResultSet]))
 
@@ -968,6 +969,55 @@
    "cohort_rows"
    "final_cohort"])
 
+(defn- preview-max-concurrent
+  "TREXSQL_PREVIEW_MAX_CONCURRENT: how many live previews may run at once.
+   Default 1 (one at a time, on the shared WebAPI handle); at least 1."
+  ^long []
+  (let [raw (System/getenv "TREXSQL_PREVIEW_MAX_CONCURRENT")
+        n (try (Long/parseLong (str/trim (str raw))) (catch Exception _ 1))]
+    (max 1 n)))
+
+;; Live preview (cache/count, cache/inclusion) fires on every filter change,
+;; and the frontend's abort only cancels the browser fetch -- the query keeps
+;; running here. Previews used to run straight on the shared handle's single
+;; pool session, so any overlap failed with `session <n> busy`; with a class
+;; editing cohorts at once most previews failed. They now queue for a slot,
+;; fairly in arrival order, so an overlap waits instead of failing.
+;;
+;; With the default of one slot previews keep the single shared connection.
+;; More slots run each preview on a pool session of its own (see
+;; db/with-request-session) -- required, since circe's SQL uses fixed-name
+;; temp tables -- and the cap keeps a burst of edits from holding a pool
+;; Connection each and starving pgwire.
+;;
+;; A delay so the env var is read and the semaphore built at runtime, not at
+;; native-image build time.
+(def ^:private preview-slots
+  (delay (let [n (preview-max-concurrent)]
+           {:semaphore (Semaphore. (int n) true)
+            :isolate? (> n 1)})))
+
+(def ^:private preview-queue-timeout-seconds 60)
+
+(defn- queued-preview
+  "Run a live-preview handler once a preview slot is free."
+  [handler]
+  (fn [request]
+    (let [{:keys [^Semaphore semaphore isolate?]} @preview-slots]
+      (if-not (.tryAcquire semaphore (long preview-queue-timeout-seconds) TimeUnit/SECONDS)
+        (internal-error (format "Live preview queue is full: no slot free within %ds"
+                                preview-queue-timeout-seconds))
+        (try
+          (if isolate?
+            (db/with-request-session (:db request)
+              (fn [session-db] (handler (assoc request :db session-db))))
+            (handler request))
+          (catch Exception e
+            (log/error e "Live preview failed")
+            (internal-error (.getMessage e)))
+          (finally
+            (.release semaphore)))))))
+
 (defn- count-patients-handler
   [{:keys [db path-params body-params trex-config]}]
   (let [source-key (:source-key path-params)
@@ -1568,8 +1618,8 @@
         ["/cache" {:post {:handler create-cache-handler}
                    :delete {:handler delete-cache-handler}}]
         ["/cache/status" {:get {:handler get-cache-status-handler}}]
-        ["/cache/count" {:post {:handler count-patients-handler}}]
-        ["/cache/inclusion" {:post {:handler count-inclusion-handler}}]
+        ["/cache/count" {:post {:handler (queued-preview count-patients-handler)}}]
+        ["/cache/inclusion" {:post {:handler (queued-preview count-inclusion-handler)}}]
         ["/cache/table1" {:post {:handler table1-handler}}]
         ["/cache/job" {:delete {:handler cancel-cache-job-handler}}]
         ["/study/execute" {:post {:handler execute-study-handler}}]

@@ -203,6 +203,40 @@
           (Thread/sleep (long delay-ms))
           (recur (inc attempt) (min (* delay-ms 2) 200)))))))
 
+(defn with-request-session
+  "Call (f session-db) on a pool session of its own, closed when f returns.
+
+   Retrying on `session <n> busy` is enough for a single ATTACH, but not for
+   the cohort live preview: circe's count/inclusion SQL is a multi-statement
+   run over fixed-name TEMP tables (`Codesets`, `qualified_events`, ...).
+   Sharing the WebAPI handle's one session means every preview request
+   overlapping another fails with `session <n> busy` -- with a class of users
+   editing cohorts at once, most previews fail -- and even if the statements
+   interleaved, two runs would read and drop each other's temp tables.
+
+   A session of its own gives the request its own Connection, hence its own
+   temp catalog; ATTACHed caches and LOADed extensions are instance-wide, so
+   they stay visible. Closing the session returns the Connection to the pool,
+   which drops whatever temp tables a failed run left behind. When the pool is
+   exhausted, acquiring waits (TREX_POOL_LEASE_TIMEOUT_MS) instead of failing.
+
+   Outside the trex pool (standalone JVM, own :memory: db) a new handle would
+   not see the attached cache, so requests are serialized on `db` instead."
+  [^TrexsqlDatabase db f]
+  (ensure-open! db)
+  (if (= "true" (System/getProperty "trexsql.use.pool"))
+    (let [session-db (map->TrexsqlDatabase
+                       {:handle (native/open-pool-session)
+                        :extensions-loaded (atom @(:extensions-loaded db))
+                        :config (:config db)
+                        :closed? (atom false)})]
+      (try
+        (f session-db)
+        (finally
+          (close! session-db))))
+    (locking db
+      (f db))))
+
 (defn attach-cache-file!
   "Attach a TrexSQL cache file. If the alias is already attached but the
    underlying file no longer exists (e.g. it was deleted on disk while the

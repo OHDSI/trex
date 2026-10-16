@@ -223,3 +223,60 @@
   (testing "a non-parsed InputStream carrying JSON is forwarded verbatim, not re-encoded"
     (let [stream (java.io.ByteArrayInputStream. (.getBytes "{\"x\":1}"))]
       (is (= "{\"x\":1}" (#'webapi/normalize-proxy-body stream))))))
+
+;; Live-preview queue (cache/count, cache/inclusion): overlapping previews
+;; wait for a slot instead of failing with `session <n> busy`.
+
+(defn- run-concurrently
+  "Call (f) from n threads at once; return the results."
+  [n f]
+  (->> (range n) (mapv (fn [_] (future (f)))) (mapv deref)))
+
+(defn- tracking-handler
+  "Handler recording peak concurrency and the :db it was called with."
+  [active peak seen-dbs]
+  (fn [request]
+    (swap! peak max (swap! active inc))
+    (swap! seen-dbs conj (:db request))
+    (Thread/sleep 30)
+    (swap! active dec)
+    {:status 200}))
+
+(deftest queued-preview-single-slot-test
+  (let [active (atom 0) peak (atom 0) seen (atom [])
+        preview (#'webapi/queued-preview (tracking-handler active peak seen))]
+    (with-redefs [webapi/preview-slots (delay {:semaphore (java.util.concurrent.Semaphore. 1 true)
+                                               :isolate? false})]
+      (testing "by default previews run one at a time, all succeed"
+        (is (every? #(= 200 (:status %)) (run-concurrently 6 #(preview {:db :shared}))))
+        (is (= 1 @peak)))
+      (testing "and on the shared handle, without opening sessions"
+        (is (every? #{:shared} @seen))))))
+
+(deftest queued-preview-isolated-test
+  (let [active (atom 0) peak (atom 0) seen (atom [])
+        preview (#'webapi/queued-preview (tracking-handler active peak seen))]
+    (with-redefs [webapi/preview-slots (delay {:semaphore (java.util.concurrent.Semaphore. 3 true)
+                                               :isolate? true})
+                  trexsql.db/with-request-session (fn [_db f] (f :own-session))]
+      (testing "with more slots, at most that many run at once"
+        (is (every? #(= 200 (:status %)) (run-concurrently 9 #(preview {:db :shared}))))
+        (is (<= 2 @peak 3)))
+      (testing "each on a session of its own"
+        (is (every? #{:own-session} @seen))))))
+
+(deftest queued-preview-timeout-and-release-test
+  (testing "no slot within the timeout -> 500, handler not run"
+    (let [called (atom false)
+          preview (#'webapi/queued-preview (fn [_] (reset! called true) {:status 200}))]
+      (with-redefs [webapi/preview-slots (delay {:semaphore (java.util.concurrent.Semaphore. 0 true)
+                                                 :isolate? false})
+                    webapi/preview-queue-timeout-seconds 0]
+        (is (= 500 (:status (preview {:db :shared}))))
+        (is (false? @called)))))
+  (testing "a throwing handler still releases its slot"
+    (let [sem (java.util.concurrent.Semaphore. 1 true)
+          preview (#'webapi/queued-preview (fn [_] (throw (ex-info "boom" {}))))]
+      (with-redefs [webapi/preview-slots (delay {:semaphore sem :isolate? false})]
+        (is (= 500 (:status (preview {:db :shared}))))
+        (is (= 1 (.availablePermits sem)))))))
