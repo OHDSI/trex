@@ -3,6 +3,7 @@
 // hand-rolled provider setups in devx (functions/agent.ts createModel) and
 // Pythia (sdk.cljs).
 import { createAnthropic } from "@ai-sdk/anthropic";
+import { createAzure } from "@ai-sdk/azure";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createAmazonBedrock } from "@ai-sdk/amazon-bedrock";
@@ -50,6 +51,19 @@ interface Creds {
 // deno-lint-ignore no-explicit-any
 function buildModel(provider: string, modelId: string, creds: Creds, env: EnvFn): any {
   switch (provider) {
+    case "azure": {
+      const baseURL = creds.baseURL ?? env("AZURE_OPENAI_API_ENDPOINT");
+      const resourceName = env("AZURE_OPENAI_API_INSTANCE_NAME");
+      const apiVersion = env("AZURE_OPENAI_API_VERSION");
+      const azure = createAzure({
+        apiKey: creds.apiKey ?? env("AZURE_OPENAI_API_KEY"),
+        ...(baseURL ? { baseURL } : {}),
+        ...(resourceName ? { resourceName } : {}),
+        ...(apiVersion ? { apiVersion } : {}),
+        useDeploymentBasedUrls: true,
+      });
+      return azure.chat(modelId);
+    }
     case "anthropic":
       return createAnthropic({
         apiKey: creds.apiKey ?? env("ANTHROPIC_API_KEY"),
