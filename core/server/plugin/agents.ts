@@ -52,6 +52,17 @@ const PASSTHROUGH_ENV = [
   "DATABASE_URL", "TREX_AGENTS_DEFAULT_MODEL",
   "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL",
   "GOOGLE_GENERATIVE_AI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "AWS_REGION",
+  // Bedrock with regular AWS credentials (SigV4) instead of a Bedrock API key.
+  "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+  // OpenAI models on AWS (bedrock-openai/): optional override of the
+  // bedrock-mantle endpoint derived from AWS_REGION.
+  "BEDROCK_OPENAI_BASE_URL",
+  // Azure OpenAI (azure/) and Anthropic models in Microsoft Foundry (azure-anthropic/).
+  "AZURE_RESOURCE_NAME", "AZURE_API_KEY", "AZURE_BASE_URL", "AZURE_API_VERSION",
+  "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_FOUNDRY_BASE_URL",
+  // Google Cloud Vertex AI (vertex/, vertex-anthropic/, vertex-maas/).
+  "GOOGLE_VERTEX_PROJECT", "GOOGLE_VERTEX_LOCATION", "GOOGLE_VERTEX_API_KEY",
+  "GOOGLE_VERTEX_CREDENTIALS", "GOOGLE_APPLICATION_CREDENTIALS",
   // OAuth broker (task-7): the worker needs the root key to unwrap the DEK
   // (token encryption-at-rest) and derive the signed-state HMAC secret. Absent
   // → the broker stays unwired and oauth connections are skipped (see
@@ -232,11 +243,16 @@ export async function buildAgentWorkerConfig(
     // google@^4 pull @ai-sdk/provider@4 (spec v4); streamText (ai@6) then
     // rejects such a model with "Unsupported model version v4" and the turn
     // dies silently. Keep them at ^3 to match core/server/deno.json. Bedrock's
-    // ^4.0.115 line still targets @ai-sdk/provider@3, so it stays at ^4.
+    // ^4.0.115 line still targets @ai-sdk/provider@3, so it stays at ^4; so do
+    // azure@^3 and google-vertex@^4 (google-vertex@^5 is the ai@7 line).
     "@ai-sdk/anthropic": "npm:@ai-sdk/anthropic@^3",
     "@ai-sdk/openai": "npm:@ai-sdk/openai@^3",
     "@ai-sdk/google": "npm:@ai-sdk/google@^3",
     "@ai-sdk/amazon-bedrock": "npm:@ai-sdk/amazon-bedrock@^4.0.115",
+    "@ai-sdk/azure": "npm:@ai-sdk/azure@^3.0.142",
+    "@ai-sdk/google-vertex": "npm:@ai-sdk/google-vertex@^4.0.220",
+    "@ai-sdk/google-vertex/anthropic": "npm:@ai-sdk/google-vertex@^4.0.220/anthropic",
+    "@ai-sdk/google-vertex/maas": "npm:@ai-sdk/google-vertex@^4.0.220/maas",
     "zod": "npm:zod@^4",
     "pg": "npm:pg",
     "edn-data": "npm:edn-data@^1",

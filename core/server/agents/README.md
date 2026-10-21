@@ -181,12 +181,22 @@ into the agent worker when set):
 | `anthropic` | `ANTHROPIC_API_KEY` | |
 | `openai` (default/fallback prefix) | `OPENAI_API_KEY`, `OPENAI_BASE_URL` | `OPENAI_BASE_URL` is optional, for OpenAI-compatible endpoints. |
 | `google` | `GOOGLE_GENERATIVE_AI_API_KEY` | |
-| `bedrock` | `AWS_BEARER_TOKEN_BEDROCK`, `AWS_REGION` | Bearer-token auth path (dummy static credentials bypass SigV4, a custom `fetch` injects the `Authorization` header) if `AWS_BEARER_TOKEN_BEDROCK` is set; `AWS_REGION` defaults to `us-east-1`. Also patches a `"."` text part into tool-use-only assistant messages, which Bedrock otherwise rejects. |
+| `bedrock` | `AWS_BEARER_TOKEN_BEDROCK`, `AWS_REGION`, or `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN`) | Bearer-token auth path (dummy static credentials bypass SigV4, a custom `fetch` injects the `Authorization` header) if `AWS_BEARER_TOKEN_BEDROCK` is set, else SigV4 with the access keys; `AWS_REGION` defaults to `us-east-1`. Also patches a `"."` text part into tool-use-only assistant messages, which Bedrock otherwise rejects. Anthropic models: `bedrock/us.anthropic.<model>`. |
+| `bedrock-openai` | `AWS_BEARER_TOKEN_BEDROCK`, `AWS_REGION`, optional `BEDROCK_OPENAI_BASE_URL` | OpenAI models on AWS (e.g. `bedrock-openai/openai.gpt-5.6-terra`). They are not on bedrock-runtime; this calls the `bedrock-mantle.<region>.api.aws/openai/v1` Responses API with the Bedrock API key. |
+| `azure` | `AZURE_RESOURCE_NAME` or `AZURE_BASE_URL`, `AZURE_API_KEY`, optional `AZURE_API_VERSION` | Azure OpenAI. The model id is the deployment name. |
+| `azure-anthropic` | `ANTHROPIC_FOUNDRY_RESOURCE` or `ANTHROPIC_FOUNDRY_BASE_URL`, `ANTHROPIC_FOUNDRY_API_KEY` | Anthropic models in Microsoft Foundry (`https://<resource>.services.ai.azure.com/anthropic/v1`). The model id is the deployment name. |
+| `vertex` | `GOOGLE_VERTEX_API_KEY` (express mode), or `GOOGLE_VERTEX_PROJECT` + `GOOGLE_VERTEX_LOCATION` with a service account | Gemini on Google Cloud Vertex AI. |
+| `vertex-anthropic` | `GOOGLE_VERTEX_PROJECT`, `GOOGLE_VERTEX_LOCATION`, service account | Anthropic models on Vertex AI. |
+| `vertex-maas` | `GOOGLE_VERTEX_PROJECT`, `GOOGLE_VERTEX_LOCATION`, service account | Partner/open models Vertex AI serves OpenAI-compatibly, e.g. `vertex-maas/openai/gpt-oss-120b-maas`. |
 | — | `TREX_AGENTS_DEFAULT_MODEL` | Fallback model string when `agent.ts`/`agent.edn` declares none. |
 | — | `DATABASE_URL` | Also forwarded; used by the agent runtime's own session store, not by tools directly. |
 
-Any provider prefix other than `anthropic`, `google`, or `bedrock` resolves through the OpenAI
-provider (so OpenAI-compatible gateways work by setting `OPENAI_BASE_URL`).
+Vertex service accounts: set `GOOGLE_VERTEX_CREDENTIALS` to the service-account JSON, or
+`GOOGLE_APPLICATION_CREDENTIALS` to a path readable by the worker; with neither,
+google-auth-library's own discovery applies (e.g. the GCE/GKE metadata server).
+
+Any provider prefix not listed above resolves through the OpenAI provider (so OpenAI-compatible
+gateways work by setting `OPENAI_BASE_URL`).
 
 Only the variables above are passed from the host environment into the worker — an agent's tools
 cannot read arbitrary host env vars.
