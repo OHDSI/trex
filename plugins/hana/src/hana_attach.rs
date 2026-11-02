@@ -228,11 +228,11 @@ pub struct HanaDetachScalar;
 impl VScalar for HanaDetachScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> { unsafe {
         if input.len() == 0 {
             return Err("No input provided".into());
         }
@@ -275,7 +275,7 @@ impl VScalar for HanaDetachScalar {
         let flat = output.flat_vector();
         flat.insert(0, &msg);
         Ok(())
-    }
+     }}
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(

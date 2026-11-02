@@ -116,11 +116,11 @@ pub struct HanaEvictSessionScalar;
 impl VScalar for HanaEvictSessionScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
         if input.len() == 0 {
             return Err("No input provided".into());
         }
@@ -139,7 +139,7 @@ impl VScalar for HanaEvictSessionScalar {
             flat_vector.insert(row, &format!("evicted {}", n));
         }
         Ok(())
-    }
+     }}
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(

@@ -361,11 +361,11 @@ pub struct HanaMaterializeCohortScalar;
 impl VScalar for HanaMaterializeCohortScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
         // This scalar performs side effects (streams rows into HANA) and writes a
         // single BIGINT result. It is only ever invoked with the constant scalar
         // arguments of a `SELECT trex_hana_materialize_cohort(...)`, i.e. one row.
@@ -404,7 +404,7 @@ impl VScalar for HanaMaterializeCohortScalar {
         let mut out = output.flat_vector();
         out.as_mut_slice::<i64>()[0] = processed;
         Ok(())
-    }
+     }}
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(

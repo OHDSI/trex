@@ -43,7 +43,7 @@ unsafe fn hana_scan_init_c_api_internal(
     access: *const ffi::duckdb_extension_access,
 ) -> Result<bool, Box<dyn Error>> {
     let have_api_struct =
-        ffi::duckdb_rs_extension_api_init(info, access, "v1.3.2").unwrap();
+        ffi::duckdb_rs_extension_api_init(info, access, "v1.5.6").unwrap();
 
     if !have_api_struct {
         return Ok(false);
