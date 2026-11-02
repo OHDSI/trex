@@ -75,11 +75,11 @@ struct FhirStartScalar;
 impl VScalar for FhirStartScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
         let host_vector = input.flat_vector(0);
         let port_vector = input.flat_vector(1);
 
@@ -130,7 +130,7 @@ impl VScalar for FhirStartScalar {
         let flat_vector = output.flat_vector();
         flat_vector.insert(0, &response);
         Ok(())
-    }
+     }}
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![
@@ -164,11 +164,11 @@ struct FhirStopScalar;
 impl VScalar for FhirStopScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
         let host_vector = input.flat_vector(0);
         let port_vector = input.flat_vector(1);
 
@@ -193,7 +193,7 @@ impl VScalar for FhirStopScalar {
         let flat_vector = output.flat_vector();
         flat_vector.insert(0, &response);
         Ok(())
-    }
+     }}
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(
@@ -281,17 +281,17 @@ struct FhirVersionScalar;
 impl VScalar for FhirVersionScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
         if input.len() > 0 {
             let flat_vector = output.flat_vector();
             flat_vector.insert(0, "fhir extension v0.1.0 (FHIR R4 4.0.1)");
         }
         Ok(())
-    }
+     }}
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(
