@@ -59,7 +59,7 @@ struct TrexVersionScalar;
 impl VScalar for TrexVersionScalar {
   type State = ();
 
-  unsafe fn invoke(
+  fn invoke(
     _state: &Self::State,
     input: &mut DataChunkHandle,
     output: &mut dyn WritableVector,
@@ -85,11 +85,13 @@ struct StartTrexServerScalar;
 impl VScalar for StartTrexServerScalar {
   type State = ();
 
-  unsafe fn invoke(
+  fn invoke(
     _state: &Self::State,
     input: &mut DataChunkHandle,
     output: &mut dyn WritableVector,
   ) -> Result<(), Box<dyn std::error::Error>> {
+    // SAFETY: vectors are sized to input.len() by DuckDB.
+    unsafe {
     let host_vector = input.flat_vector(0);
     let port_vector = input.flat_vector(1);
     let main_service_vector = input.flat_vector(2);
@@ -175,6 +177,7 @@ impl VScalar for StartTrexServerScalar {
     let flat_vector = output.flat_vector();
     flat_vector.insert(0, &response);
     Ok(())
+    }
   }
 
   fn signatures() -> Vec<ScalarFunctionSignature> {
@@ -195,11 +198,13 @@ struct StartTrexServerWithConfigScalar;
 impl VScalar for StartTrexServerWithConfigScalar {
   type State = ();
 
-  unsafe fn invoke(
+  fn invoke(
     _state: &Self::State,
     input: &mut DataChunkHandle,
     output: &mut dyn WritableVector,
   ) -> Result<(), Box<dyn std::error::Error>> {
+    // SAFETY: vectors are sized to input.len() by DuckDB.
+    unsafe {
     let config_vector = input.flat_vector(0);
     let config_slice = config_vector
       .as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
@@ -230,6 +235,7 @@ impl VScalar for StartTrexServerWithConfigScalar {
     let flat_vector = output.flat_vector();
     flat_vector.insert(0, &response);
     Ok(())
+    }
   }
 
   fn signatures() -> Vec<ScalarFunctionSignature> {
@@ -245,11 +251,13 @@ struct StopTrexServerScalar;
 impl VScalar for StopTrexServerScalar {
   type State = ();
 
-  unsafe fn invoke(
+  fn invoke(
     _state: &Self::State,
     input: &mut DataChunkHandle,
     output: &mut dyn WritableVector,
   ) -> Result<(), Box<dyn std::error::Error>> {
+    // SAFETY: vectors are sized to input.len() by DuckDB.
+    unsafe {
     let server_id_vector = input.flat_vector(0);
     let server_id_slice = server_id_vector
       .as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
@@ -270,6 +278,7 @@ impl VScalar for StopTrexServerScalar {
     let flat_vector = output.flat_vector();
     flat_vector.insert(0, &response);
     Ok(())
+    }
   }
 
   fn signatures() -> Vec<ScalarFunctionSignature> {
@@ -285,7 +294,7 @@ struct StopAllTrexServersScalar;
 impl VScalar for StopAllTrexServersScalar {
   type State = ();
 
-  unsafe fn invoke(
+  fn invoke(
     _state: &Self::State,
     _input: &mut DataChunkHandle,
     output: &mut dyn WritableVector,
@@ -441,11 +450,13 @@ struct TrexCreateBundleScalar;
 impl VScalar for TrexCreateBundleScalar {
   type State = ();
 
-  unsafe fn invoke(
+  fn invoke(
     _state: &Self::State,
     input: &mut DataChunkHandle,
     output: &mut dyn WritableVector,
   ) -> Result<(), Box<dyn std::error::Error>> {
+    // SAFETY: vectors are sized to input.len() by DuckDB.
+    unsafe {
     if input.is_empty() {
       return Err("No input provided".into());
     }
@@ -501,6 +512,7 @@ impl VScalar for TrexCreateBundleScalar {
     let flat_vector = output.flat_vector();
     flat_vector.insert(0, &response);
     Ok(())
+    }
   }
 
   fn signatures() -> Vec<ScalarFunctionSignature> {
@@ -526,7 +538,7 @@ impl VScalar for TrexCreateBundleScalar {
 /// # Safety
 ///
 /// Called by DuckDB via `duckdb_entrypoint_c_api`. The connection must be valid.
-#[duckdb_entrypoint_c_api(ext_name = "trexas")]
+#[duckdb_entrypoint_c_api(ext_name = "trexas", min_duckdb_version = "v1.5.6")]
 pub unsafe fn extension_entrypoint(
   con: Connection,
 ) -> Result<(), Box<dyn Error>> {
