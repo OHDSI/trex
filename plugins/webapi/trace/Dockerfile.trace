@@ -52,6 +52,8 @@ RUN --mount=type=cache,target=/root/.m2 \
 # Compile + run the trace driver under the native-image agent.
 COPY plugins/webapi/trace/TraceMain.java /trace/TraceMain.java
 ENV LD_LIBRARY_PATH=/usr/local/lib
+# Skip the engine's extension auto-install at startup.
+ENV TREX_EXTENSIONS=none
 RUN --mount=type=cache,target=/root/.m2 \
     CP="$(cat /tmp/cp.txt)" \
     && javac -cp "$CP" -d /trace /trace/TraceMain.java \

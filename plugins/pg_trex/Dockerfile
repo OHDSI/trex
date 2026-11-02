@@ -136,6 +136,8 @@ COPY --from=npm-deps /usr/lib/trexsql/extensions/ /usr/lib/trexsql/extensions/
 
 # ── DuckDB extensions (for both postgres user and root) ──
 ENV DUCKDB_VERSION=2.0.0
+# Skip the engine's extension auto-install at startup.
+ENV TREX_EXTENSIONS=none
 COPY --from=npm-deps /root/.duckdb/extensions/ /var/lib/postgresql/.duckdb/extensions/
 COPY --from=npm-deps /root/.duckdb/extensions/ /root/.duckdb/extensions/
 RUN chown -R postgres:postgres /var/lib/postgresql/.duckdb

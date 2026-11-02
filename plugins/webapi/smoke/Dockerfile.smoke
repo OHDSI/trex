@@ -50,6 +50,8 @@ COPY --from=engine /opt/trexsql/libtrexsql.so /usr/local/lib/
 COPY --from=engine /opt/trexsql/libtrexsql_engine.so /usr/local/lib/
 RUN ldconfig
 ENV LD_LIBRARY_PATH=/usr/local/lib
+# Skip the engine's extension auto-install at startup.
+ENV TREX_EXTENSIONS=none
 
 WORKDIR /app
 COPY out/out/libwebapi-native.so /app/libwebapi-native.so

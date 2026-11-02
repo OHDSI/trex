@@ -58,6 +58,8 @@ ENV TLS_CERT_PATH=""
 ENV TLS_KEY_PATH=""
 ENV TLS_PORT=9443
 ENV MAIN_PATH=/usr/src/main
+# Skip the engine's extension auto-install at startup.
+ENV TREX_EXTENSIONS=none
 
 EXPOSE 33001 5432 33000
 
