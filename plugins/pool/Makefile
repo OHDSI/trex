@@ -4,8 +4,8 @@ PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 EXTENSION_NAME=pool
 
-# DuckDB 2.0 loads a stable C_STRUCT extension with C API major != 2 as V1 (via _init_c_api);
-# the stable V1 C API at v1.5.6 covers everything that was unstable before.
+# DuckDB 2.0 loads stable-V1 (C_STRUCT, capi < 2) extensions via <name>_init_c_api;
+# pool's API use was verified by LOAD on 2.0.
 USE_UNSTABLE_C_API=0
 
 # Target C API version
