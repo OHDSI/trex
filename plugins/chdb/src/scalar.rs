@@ -10,11 +10,11 @@ pub struct StartChdbDatabaseScalar;
 impl VScalar for StartChdbDatabaseScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
         let data_path = if input.len() > 0 {
             let path_vector = input.flat_vector(0);
             let path_slice = path_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
@@ -32,7 +32,7 @@ impl VScalar for StartChdbDatabaseScalar {
         let flat_vector = output.flat_vector();
         flat_vector.insert(0, &result);
         Ok(())
-    }
+     }}
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![
@@ -53,11 +53,11 @@ pub struct StopChdbDatabaseScalar;
 impl VScalar for StopChdbDatabaseScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         _input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
         let result = match stop_chdb_database_scalar() {
             Ok(result) => result,
             Err(e) => format!("Error: {}", e),
@@ -66,7 +66,7 @@ impl VScalar for StopChdbDatabaseScalar {
         let flat_vector = output.flat_vector();
         flat_vector.insert(0, &result);
         Ok(())
-    }
+     }}
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(
@@ -81,11 +81,11 @@ pub struct ExecuteDmlScalar;
 impl VScalar for ExecuteDmlScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
         if input.len() == 0 {
             let flat_vector = output.flat_vector();
             flat_vector.insert(0, "Error: Query parameter required");
@@ -113,7 +113,7 @@ impl VScalar for ExecuteDmlScalar {
         }
         
         Ok(())
-    }
+     }}
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(
