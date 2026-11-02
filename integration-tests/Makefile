@@ -18,6 +18,8 @@ PYTEST_COV_ARGS=--cov=. --cov-report=xml:coverage/python.xml --cov-append
 .PHONY: configure test test-tier1 test-tier2 test-tier3 test-pgwire test-pgwire-db test-pgwire-decimal test-pgwire-datatypes test-atlas test-ai test-chdb test-chdb-db test-hana test-tpm test-etl test-etl-db test-fhir test-realtime test-realtime-js test-trexas test-trexas-swarm test-pg-trex check-extensions check-pgwire check-atlas check-ai check-chdb check-hana check-tpm check-etl check-fhir check-migration check-trexas check-db hana-up hana-down hana-clean pg-trex-up pg-trex-down clean coverage-merge coverage-clean
 
 configure:
+	# duckdb 2.0 wheels need Python >= 3.11.
+	@$(PYTHON_BIN) -c 'import sys; sys.exit(sys.version_info < (3, 11))' || (echo "PYTHON_BIN must be Python 3.11+" && exit 1)
 	$(PYTHON_BIN) -m venv $(VENV)
 	$(VENV)/bin/pip install 'duckdb==2.0.0' pytest pytest-cov psycopg2-binary 'psycopg[binary]' websockets requests
 
