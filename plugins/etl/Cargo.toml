@@ -21,9 +21,9 @@ loadable-extension = [
 ]
 
 [dependencies]
-duckdb = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex" }
-duckdb-loadable-macros = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex", optional = true }
-libduckdb-sys = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex" }
+duckdb = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex" }
+duckdb-loadable-macros = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex", optional = true }
+libduckdb-sys = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex" }
 
 etl-lib = { git = "https://github.com/supabase/etl", rev = "e692ead6e5f5818b2d905ff5c8598246c4c1302b", package = "etl" }
 etl-config = { git = "https://github.com/supabase/etl", rev = "e692ead6e5f5818b2d905ff5c8598246c4c1302b" }

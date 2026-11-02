@@ -47,11 +47,11 @@ pub struct EtlStartScalar;
 impl VScalar for EtlStartScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
         if input.len() == 0 {
             return Err("No input provided".into());
         }
@@ -175,7 +175,7 @@ impl VScalar for EtlStartScalar {
         let flat_vector = output.flat_vector();
         flat_vector.insert(0, &response);
         Ok(())
-    }
+     }}
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![
