@@ -681,6 +681,16 @@ pub(crate) fn arrow_type_to_pg_type(arrow_type: &duckdb::arrow::datatypes::DataT
     }
 }
 
+/// SQLSTATE for a failed query: DuckDB column types we cannot decode (e.g.
+/// VARIANT) are "feature not supported" (0A000), everything else XX000.
+pub(crate) fn exec_error_sqlstate(msg: &str) -> &'static str {
+    if msg.contains("Conversion error from type") && msg.contains("not supported") {
+        "0A000"
+    } else {
+        "XX000"
+    }
+}
+
 pub(crate) fn extract_panic_message(err: Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = err.downcast_ref::<&str>() {
         s.to_string()
@@ -1284,7 +1294,7 @@ impl SimpleQueryHandler for TrexQueryHandler {
             })?.map_err(|e| {
                 PgWireError::UserError(Box::new(ErrorInfo::new(
                     "ERROR".to_owned(),
-                    "XX000".to_owned(),
+                    exec_error_sqlstate(&e).to_owned(),
                     e,
                 )))
             })?;
@@ -1401,7 +1411,7 @@ impl ExtendedQueryHandler for TrexQueryHandler {
         })?.map_err(|e| {
             PgWireError::UserError(Box::new(ErrorInfo::new(
                 "ERROR".to_owned(),
-                "XX000".to_owned(),
+                exec_error_sqlstate(&e).to_owned(),
                 e,
             )))
         })?;
