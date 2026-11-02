@@ -90,20 +90,27 @@ impl VScalar for StartTrexServerScalar {
     input: &mut DataChunkHandle,
     output: &mut dyn WritableVector,
   ) -> Result<(), Box<dyn std::error::Error>> {
-    // SAFETY: vectors are sized to input.len() by DuckDB.
-    unsafe {
     let host_vector = input.flat_vector(0);
     let port_vector = input.flat_vector(1);
     let main_service_vector = input.flat_vector(2);
     let event_worker_vector = input.flat_vector(3);
 
-    let host_slice = host_vector
-      .as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-    let port_slice = port_vector.as_slice_with_len::<i32>(input.len());
-    let main_service_slice = main_service_vector
-      .as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-    let event_worker_slice = event_worker_vector
-      .as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+    // SAFETY: length is input.len() and duckdb_string_t matches the Varchar column type.
+    let host_slice = unsafe {
+      host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
+    };
+    // SAFETY: length is input.len() and i32 matches the Integer column type.
+    let port_slice = unsafe {
+      port_vector.as_slice_with_len::<i32>(input.len())
+    };
+    // SAFETY: length is input.len() and duckdb_string_t matches the Varchar column type.
+    let main_service_slice = unsafe {
+      main_service_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
+    };
+    // SAFETY: length is input.len() and duckdb_string_t matches the Varchar column type.
+    let event_worker_slice = unsafe {
+      event_worker_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
+    };
 
     if input.is_empty() {
       return Err("No input provided".into());
@@ -177,7 +184,6 @@ impl VScalar for StartTrexServerScalar {
     let flat_vector = output.flat_vector();
     flat_vector.insert(0, &response);
     Ok(())
-    }
   }
 
   fn signatures() -> Vec<ScalarFunctionSignature> {
@@ -203,11 +209,11 @@ impl VScalar for StartTrexServerWithConfigScalar {
     input: &mut DataChunkHandle,
     output: &mut dyn WritableVector,
   ) -> Result<(), Box<dyn std::error::Error>> {
-    // SAFETY: vectors are sized to input.len() by DuckDB.
-    unsafe {
     let config_vector = input.flat_vector(0);
-    let config_slice = config_vector
-      .as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+    // SAFETY: length is input.len() and duckdb_string_t matches the Varchar column type.
+    let config_slice = unsafe {
+      config_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
+    };
 
     if input.is_empty() {
       return Err("No input provided".into());
@@ -235,7 +241,6 @@ impl VScalar for StartTrexServerWithConfigScalar {
     let flat_vector = output.flat_vector();
     flat_vector.insert(0, &response);
     Ok(())
-    }
   }
 
   fn signatures() -> Vec<ScalarFunctionSignature> {
@@ -256,11 +261,11 @@ impl VScalar for StopTrexServerScalar {
     input: &mut DataChunkHandle,
     output: &mut dyn WritableVector,
   ) -> Result<(), Box<dyn std::error::Error>> {
-    // SAFETY: vectors are sized to input.len() by DuckDB.
-    unsafe {
     let server_id_vector = input.flat_vector(0);
-    let server_id_slice = server_id_vector
-      .as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+    // SAFETY: length is input.len() and duckdb_string_t matches the Varchar column type.
+    let server_id_slice = unsafe {
+      server_id_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
+    };
 
     if input.is_empty() {
       return Err("No input provided".into());
@@ -278,7 +283,6 @@ impl VScalar for StopTrexServerScalar {
     let flat_vector = output.flat_vector();
     flat_vector.insert(0, &response);
     Ok(())
-    }
   }
 
   fn signatures() -> Vec<ScalarFunctionSignature> {
@@ -455,8 +459,6 @@ impl VScalar for TrexCreateBundleScalar {
     input: &mut DataChunkHandle,
     output: &mut dyn WritableVector,
   ) -> Result<(), Box<dyn std::error::Error>> {
-    // SAFETY: vectors are sized to input.len() by DuckDB.
-    unsafe {
     if input.is_empty() {
       return Err("No input provided".into());
     }
@@ -464,10 +466,14 @@ impl VScalar for TrexCreateBundleScalar {
     let entrypoint_vector = input.flat_vector(0);
     let output_path_vector = input.flat_vector(1);
 
-    let entrypoint_slice = entrypoint_vector
-      .as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-    let output_slice = output_path_vector
-      .as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+    // SAFETY: length is input.len() and duckdb_string_t matches the Varchar column type.
+    let entrypoint_slice = unsafe {
+      entrypoint_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
+    };
+    // SAFETY: length is input.len() and duckdb_string_t matches the Varchar column type.
+    let output_slice = unsafe {
+      output_path_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
+    };
 
     let entrypoint =
       duckdb::types::DuckString::new(&mut { entrypoint_slice[0] })
@@ -479,8 +485,10 @@ impl VScalar for TrexCreateBundleScalar {
 
     let options = if input.num_columns() >= 3 {
       let options_vector = input.flat_vector(2);
-      let options_slice = options_vector
-        .as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+      // SAFETY: length is input.len() and duckdb_string_t matches the Varchar column type.
+      let options_slice = unsafe {
+        options_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
+      };
       let options_json =
         duckdb::types::DuckString::new(&mut { options_slice[0] })
           .as_str()
@@ -512,7 +520,6 @@ impl VScalar for TrexCreateBundleScalar {
     let flat_vector = output.flat_vector();
     flat_vector.insert(0, &response);
     Ok(())
-    }
   }
 
   fn signatures() -> Vec<ScalarFunctionSignature> {
