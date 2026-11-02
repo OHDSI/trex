@@ -217,7 +217,7 @@ impl VTab for CompileVTab {
         deps_vector.insert(0, result.dependencies.as_str());
 
         let mut order_vector = output.flat_vector(3);
-        order_vector.as_mut_slice::<i32>()[0] = result.order;
+        (unsafe { order_vector.as_mut_slice::<i32>() })[0] = result.order;
 
         let status_vector = output.flat_vector(4);
         status_vector.insert(0, result.status.as_str());
