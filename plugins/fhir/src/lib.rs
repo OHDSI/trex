@@ -309,7 +309,7 @@ impl VScalar for FhirVersionScalar {
     }
 }
 
-#[duckdb_entrypoint_c_api()]
+#[duckdb_entrypoint_c_api(min_duckdb_version = "v1.5.6")]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     con.execute_batch("INSTALL json; LOAD json; INSTALL icu; LOAD icu;")
         .map_err(|e| format!("load extensions: {e}"))?;

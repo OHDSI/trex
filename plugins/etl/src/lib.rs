@@ -22,7 +22,7 @@ use duckdb::Connection;
 use std::error::Error;
 
 #[cfg(feature = "loadable-extension")]
-#[duckdb_loadable_macros::duckdb_entrypoint_c_api()]
+#[duckdb_loadable_macros::duckdb_entrypoint_c_api(min_duckdb_version = "v1.5.6")]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     // Pool already initialized by db plugin
 

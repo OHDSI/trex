@@ -18,7 +18,7 @@ use duckdb::Connection;
 use std::error::Error;
 
 #[cfg(feature = "loadable-extension")]
-#[duckdb_loadable_macros::duckdb_entrypoint_c_api()]
+#[duckdb_loadable_macros::duckdb_entrypoint_c_api(min_duckdb_version = "v1.5.6")]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     con.register_scalar_function::<cache_create::CacheCreateScalar>("trex_cache_create")
         .expect("Failed to register trex_cache_create scalar function");

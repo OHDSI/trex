@@ -317,7 +317,7 @@ define_vtab_2param!(DevxProcessInputVTab, ProcessInputBind, ProcessInputInit, pr
 // Extension entrypoint
 // ---------------------------------------------------------------------------
 
-#[duckdb_entrypoint_c_api()]
+#[duckdb_entrypoint_c_api(min_duckdb_version = "v1.5.6")]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     con.register_table_function::<DevxGitInitVTab>("trex_devx_git_init")?;
     con.register_table_function::<DevxGitCloneVTab>("trex_devx_git_clone")?;
