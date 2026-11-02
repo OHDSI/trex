@@ -4,11 +4,13 @@ PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 EXTENSION_NAME=pool
 
-# Set to 1 to enable Unstable API (binaries will only work on TARGET_DUCKDB_VERSION, forwards compatibility will be broken)
-USE_UNSTABLE_C_API=1
+# DuckDB 2.0 loads a stable C_STRUCT extension with C API major != 2 as V1 (via _init_c_api);
+# the stable V1 C API at v1.5.6 covers everything that was unstable before.
+USE_UNSTABLE_C_API=0
 
-# Target DuckDB version
-TARGET_DUCKDB_VERSION=v2.0.0
+# Target C API version
+TARGET_DUCKDB_VERSION=v1.5.6
+DUCKDB_TEST_VERSION=v2.0.0
 
 all: configure debug
 
