@@ -911,7 +911,7 @@ mod tests {
     //     bad check" cascade) ---
 
     #[test]
-    #[ignore = "needs the C API table from a real LOAD; validated via engine LOAD, see Task 6 report"]
+    #[ignore = "needs the C API table from a real LOAD; validated via engine LOAD; run through the engine with DATABASE_URL set"]
     fn failed_statement_does_not_poison_session() {
         ensure_test_pool();
         let sid = create_local_session().expect("create session");
@@ -934,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs the C API table from a real LOAD; validated via engine LOAD, see Task 6 report"]
+    #[ignore = "needs the C API table from a real LOAD; validated via engine LOAD; run through the engine with DATABASE_URL set"]
     fn concurrent_postgres_attach_catalog_access() {
         let Ok(url) = std::env::var("DATABASE_URL") else {
             eprintln!("DATABASE_URL unset: skipping concurrent_postgres_attach_catalog_access");

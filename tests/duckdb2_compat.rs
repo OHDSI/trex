@@ -32,6 +32,7 @@ fn attaches_v1_4_file_read_write() {
 
 #[test]
 fn c_api_open_existing_roundtrip() {
+    // SAFETY: pointers come from trexsql_open and are checked non-null before use; closed once.
     unsafe {
         let path = CString::new(":memory:").unwrap();
         let owner = trexsql_open(path.as_ptr(), 1);

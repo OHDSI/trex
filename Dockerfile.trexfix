@@ -4,7 +4,7 @@
 # DuckDB instance" fix, for overlaying onto an existing trexsql base:
 #   - libtrexsql_engine.so  (new trexsql_open_existing C API)
 #   - webapi.trex           (captures host duckdb_database, passes via webapi_start)
-# Both pull the duckdb crate at rev 9d6d6fb (Connection::raw_database accessor).
+# Both pull the duckdb crate from trexsql-rs tag v2.0.0-trex (Connection::raw_database accessor).
 #
 #   DOCKER_BUILDKIT=1 docker build --platform linux/arm64 -f Dockerfile.trexfix \
 #     --target export -o type=local,dest=./out-trexfix .
