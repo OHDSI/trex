@@ -1135,15 +1135,7 @@ mod tests {
 
     #[test]
     fn failed_statement_does_not_poison_session() {
-        use duckdb::Connection;
-        // One shared in-memory engine, mirroring how the pool clones a single
-        // base connection. Seed a table, then prove a statement that fails
-        // inside an explicit transaction does not wedge the leased session.
-        let base = Connection::open_in_memory().expect("open in-memory duckdb");
-        base.execute_batch("CREATE TABLE t(a INTEGER PRIMARY KEY); INSERT INTO t VALUES (1);")
-            .expect("seed table");
-        init_from_connection(&base, 1).expect("init pool");
-
+        ensure_test_pool();
         let sid = create_local_session().expect("create session");
         session_execute_local(sid, "BEGIN").expect("begin");
         // A constraint violation inside the transaction aborts it (runtime
@@ -1161,6 +1153,61 @@ mod tests {
             res.err()
         );
         destroy_local_session(sid);
-        drop(base);
+    }
+
+    #[test]
+    fn concurrent_postgres_attach_catalog_access() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL unset: skipping concurrent_postgres_attach_catalog_access");
+            return;
+        };
+        ensure_test_pool();
+
+        let setup = create_local_session().expect("setup session");
+        for sql in [
+            "INSTALL postgres".to_string(),
+            "LOAD postgres".to_string(),
+            format!("ATTACH '{}' AS pg (TYPE postgres)", url.replace('\'', "''")),
+        ] {
+            session_execute_local(setup, &sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+        }
+
+        // Every thread scans the attached catalog; odd threads also clear its
+        // cache, the overlap duckdb-postgres#399 used to turn into a crash.
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                std::thread::spawn(move || {
+                    let sid = create_local_session().expect("thread session");
+                    for _ in 0..10 {
+                        let r = session_execute_local(
+                            sid,
+                            "SELECT count(*) FROM pg.information_schema.tables",
+                        );
+                        assert!(r.is_ok(), "thread {i}: {:?}", r.err());
+                        if i % 2 == 1 {
+                            let r = session_execute_local(sid, "CALL postgres_clear_cache()");
+                            assert!(r.is_ok(), "thread {i} clear: {:?}", r.err());
+                        }
+                    }
+                    destroy_local_session(sid);
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+        destroy_local_session(setup);
+    }
+
+    // The pool is a process-wide singleton, so tests share one 16-connection pool.
+    fn ensure_test_pool() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            let base = Connection::open_in_memory().expect("open in-memory duckdb");
+            base.execute_batch("CREATE TABLE t(a INTEGER PRIMARY KEY); INSERT INTO t VALUES (1);")
+                .expect("seed table");
+            init_from_connection(&base, 16).expect("init pool");
+            std::mem::forget(base);
+        });
     }
 }
