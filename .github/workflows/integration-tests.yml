@@ -155,7 +155,7 @@ jobs:
       - uses: ./.github/actions/setup-libtrexsql
         if: matrix.tool == 'pgrx' || matrix.libtrexsql
         with:
-          version: v1.4.4-trex
+          version: v2.0.0-trex
 
       - if: matrix.tool == 'pgrx'
         uses: taiki-e/install-action@v2
