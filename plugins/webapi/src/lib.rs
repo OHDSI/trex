@@ -251,18 +251,18 @@ fn emit(output: &mut dyn WritableVector, value: &str) {
 struct WebApiStart;
 impl VScalar for WebApiStart {
     type State = ();
-    unsafe fn invoke(
+    fn invoke(
         _: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
         let msg = call(Cmd::Start);
         let n = input.len().max(1);
         for _ in 0..n {
             emit(output, &msg);
         }
         Ok(())
-    }
+     }}
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(vec![], LogicalTypeId::Varchar.into())]
     }
@@ -271,18 +271,18 @@ impl VScalar for WebApiStart {
 struct WebApiStartNoWait;
 impl VScalar for WebApiStartNoWait {
     type State = ();
-    unsafe fn invoke(
+    fn invoke(
         _: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
         let msg = call_nowait(Cmd::Start);
         let n = input.len().max(1);
         for _ in 0..n {
             emit(output, &msg);
         }
         Ok(())
-    }
+     }}
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(vec![], LogicalTypeId::Varchar.into())]
     }
@@ -291,15 +291,15 @@ impl VScalar for WebApiStartNoWait {
 struct WebApiStop;
 impl VScalar for WebApiStop {
     type State = ();
-    unsafe fn invoke(
+    fn invoke(
         _: &Self::State,
         _input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
         let msg = call(Cmd::Stop);
         emit(output, &msg);
         Ok(())
-    }
+     }}
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(vec![], LogicalTypeId::Varchar.into())]
     }
@@ -308,15 +308,15 @@ impl VScalar for WebApiStop {
 struct WebApiStatus;
 impl VScalar for WebApiStatus {
     type State = ();
-    unsafe fn invoke(
+    fn invoke(
         _: &Self::State,
         _input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
         let msg = call(Cmd::Status);
         emit(output, &msg);
         Ok(())
-    }
+     }}
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(vec![], LogicalTypeId::Varchar.into())]
     }
