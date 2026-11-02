@@ -1,13 +1,13 @@
 //! DataFusion `ExecutionPlan` that reads from a child plan, hash-partitions
 //! the output by join key columns, and routes each partition to the target node.
 
-use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
-use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
@@ -31,7 +31,7 @@ pub struct ShuffleWriterExec {
     /// Partition ID that is local to this node (stored in registry, not sent).
     local_partition_id: usize,
     runtime_handle: tokio::runtime::Handle,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
 }
 
 impl ShuffleWriterExec {
@@ -57,7 +57,7 @@ impl ShuffleWriterExec {
             join_key_indices,
             local_partition_id,
             runtime_handle,
-            properties,
+            properties: Arc::new(properties),
         }
     }
 }
@@ -80,12 +80,15 @@ impl ExecutionPlan for ShuffleWriterExec {
         "ShuffleWriterExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
     }
 
-    fn properties(&self) -> &PlanProperties {
-        &self.properties
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DFResult<TreeNodeRecursion>,
+    ) -> DFResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
@@ -406,8 +409,8 @@ mod tests {
     #[test]
     fn shuffle_writer_as_any_round_trip() {
         let writer = make_writer(0);
-        let any = writer.as_any();
-        assert!(any.is::<ShuffleWriterExec>());
+        let plan: Arc<dyn ExecutionPlan> = Arc::new(writer);
+        assert!(plan.is::<ShuffleWriterExec>());
     }
 
     #[test]

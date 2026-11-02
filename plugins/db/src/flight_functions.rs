@@ -21,7 +21,7 @@ pub struct FlightVersionScalar;
 impl VScalar for FlightVersionScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -46,7 +46,7 @@ pub struct StartFlightServerScalar;
 impl VScalar for StartFlightServerScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -54,9 +54,9 @@ impl VScalar for StartFlightServerScalar {
         let host_vector = input.flat_vector(0);
         let port_vector = input.flat_vector(1);
 
-        let host_slice =
-            host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let port_slice = port_vector.as_slice_with_len::<i32>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let host_slice = unsafe { host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let port_slice = unsafe { port_vector.as_slice_with_len::<i32>(input.len()) };
 
         if input.len() == 0 {
             return Err("No input provided".into());
@@ -93,7 +93,7 @@ pub struct StartFlightServerTlsScalar;
 impl VScalar for StartFlightServerTlsScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -104,15 +104,12 @@ impl VScalar for StartFlightServerTlsScalar {
         let key_vector = input.flat_vector(3);
         let ca_vector = input.flat_vector(4);
 
-        let host_slice =
-            host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let port_slice = port_vector.as_slice_with_len::<i32>(input.len());
-        let cert_slice =
-            cert_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let key_slice =
-            key_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let ca_slice =
-            ca_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let host_slice = unsafe { host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let port_slice = unsafe { port_vector.as_slice_with_len::<i32>(input.len()) };
+        let cert_slice = unsafe { cert_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let key_slice = unsafe { key_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let ca_slice = unsafe { ca_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
 
         if input.len() == 0 {
             return Err("No input provided".into());
@@ -167,7 +164,7 @@ pub struct StopFlightServerScalar;
 impl VScalar for StopFlightServerScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -175,9 +172,9 @@ impl VScalar for StopFlightServerScalar {
         let host_vector = input.flat_vector(0);
         let port_vector = input.flat_vector(1);
 
-        let host_slice =
-            host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let port_slice = port_vector.as_slice_with_len::<i32>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let host_slice = unsafe { host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let port_slice = unsafe { port_vector.as_slice_with_len::<i32>(input.len()) };
 
         if input.len() == 0 {
             return Err("No input provided".into());

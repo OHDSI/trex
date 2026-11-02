@@ -26,15 +26,15 @@ path = "src/wasm_lib.rs"
 crate-type = ["staticlib"]
 
 [dependencies]
-duckdb = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex", features = ["vtab-loadable", "vscalar", "vtab-arrow", "appender-arrow"] }
-duckdb-loadable-macros = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex" }
-libduckdb-sys = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex", features = ["loadable-extension"] }
+duckdb = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex", features = ["vtab-loadable", "vscalar", "vtab-arrow", "appender-arrow"] }
+duckdb-loadable-macros = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex" }
+libduckdb-sys = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex", features = ["loadable-extension"] }
 chitchat = "0.10"
-arrow-flight = { version = "57", features = ["flight-sql-experimental"] }
-arrow = { version = "57", features = ["ipc"] }
-arrow-schema = "57"
-arrow-array = "57"
-arrow-ipc = "57"
+arrow-flight = { version = "59", features = ["flight-sql-experimental"] }
+arrow = { version = "59", features = ["ipc"] }
+arrow-schema = "59"
+arrow-array = "59"
+arrow-ipc = "59"
 tonic = { version = "0.14", features = ["tls-ring"] }
 prost = "0.14"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "time"] }
@@ -47,7 +47,6 @@ tokio-rustls = "0.26"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
 uuid = { version = "1", features = ["v4"] }
-ahash = "0.8"
 sqlparser = { version = "0.53", features = ["visitor"] }
 crossbeam-channel = "0.5"
 trex-pool-client = { path = "../pool-client" }
@@ -55,8 +54,8 @@ futures = "0.3"
 async-trait = "0.1"
 
 # DataFusion distributed query engine
-datafusion = "51"
-datafusion-federation = { version = "0.4.12", features = ["sql"] }
+datafusion = "55"
+datafusion-federation = { version = "0.5.8", features = ["sql"] }
 
 [dev-dependencies]
 serial_test = "3"

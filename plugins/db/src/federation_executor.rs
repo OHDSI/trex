@@ -8,7 +8,7 @@ use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::optimizer::Optimizer;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::physical_plan::SendableRecordBatchStream;
+use datafusion::physical_plan::{PhysicalExpr, SendableRecordBatchStream};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion::sql::unparser::dialect::Dialect;
 use datafusion::catalog::SchemaProvider;
@@ -62,7 +62,12 @@ impl SQLExecutor for TrexSQLExecutor {
         Arc::new(datafusion::sql::unparser::dialect::DuckDBDialect::new())
     }
 
-    fn execute(&self, sql: &str, schema: SchemaRef) -> DFResult<SendableRecordBatchStream> {
+    fn execute(
+        &self,
+        sql: &str,
+        schema: SchemaRef,
+        _filters: &[Arc<dyn PhysicalExpr>],
+    ) -> DFResult<SendableRecordBatchStream> {
         SwarmLogger::debug("distributed", &format!("Federation pushdown: {sql}"));
         let (_schema, batches) = self.query_trexsql(sql)
             .map_err(|e| wrap_executor_error("execute", e))?;
@@ -123,7 +128,12 @@ impl SQLExecutor for FlightSQLExecutor {
         Arc::new(datafusion::sql::unparser::dialect::DuckDBDialect::new())
     }
 
-    fn execute(&self, sql: &str, schema: SchemaRef) -> DFResult<SendableRecordBatchStream> {
+    fn execute(
+        &self,
+        sql: &str,
+        schema: SchemaRef,
+        _filters: &[Arc<dyn PhysicalExpr>],
+    ) -> DFResult<SendableRecordBatchStream> {
         SwarmLogger::debug(
             "distributed",
             &format!("Flight federation pushdown to {}: {sql}", self.node_name),

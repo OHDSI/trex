@@ -194,7 +194,6 @@ impl ShuffleInsertionRule {
         };
 
         let is_hash_shuffle = plan
-            .as_any()
             .downcast_ref::<HashJoinExec>()
             .map(|hash_join| {
                 let left_tables = extract_table_names_from_plan(hash_join.left());
@@ -226,7 +225,6 @@ impl ShuffleInsertionRule {
         plan: Arc<dyn ExecutionPlan>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
         let hash_join = plan
-            .as_any()
             .downcast_ref::<HashJoinExec>()
             .ok_or_else(|| {
                 datafusion::error::DataFusionError::Internal(
@@ -381,7 +379,6 @@ fn extract_table_names_from_plan(plan: &Arc<dyn ExecutionPlan>) -> Vec<String> {
 fn collect_table_names(plan: &Arc<dyn ExecutionPlan>, names: &mut Vec<String>) {
     // Check for DistributedExec which carries a table_name.
     if let Some(dist) = plan
-        .as_any()
         .downcast_ref::<crate::distributed_table_provider::DistributedExec>()
     {
         let debug = format!("{:?}", dist);

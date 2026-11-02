@@ -64,7 +64,7 @@ struct DbStartScalar;
 impl VScalar for DbStartScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -77,11 +77,10 @@ impl VScalar for DbStartScalar {
         let port_vector = input.flat_vector(1);
         let cluster_vector = input.flat_vector(2);
 
-        let host_slice =
-            host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let port_slice = port_vector.as_slice_with_len::<i32>(input.len());
-        let cluster_slice =
-            cluster_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let host_slice = unsafe { host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let port_slice = unsafe { port_vector.as_slice_with_len::<i32>(input.len()) };
+        let cluster_slice = unsafe { cluster_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
 
         let host = duckdb::types::DuckString::new(&mut { host_slice[0] })
             .as_str()
@@ -134,7 +133,7 @@ struct DbStartWithSeedsScalar;
 impl VScalar for DbStartWithSeedsScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -148,13 +147,11 @@ impl VScalar for DbStartWithSeedsScalar {
         let cluster_vector = input.flat_vector(2);
         let seeds_vector = input.flat_vector(3);
 
-        let host_slice =
-            host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let port_slice = port_vector.as_slice_with_len::<i32>(input.len());
-        let cluster_slice =
-            cluster_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let seeds_slice =
-            seeds_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let host_slice = unsafe { host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let port_slice = unsafe { port_vector.as_slice_with_len::<i32>(input.len()) };
+        let cluster_slice = unsafe { cluster_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let seeds_slice = unsafe { seeds_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
 
         let host = duckdb::types::DuckString::new(&mut { host_slice[0] })
             .as_str()
@@ -218,7 +215,7 @@ struct DbStopScalar;
 impl VScalar for DbStopScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -250,7 +247,7 @@ struct DbSetScalar;
 impl VScalar for DbSetScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -262,10 +259,9 @@ impl VScalar for DbSetScalar {
         let key_vector = input.flat_vector(0);
         let value_vector = input.flat_vector(1);
 
-        let key_slice =
-            key_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let value_slice =
-            value_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let key_slice = unsafe { key_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let value_slice = unsafe { value_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
 
         let key = duckdb::types::DuckString::new(&mut { key_slice[0] })
             .as_str()
@@ -545,7 +541,7 @@ struct DbSetDistributedScalar;
 impl VScalar for DbSetDistributedScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -555,7 +551,8 @@ impl VScalar for DbSetDistributedScalar {
         }
 
         let bool_vector = input.flat_vector(0);
-        let bool_slice = bool_vector.as_slice_with_len::<bool>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let bool_slice = unsafe { bool_vector.as_slice_with_len::<bool>(input.len()) };
         let enabled = bool_slice[0];
 
         DISTRIBUTED_ENABLED.store(enabled, Ordering::Relaxed);
@@ -903,7 +900,7 @@ struct DbSetPriorityScalar;
 impl VScalar for DbSetPriorityScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -913,8 +910,8 @@ impl VScalar for DbSetPriorityScalar {
         }
 
         let priority_vector = input.flat_vector(0);
-        let priority_slice =
-            priority_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let priority_slice = unsafe { priority_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
         let priority_str = duckdb::types::DuckString::new(&mut { priority_slice[0] })
             .as_str()
             .to_string();
@@ -948,7 +945,7 @@ struct DbSetUserQuotaScalar;
 impl VScalar for DbSetUserQuotaScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -960,9 +957,9 @@ impl VScalar for DbSetUserQuotaScalar {
         let user_vector = input.flat_vector(0);
         let limit_vector = input.flat_vector(1);
 
-        let user_slice =
-            user_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let limit_slice = limit_vector.as_slice_with_len::<i32>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let user_slice = unsafe { user_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let limit_slice = unsafe { limit_vector.as_slice_with_len::<i32>(input.len()) };
 
         let user_id = duckdb::types::DuckString::new(&mut { user_slice[0] })
             .as_str()
@@ -1075,7 +1072,7 @@ struct DbCancelQueryScalar;
 impl VScalar for DbCancelQueryScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -1085,8 +1082,8 @@ impl VScalar for DbCancelQueryScalar {
         }
 
         let id_vector = input.flat_vector(0);
-        let id_slice =
-            id_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let id_slice = unsafe { id_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
         let query_id = duckdb::types::DuckString::new(&mut { id_slice[0] })
             .as_str()
             .to_string();
@@ -1114,7 +1111,7 @@ struct DbPartitionTableScalar;
 impl VScalar for DbPartitionTableScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -1126,10 +1123,9 @@ impl VScalar for DbPartitionTableScalar {
         let table_vector = input.flat_vector(0);
         let config_vector = input.flat_vector(1);
 
-        let table_slice =
-            table_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let config_slice =
-            config_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let table_slice = unsafe { table_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let config_slice = unsafe { config_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
 
         let table_name = duckdb::types::DuckString::new(&mut { table_slice[0] })
             .as_str()
@@ -1164,7 +1160,7 @@ struct DbCreateTableScalar;
 impl VScalar for DbCreateTableScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -1176,10 +1172,9 @@ impl VScalar for DbCreateTableScalar {
         let sql_vector = input.flat_vector(0);
         let config_vector = input.flat_vector(1);
 
-        let sql_slice =
-            sql_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let config_slice =
-            config_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let sql_slice = unsafe { sql_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let config_slice = unsafe { config_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
 
         let create_sql = duckdb::types::DuckString::new(&mut { sql_slice[0] })
             .as_str()
@@ -1214,7 +1209,7 @@ struct DbRepartitionTableScalar;
 impl VScalar for DbRepartitionTableScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -1226,10 +1221,9 @@ impl VScalar for DbRepartitionTableScalar {
         let table_vector = input.flat_vector(0);
         let config_vector = input.flat_vector(1);
 
-        let table_slice =
-            table_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let config_slice =
-            config_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let table_slice = unsafe { table_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let config_slice = unsafe { config_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
 
         let table_name = duckdb::types::DuckString::new(&mut { table_slice[0] })
             .as_str()
@@ -1494,7 +1488,7 @@ mod tests {
     }
 }
 
-#[duckdb_entrypoint_c_api()]
+#[duckdb_entrypoint_c_api(min_duckdb_version = "v1.5.6")]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     // Pool is initialized by the pool.trex extension (loaded before db).
     // Probe by leasing a session and immediately releasing it.

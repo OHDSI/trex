@@ -7,7 +7,7 @@ use std::sync::Arc;
 use arrow::array::RecordBatch;
 use arrow::compute::concat_batches;
 use arrow::datatypes::SchemaRef;
-use duckdb::vtab::arrow::{arrow_recordbatch_to_query_params, ArrowVTab};
+use duckdb::vtab::arrow::{ArrowBatchRegistration, ArrowVTab};
 
 pub struct FinalPassResult {
     pub schema: SchemaRef,
@@ -35,48 +35,51 @@ pub fn execute_sql_on_batches(
     execute_on_connection(batches, schema, &rewritten)
 }
 
+/// Function names (uppercased, matched as substrings) that route a query
+/// through the DuckDB final pass.
+const DUCKDB_ONLY_FUNCTIONS: &[&str] = &[
+    "LIST_AGGREGATE",
+    "LIST_SORT",
+    "LIST_DISTINCT",
+    "LIST_UNIQUE",
+    "STRUCT_PACK",
+    "STRUCT_INSERT",
+    "STRUCT_EXTRACT",
+    "REGEXP_MATCHES",
+    "REGEXP_REPLACE",
+    "REGEXP_EXTRACT",
+    "STRING_SPLIT",
+    "STRING_SPLIT_REGEX",
+    "ARRAY_AGG",
+    "ARRAY_SLICE",
+    "MAP",
+    "MAP_KEYS",
+    "MAP_VALUES",
+    "UNNEST",
+    "GENERATE_SERIES",
+    "EPOCH_MS",
+    "EPOCH_US",
+    "TRY_CAST",
+    "IF(",
+    "HASH(",
+    "MD5(",
+    "SHA256(",
+];
+
 /// Returns `true` if the query uses trexsql-specific functions that
 /// DataFusion cannot execute natively.
 pub fn needs_final_pass(sql: &str) -> bool {
     let upper = sql.to_uppercase();
-    let duckdb_functions = [
-        "LIST_AGGREGATE",
-        "LIST_SORT",
-        "LIST_DISTINCT",
-        "LIST_UNIQUE",
-        "STRUCT_PACK",
-        "STRUCT_INSERT",
-        "STRUCT_EXTRACT",
-        "REGEXP_MATCHES",
-        "REGEXP_REPLACE",
-        "REGEXP_EXTRACT",
-        "STRING_SPLIT",
-        "STRING_SPLIT_REGEX",
-        "ARRAY_AGG",
-        "ARRAY_SLICE",
-        "MAP",
-        "MAP_KEYS",
-        "MAP_VALUES",
-        "UNNEST",
-        "GENERATE_SERIES",
-        "EPOCH_MS",
-        "EPOCH_US",
-        "TRY_CAST",
-        "IF(",
-        "HASH(",
-        "MD5(",
-        "SHA256(",
-    ];
-    duckdb_functions.iter().any(|f| upper.contains(f))
+    DUCKDB_ONLY_FUNCTIONS.iter().any(|f| upper.contains(f))
 }
 
-/// Replace the first `FROM {table_ref}` with `FROM (SELECT * FROM arrow(?, ?)) AS {table_ref}`.
+/// Replace the first `FROM {table_ref}` with `FROM (SELECT * FROM arrow(?)) AS {table_ref}`.
 /// Case-insensitive search for the FROM keyword.
 pub fn rewrite_with_arrow_source(sql: &str, table_ref: &str) -> String {
     let upper = sql.to_uppercase();
     let needle = format!("FROM {}", table_ref.to_uppercase());
     if let Some(pos) = upper.find(&needle) {
-        let replacement = format!("FROM (SELECT * FROM arrow(?, ?)) AS {table_ref}");
+        let replacement = format!("FROM (SELECT * FROM arrow(?)) AS {table_ref}");
         format!("{}{}{}", &sql[..pos], replacement, &sql[pos + needle.len()..])
     } else {
         sql.to_string()
@@ -101,13 +104,13 @@ fn execute_on_connection(
     crate::local_connections::with_connection(|conn| {
         let _ = conn.register_table_function::<ArrowVTab>("arrow");
 
-        let params = arrow_recordbatch_to_query_params(merged);
+        let batch = ArrowBatchRegistration::new(merged);
         let mut stmt = conn
             .prepare(sql)
             .map_err(|e| format!("Failed to prepare final pass SQL: {e}"))?;
 
         let result_batches: Vec<RecordBatch> = stmt
-            .query_arrow(params)
+            .query_arrow([&batch])
             .map_err(|e| format!("Failed to execute final pass SQL: {e}"))?
             .collect();
 
@@ -133,7 +136,7 @@ mod tests {
         let rewritten = rewrite_with_arrow_source(sql, "_result");
         assert_eq!(
             rewritten,
-            "SELECT a, b FROM (SELECT * FROM arrow(?, ?)) AS _result WHERE a > 1"
+            "SELECT a, b FROM (SELECT * FROM arrow(?)) AS _result WHERE a > 1"
         );
     }
 
@@ -142,7 +145,7 @@ mod tests {
         let sql = "SELECT * FROM _data UNION ALL SELECT * FROM _data";
         let rewritten = rewrite_with_arrow_source(sql, "_data");
         assert!(rewritten.starts_with(
-            "SELECT * FROM (SELECT * FROM arrow(?, ?)) AS _data"
+            "SELECT * FROM (SELECT * FROM arrow(?)) AS _data"
         ));
         assert!(rewritten.ends_with("SELECT * FROM _data"));
     }
@@ -209,5 +212,34 @@ mod tests {
         assert!(needs_final_pass("SELECT Regexp_Matches(col, '\\d+') FROM t"));
         assert!(needs_final_pass("select md5(col) from t"));
         assert!(needs_final_pass("SELECT Hash(col) FROM t"));
+    }
+
+    // Pins the `duckdb_functions()` column this check reads and that every
+    // name in DUCKDB_ONLY_FUNCTIONS (bar the TRY_CAST keyword) is still a function.
+    #[test]
+    #[ignore = "needs the DuckDB C API table, which only a real extension LOAD initialises; verified on the 2.0 CLI"]
+    fn duckdb_functions_columns_present() {
+        let conn = duckdb::Connection::open_in_memory().expect("open in-memory duckdb");
+        let mut stmt = conn
+            .prepare("SELECT column_name FROM (DESCRIBE SELECT * FROM duckdb_functions())")
+            .unwrap();
+        let columns: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(columns.iter().any(|c| c == "function_name"), "{columns:?}");
+
+        for f in DUCKDB_ONLY_FUNCTIONS.iter().filter(|f| **f != "TRY_CAST") {
+            let name = f.trim_end_matches('(').to_lowercase();
+            let n: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM duckdb_functions() WHERE function_name = ?",
+                    [&name],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(n > 0, "{name} missing from duckdb_functions()");
+        }
     }
 }

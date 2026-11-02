@@ -1,7 +1,6 @@
 //! SchemaProvider wrapping sharded (DistributedTableProvider) tables so they
 //! can be registered as a child of MultiSchemaProvider alongside federation schemas.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -24,10 +23,6 @@ impl ShardedSchemaProvider {
 
 #[async_trait]
 impl SchemaProvider for ShardedSchemaProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn table_names(&self) -> Vec<String> {
         self.tables.keys().cloned().collect()
     }
