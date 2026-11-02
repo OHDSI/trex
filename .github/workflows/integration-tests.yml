@@ -247,7 +247,7 @@ jobs:
 
           - name: pgwire
             exts: pool db pgwire
-            tests: test_pgwire_standalone.py test_pgwire_db.py
+            tests: test_pgwire_standalone.py test_pgwire_db.py test_duckdb2_semantics.py
 
           - name: atlas
             exts: pool atlas
