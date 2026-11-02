@@ -11,7 +11,6 @@ USE_UNSTABLE_C_API=0
 TARGET_DUCKDB_VERSION=v1.5.6
 DUCKDB_TEST_VERSION=v2.0.0
 
-
 all: configure debug
 
 include ../extension-ci-tools/makefiles/c_api_extensions/base.Makefile

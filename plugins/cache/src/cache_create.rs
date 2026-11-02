@@ -14,6 +14,7 @@ fn read_string(
     row: usize,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let v = input.flat_vector(col);
+    // SAFETY: input column is VARCHAR; len == input.len()
     let slice = unsafe { v.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
     let mut cell = *slice
         .get(row)

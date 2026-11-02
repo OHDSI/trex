@@ -36,7 +36,7 @@ impl VScalar for HadesSetupEnvScalar {
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn duckdb::vtab::arrow::WritableVector,
-    ) -> Result<(), Box<dyn Error>> { unsafe {
+    ) -> Result<(), Box<dyn Error>> {
         if input.len() == 0 {
             return Err("No input provided".into());
         }
@@ -44,9 +44,12 @@ impl VScalar for HadesSetupEnvScalar {
         let v0 = input.flat_vector(0);
         let v1 = input.flat_vector(1);
         let v2 = input.flat_vector(2);
-        let s0 = v0.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let s1 = v1.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let s2 = v2.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: input column is VARCHAR; len == input.len()
+        let s0 = unsafe { v0.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        // SAFETY: input column is VARCHAR; len == input.len()
+        let s1 = unsafe { v1.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        // SAFETY: input column is VARCHAR; len == input.len()
+        let s2 = unsafe { v2.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
         let lockfile_path = duckdb::types::DuckString::new(&mut { s0[0] }).as_str().to_string();
         let env_name = duckdb::types::DuckString::new(&mut { s1[0] }).as_str().to_string();
         let base_dir = duckdb::types::DuckString::new(&mut { s2[0] }).as_str().to_string();
@@ -59,7 +62,7 @@ impl VScalar for HadesSetupEnvScalar {
         let flat = output.flat_vector();
         flat.insert(0, &response);
         Ok(())
-     }}
+    }
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(
@@ -101,7 +104,7 @@ impl VScalar for HadesExecuteScalar {
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn duckdb::vtab::arrow::WritableVector,
-    ) -> Result<(), Box<dyn Error>> { unsafe {
+    ) -> Result<(), Box<dyn Error>> {
         if input.len() == 0 {
             return Err("No input provided".into());
         }
@@ -113,13 +116,20 @@ impl VScalar for HadesExecuteScalar {
         let v4 = input.flat_vector(4);
         let v5 = input.flat_vector(5);
         let v6 = input.flat_vector(6);
-        let s0 = v0.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let s1 = v1.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let s2 = v2.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let s3 = v3.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let s4 = v4.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let s5 = v5.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let s6 = v6.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: input column is VARCHAR; len == input.len()
+        let s0 = unsafe { v0.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        // SAFETY: input column is VARCHAR; len == input.len()
+        let s1 = unsafe { v1.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        // SAFETY: input column is VARCHAR; len == input.len()
+        let s2 = unsafe { v2.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        // SAFETY: input column is VARCHAR; len == input.len()
+        let s3 = unsafe { v3.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        // SAFETY: input column is VARCHAR; len == input.len()
+        let s4 = unsafe { v4.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        // SAFETY: input column is VARCHAR; len == input.len()
+        let s5 = unsafe { v5.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        // SAFETY: input column is VARCHAR; len == input.len()
+        let s6 = unsafe { v6.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
 
         let spec_path = duckdb::types::DuckString::new(&mut { s0[0] }).as_str().to_string();
         let cdm_schema = duckdb::types::DuckString::new(&mut { s1[0] }).as_str().to_string();
@@ -145,7 +155,7 @@ impl VScalar for HadesExecuteScalar {
         let flat = output.flat_vector();
         flat.insert(0, &response);
         Ok(())
-     }}
+    }
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(
@@ -221,13 +231,14 @@ impl VScalar for HadesCancelScalar {
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn duckdb::vtab::arrow::WritableVector,
-    ) -> Result<(), Box<dyn Error>> { unsafe {
+    ) -> Result<(), Box<dyn Error>> {
         if input.len() == 0 {
             return Err("No input provided".into());
         }
 
         let v0 = input.flat_vector(0);
-        let s0 = v0.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: input column is VARCHAR; len == input.len()
+        let s0 = unsafe { v0.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
         let job_id = duckdb::types::DuckString::new(&mut { s0[0] }).as_str().to_string();
 
         let response = cancel_impl(&job_id);
@@ -235,7 +246,7 @@ impl VScalar for HadesCancelScalar {
         let flat = output.flat_vector();
         flat.insert(0, &response);
         Ok(())
-     }}
+    }
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(
@@ -577,7 +588,7 @@ fn escape_json(s: &str) -> String {
 // Extension entry point
 // ---------------------------------------------------------------------------
 
-#[duckdb_entrypoint_c_api(ext_name = "hades")]
+#[duckdb_entrypoint_c_api(ext_name = "hades", min_duckdb_version = "v1.5.6")]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     con.register_scalar_function::<HadesSetupEnvScalar>("trex_hades_setup_env")
         .expect("Failed to register trex_hades_setup_env");

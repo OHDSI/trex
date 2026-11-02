@@ -255,14 +255,14 @@ impl VScalar for WebApiStart {
         _: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let msg = call(Cmd::Start);
         let n = input.len().max(1);
         for _ in 0..n {
             emit(output, &msg);
         }
         Ok(())
-     }}
+    }
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(vec![], LogicalTypeId::Varchar.into())]
     }
@@ -275,14 +275,14 @@ impl VScalar for WebApiStartNoWait {
         _: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let msg = call_nowait(Cmd::Start);
         let n = input.len().max(1);
         for _ in 0..n {
             emit(output, &msg);
         }
         Ok(())
-     }}
+    }
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(vec![], LogicalTypeId::Varchar.into())]
     }
@@ -295,11 +295,11 @@ impl VScalar for WebApiStop {
         _: &Self::State,
         _input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let msg = call(Cmd::Stop);
         emit(output, &msg);
         Ok(())
-     }}
+    }
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(vec![], LogicalTypeId::Varchar.into())]
     }
@@ -312,11 +312,11 @@ impl VScalar for WebApiStatus {
         _: &Self::State,
         _input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let msg = call(Cmd::Status);
         emit(output, &msg);
         Ok(())
-     }}
+    }
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(vec![], LogicalTypeId::Varchar.into())]
     }

@@ -486,6 +486,7 @@ impl VTab for MigrateVTab {
         let result = &init_data.results[current_index];
 
         let mut version_vector = output.flat_vector(0);
+        // SAFETY: version column is declared INTEGER; vector has at least one row
         (unsafe { version_vector.as_mut_slice::<i32>() })[0] = result.version;
 
         let name_vector = output.flat_vector(1);
@@ -600,6 +601,7 @@ impl VTab for MigrationStatusVTab {
         let result = &init_data.results[current_index];
 
         let mut version_vector = output.flat_vector(0);
+        // SAFETY: version column is declared INTEGER; vector has at least one row
         (unsafe { version_vector.as_mut_slice::<i32>() })[0] = result.version;
 
         let name_vector = output.flat_vector(1);
@@ -949,6 +951,7 @@ impl VTab for MigrateSchemaVTab {
         let result = &init_data.results[current_index];
 
         let mut version_vector = output.flat_vector(0);
+        // SAFETY: version column is declared INTEGER; vector has at least one row
         (unsafe { version_vector.as_mut_slice::<i32>() })[0] = result.version;
 
         let name_vector = output.flat_vector(1);
@@ -1083,6 +1086,7 @@ impl VTab for MigrationStatusSchemaVTab {
         let result = &init_data.results[current_index];
 
         let mut version_vector = output.flat_vector(0);
+        // SAFETY: version column is declared INTEGER; vector has at least one row
         (unsafe { version_vector.as_mut_slice::<i32>() })[0] = result.version;
 
         let name_vector = output.flat_vector(1);

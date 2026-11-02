@@ -812,6 +812,7 @@ impl VTab for HanaScanVTab {
                                 }
                             }
                             LogicalTypeId::Tinyint | LogicalTypeId::Smallint => {
+                                // SAFETY: map_hana_type maps HANA TINYINT to Smallint, so this vector is always i16
                                 let slice = unsafe { flat_vector.as_mut_slice::<i16>() };
                                 if let Ok(Some(i)) = hdb_value.clone().try_into::<Option<i16>>() {
                                     slice[row_idx] = i;
@@ -820,6 +821,7 @@ impl VTab for HanaScanVTab {
                                 }
                             }
                             LogicalTypeId::Integer => {
+                                // SAFETY: output vector for this arm is declared as i32
                                 let slice = unsafe { flat_vector.as_mut_slice::<i32>() };
                                 if let Ok(Some(i)) = hdb_value.clone().try_into::<Option<i32>>() {
                                     slice[row_idx] = i;
@@ -828,6 +830,7 @@ impl VTab for HanaScanVTab {
                                 }
                             }
                             LogicalTypeId::Bigint => {
+                                // SAFETY: output vector for this arm is declared as i64
                                 let slice = unsafe { flat_vector.as_mut_slice::<i64>() };
                                 if let Ok(Some(i)) = hdb_value.clone().try_into::<Option<i64>>() {
                                     slice[row_idx] = i;
@@ -836,6 +839,7 @@ impl VTab for HanaScanVTab {
                                 }
                             }
                             LogicalTypeId::Float => {
+                                // SAFETY: output vector for this arm is declared as f32
                                 let slice = unsafe { flat_vector.as_mut_slice::<f32>() };
                                 if let Ok(Some(f)) = hdb_value.clone().try_into::<Option<f32>>() {
                                     slice[row_idx] = f;
@@ -844,6 +848,7 @@ impl VTab for HanaScanVTab {
                                 }
                             }
                             LogicalTypeId::Double => {
+                                // SAFETY: output vector for this arm is declared as f64
                                 let slice = unsafe { flat_vector.as_mut_slice::<f64>() };
                                 if let Ok(Some(d)) = hdb_value.clone().try_into::<Option<f64>>() {
                                     slice[row_idx] = d;
@@ -852,6 +857,7 @@ impl VTab for HanaScanVTab {
                                 }
                             }
                             LogicalTypeId::Boolean => {
+                                // SAFETY: output vector for this arm is declared as bool
                                 let slice = unsafe { flat_vector.as_mut_slice::<bool>() };
                                 if let Ok(Some(b)) = hdb_value.clone().try_into::<Option<bool>>() {
                                     slice[row_idx] = b;

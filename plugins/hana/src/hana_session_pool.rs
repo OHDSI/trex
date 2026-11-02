@@ -120,14 +120,16 @@ impl VScalar for HanaEvictSessionScalar {
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if input.len() == 0 {
             return Err("No input provided".into());
         }
 
         let session_id_vector = input.flat_vector(0);
-        let session_id_slice =
-            session_id_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: input column is VARCHAR; len == input.len()
+        let session_id_slice = unsafe {
+            session_id_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
+        };
 
         let flat_vector = output.flat_vector();
         for row in 0..input.len() {
@@ -139,7 +141,7 @@ impl VScalar for HanaEvictSessionScalar {
             flat_vector.insert(row, &format!("evicted {}", n));
         }
         Ok(())
-     }}
+    }
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(

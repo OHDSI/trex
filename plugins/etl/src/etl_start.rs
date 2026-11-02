@@ -51,7 +51,7 @@ impl VScalar for EtlStartScalar {
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if input.len() == 0 {
             return Err("No input provided".into());
         }
@@ -59,10 +59,12 @@ impl VScalar for EtlStartScalar {
         let name_vector = input.flat_vector(0);
         let conn_vector = input.flat_vector(1);
 
+        // SAFETY: input column is VARCHAR; len == input.len()
         let name_slice =
-            name_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+            unsafe { name_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        // SAFETY: input column is VARCHAR; len == input.len()
         let conn_slice =
-            conn_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+            unsafe { conn_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
 
         let pipeline_name = duckdb::types::DuckString::new(&mut { name_slice[0] })
             .as_str()
@@ -82,8 +84,10 @@ impl VScalar for EtlStartScalar {
 
         let mode_str = if has_mode_col {
             let mode_vector = input.flat_vector(2);
-            let mode_slice =
-                mode_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+            // SAFETY: input column is VARCHAR; len == input.len()
+            let mode_slice = unsafe {
+                mode_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
+            };
             duckdb::types::DuckString::new(&mut { mode_slice[0] })
                 .as_str()
                 .to_string()
@@ -101,10 +105,17 @@ impl VScalar for EtlStartScalar {
             let retry_delay_vector = input.flat_vector(5);
             let retry_max_vector = input.flat_vector(6);
 
-            let batch_size_slice = batch_size_vector.as_slice_with_len::<i32>(input.len());
-            let batch_timeout_slice = batch_timeout_vector.as_slice_with_len::<i32>(input.len());
-            let retry_delay_slice = retry_delay_vector.as_slice_with_len::<i32>(input.len());
-            let retry_max_slice = retry_max_vector.as_slice_with_len::<i32>(input.len());
+            // SAFETY: input column is i32; len == input.len()
+            let batch_size_slice =
+                unsafe { batch_size_vector.as_slice_with_len::<i32>(input.len()) };
+            // SAFETY: input column is i32; len == input.len()
+            let batch_timeout_slice =
+                unsafe { batch_timeout_vector.as_slice_with_len::<i32>(input.len()) };
+            // SAFETY: input column is i32; len == input.len()
+            let retry_delay_slice =
+                unsafe { retry_delay_vector.as_slice_with_len::<i32>(input.len()) };
+            // SAFETY: input column is i32; len == input.len()
+            let retry_max_slice = unsafe { retry_max_vector.as_slice_with_len::<i32>(input.len()) };
 
             let batch_size = batch_size_slice[0];
             let batch_timeout_ms = batch_timeout_slice[0];
@@ -137,10 +148,17 @@ impl VScalar for EtlStartScalar {
             let retry_delay_vector = input.flat_vector(4);
             let retry_max_vector = input.flat_vector(5);
 
-            let batch_size_slice = batch_size_vector.as_slice_with_len::<i32>(input.len());
-            let batch_timeout_slice = batch_timeout_vector.as_slice_with_len::<i32>(input.len());
-            let retry_delay_slice = retry_delay_vector.as_slice_with_len::<i32>(input.len());
-            let retry_max_slice = retry_max_vector.as_slice_with_len::<i32>(input.len());
+            // SAFETY: input column is i32; len == input.len()
+            let batch_size_slice =
+                unsafe { batch_size_vector.as_slice_with_len::<i32>(input.len()) };
+            // SAFETY: input column is i32; len == input.len()
+            let batch_timeout_slice =
+                unsafe { batch_timeout_vector.as_slice_with_len::<i32>(input.len()) };
+            // SAFETY: input column is i32; len == input.len()
+            let retry_delay_slice =
+                unsafe { retry_delay_vector.as_slice_with_len::<i32>(input.len()) };
+            // SAFETY: input column is i32; len == input.len()
+            let retry_max_slice = unsafe { retry_max_vector.as_slice_with_len::<i32>(input.len()) };
 
             let batch_size = batch_size_slice[0];
             let batch_timeout_ms = batch_timeout_slice[0];
@@ -175,7 +193,7 @@ impl VScalar for EtlStartScalar {
         let flat_vector = output.flat_vector();
         flat_vector.insert(0, &response);
         Ok(())
-     }}
+    }
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![

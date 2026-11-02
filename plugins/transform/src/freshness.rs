@@ -261,6 +261,7 @@ impl VTab for FreshnessVTab {
         loaded_at_vector.insert(0, result.max_loaded_at.as_str());
 
         let mut age_vector = output.flat_vector(3);
+        // SAFETY: output column is declared f64; vector has at least one row
         (unsafe { age_vector.as_mut_slice::<f64>() })[0] = result.age_hours;
 
         let warn_vector = output.flat_vector(4);

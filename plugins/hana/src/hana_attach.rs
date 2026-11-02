@@ -232,15 +232,19 @@ impl VScalar for HanaDetachScalar {
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn Error>> { unsafe {
+    ) -> Result<(), Box<dyn Error>> {
         if input.len() == 0 {
             return Err("No input provided".into());
         }
 
         let dbname_vec = input.flat_vector(0);
         let schema_vec = input.flat_vector(1);
-        let dbname_slice = dbname_vec.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let schema_slice = schema_vec.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: input column is VARCHAR; len == input.len()
+        let dbname_slice =
+            unsafe { dbname_vec.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        // SAFETY: input column is VARCHAR; len == input.len()
+        let schema_slice =
+            unsafe { schema_vec.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
 
         let dbname = {
             let mut binding = dbname_slice[0];
@@ -275,7 +279,7 @@ impl VScalar for HanaDetachScalar {
         let flat = output.flat_vector();
         flat.insert(0, &msg);
         Ok(())
-     }}
+    }
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(

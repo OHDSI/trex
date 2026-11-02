@@ -79,13 +79,15 @@ impl VScalar for FhirStartScalar {
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let host_vector = input.flat_vector(0);
         let port_vector = input.flat_vector(1);
 
+        // SAFETY: input column is VARCHAR; len == input.len()
         let host_slice =
-            host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let port_slice = port_vector.as_slice_with_len::<i32>(input.len());
+            unsafe { host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        // SAFETY: input column is i32; len == input.len()
+        let port_slice = unsafe { port_vector.as_slice_with_len::<i32>(input.len()) };
 
         if input.len() == 0 {
             return Err("No input provided".into());
@@ -98,8 +100,10 @@ impl VScalar for FhirStartScalar {
 
         let db_path = if input.num_columns() >= 4 {
             let db_path_vector = input.flat_vector(3);
-            let db_path_slice =
-                db_path_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+            // SAFETY: input column is VARCHAR; len == input.len()
+            let db_path_slice = unsafe {
+                db_path_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
+            };
             duckdb::types::DuckString::new(&mut { db_path_slice[0] })
                 .as_str()
                 .to_string()
@@ -109,8 +113,10 @@ impl VScalar for FhirStartScalar {
 
         let db_name = if input.num_columns() >= 3 {
             let db_name_vector = input.flat_vector(2);
-            let db_name_slice =
-                db_name_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+            // SAFETY: input column is VARCHAR; len == input.len()
+            let db_name_slice = unsafe {
+                db_name_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
+            };
             duckdb::types::DuckString::new(&mut { db_name_slice[0] })
                 .as_str()
                 .to_string()
@@ -130,7 +136,7 @@ impl VScalar for FhirStartScalar {
         let flat_vector = output.flat_vector();
         flat_vector.insert(0, &response);
         Ok(())
-     }}
+    }
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![
@@ -168,13 +174,15 @@ impl VScalar for FhirStopScalar {
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let host_vector = input.flat_vector(0);
         let port_vector = input.flat_vector(1);
 
+        // SAFETY: input column is VARCHAR; len == input.len()
         let host_slice =
-            host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let port_slice = port_vector.as_slice_with_len::<i32>(input.len());
+            unsafe { host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        // SAFETY: input column is i32; len == input.len()
+        let port_slice = unsafe { port_vector.as_slice_with_len::<i32>(input.len()) };
 
         if input.len() == 0 {
             return Err("No input provided".into());
@@ -193,7 +201,7 @@ impl VScalar for FhirStopScalar {
         let flat_vector = output.flat_vector();
         flat_vector.insert(0, &response);
         Ok(())
-     }}
+    }
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(
@@ -285,13 +293,13 @@ impl VScalar for FhirVersionScalar {
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if input.len() > 0 {
             let flat_vector = output.flat_vector();
             flat_vector.insert(0, "fhir extension v0.1.0 (FHIR R4 4.0.1)");
         }
         Ok(())
-     }}
+    }
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(

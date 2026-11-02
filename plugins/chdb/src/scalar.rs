@@ -14,10 +14,13 @@ impl VScalar for StartChdbDatabaseScalar {
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let data_path = if input.len() > 0 {
             let path_vector = input.flat_vector(0);
-            let path_slice = path_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+            // SAFETY: input column is VARCHAR; len == input.len()
+            let path_slice = unsafe {
+                path_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
+            };
             if let Some(first_path) = path_slice.get(0) {
                 let path = duckdb::types::DuckString::new(&mut { *first_path }).as_str().to_string();
                 if path.is_empty() { None } else { Some(path) }
@@ -32,7 +35,7 @@ impl VScalar for StartChdbDatabaseScalar {
         let flat_vector = output.flat_vector();
         flat_vector.insert(0, &result);
         Ok(())
-     }}
+    }
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![
@@ -57,7 +60,7 @@ impl VScalar for StopChdbDatabaseScalar {
         _state: &Self::State,
         _input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let result = match stop_chdb_database_scalar() {
             Ok(result) => result,
             Err(e) => format!("Error: {}", e),
@@ -66,7 +69,7 @@ impl VScalar for StopChdbDatabaseScalar {
         let flat_vector = output.flat_vector();
         flat_vector.insert(0, &result);
         Ok(())
-     }}
+    }
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(
@@ -85,7 +88,7 @@ impl VScalar for ExecuteDmlScalar {
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> { unsafe {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if input.len() == 0 {
             let flat_vector = output.flat_vector();
             flat_vector.insert(0, "Error: Query parameter required");
@@ -93,7 +96,10 @@ impl VScalar for ExecuteDmlScalar {
         }
         
         let query_vector = input.flat_vector(0);
-        let query_slice = query_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: input column is VARCHAR; len == input.len()
+        let query_slice = unsafe {
+            query_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
+        };
         
         if let Some(first_query) = query_slice.get(0) {
             let query = duckdb::types::DuckString::new(&mut { *first_query }).as_str().to_string();     
@@ -113,7 +119,7 @@ impl VScalar for ExecuteDmlScalar {
         }
         
         Ok(())
-     }}
+    }
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(
