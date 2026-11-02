@@ -141,7 +141,10 @@ fn null_typed_column_encodes() {
 // extension, since cargo test has no DuckDB C API table.
 #[test]
 fn variant_column_encodes_or_errors_cleanly() {
+    // Live VARIANT round-trip needs a real LOAD; this pins the SQLSTATE mapping it relies on.
     let msg = "query exec: Conversion error from type Variant at index: 0, decoding Variant columns is not supported";
     assert_eq!(exec_error_sqlstate(msg), "0A000");
     assert_eq!(exec_error_sqlstate("Catalog Error: table x does not exist"), "XX000");
+    assert_eq!(exec_error_sqlstate("Conversion Error: Could not convert string 'a' to INT32"), "XX000");
+    assert_eq!(exec_error_sqlstate("Not implemented Error: feature not supported"), "XX000");
 }
