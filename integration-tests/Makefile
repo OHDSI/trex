@@ -19,7 +19,7 @@ PYTEST_COV_ARGS=--cov=. --cov-report=xml:coverage/python.xml --cov-append
 
 configure:
 	$(PYTHON_BIN) -m venv $(VENV)
-	$(VENV)/bin/pip install 'duckdb==1.4.4' pytest pytest-cov psycopg2-binary 'psycopg[binary]' websockets requests
+	$(VENV)/bin/pip install 'duckdb==2.0.0' pytest pytest-cov psycopg2-binary 'psycopg[binary]' websockets requests
 
 check-extensions:
 	@test -f $(DB_EXT) || (echo "Build db first: cd ../plugins/db && make configure && make debug" && exit 1)
