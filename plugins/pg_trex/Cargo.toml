@@ -17,12 +17,12 @@ pg_test = []
 
 [dependencies]
 pgrx = "0.16.1"
-duckdb = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex", features = ["vtab-arrow"] }
-arrow = { version = "57", default-features = false }
-arrow-ipc = { version = "57", features = ["lz4"] }
-arrow-schema = "57"
-arrow-array = "57"
-arrow-buffer = "57"
+duckdb = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex", features = ["vtab-arrow"] }
+arrow = { version = "59", default-features = false }
+arrow-ipc = { version = "59", features = ["lz4"] }
+arrow-schema = "59"
+arrow-array = "59"
+arrow-buffer = "59"
 crossbeam-channel = "0.5"
 
 [dev-dependencies]
