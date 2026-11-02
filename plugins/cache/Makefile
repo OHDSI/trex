@@ -4,8 +4,11 @@ PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 EXTENSION_NAME=cache
 
-USE_UNSTABLE_C_API=1
-TARGET_DUCKDB_VERSION=v1.4.4
+# DuckDB 2.0 loads stable-V1 (C_STRUCT, capi < 2) extensions via <name>_init_c_api;
+# cache's API use was verified by LOAD on 2.0.
+USE_UNSTABLE_C_API=0
+TARGET_DUCKDB_VERSION=v1.5.6
+DUCKDB_TEST_VERSION=v2.0.0
 
 all: configure debug
 
