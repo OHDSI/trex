@@ -54,8 +54,8 @@ fn append_extension_metadata(buf: &mut Vec<u8>, abi_type: &str, duckdb_version: 
 }
 
 /// Builds a `.trex` file from `libhades.so` by appending DuckDB extension
-/// metadata with abi_type = "C_STRUCT_UNSTABLE" (matching the `hades` Makefile
-/// USE_UNSTABLE_C_API=1 setting) so DuckDB accepts the raw shared library.
+/// metadata with abi_type = "C_STRUCT" (matching the `hades` Makefile
+/// USE_UNSTABLE_C_API=0 setting) so DuckDB accepts the raw shared library.
 fn trex_extension_path() -> PathBuf {
     let src = extension_path();
     assert!(src.exists(), "Extension not built at {}. Run `cargo build` first.", src.display());
@@ -90,11 +90,11 @@ fn trex_extension_path() -> PathBuf {
         #[cfg(target_os = "windows")]
         let platform = "windows_amd64";
 
-        // USE_UNSTABLE_C_API=1 in the Makefile means abi_type=C_STRUCT_UNSTABLE
+        // USE_UNSTABLE_C_API=0 in the Makefile means abi_type=C_STRUCT
         append_extension_metadata(
             &mut trex_bytes,
-            "C_STRUCT_UNSTABLE",
-            "v1.2.0",   // min_duckdb_version from duckdb_entrypoint_c_api macro default
+            "C_STRUCT",
+            "v1.5.6",   // min_duckdb_version (stable C API version)
             platform,
             "v0.1.0",
         );

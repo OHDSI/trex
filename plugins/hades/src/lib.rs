@@ -32,11 +32,11 @@ struct HadesSetupEnvScalar;
 impl VScalar for HadesSetupEnvScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn duckdb::vtab::arrow::WritableVector,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> { unsafe {
         if input.len() == 0 {
             return Err("No input provided".into());
         }
@@ -59,7 +59,7 @@ impl VScalar for HadesSetupEnvScalar {
         let flat = output.flat_vector();
         flat.insert(0, &response);
         Ok(())
-    }
+     }}
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(
@@ -97,11 +97,11 @@ struct HadesExecuteScalar;
 impl VScalar for HadesExecuteScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn duckdb::vtab::arrow::WritableVector,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> { unsafe {
         if input.len() == 0 {
             return Err("No input provided".into());
         }
@@ -145,7 +145,7 @@ impl VScalar for HadesExecuteScalar {
         let flat = output.flat_vector();
         flat.insert(0, &response);
         Ok(())
-    }
+     }}
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(
@@ -217,11 +217,11 @@ struct HadesCancelScalar;
 impl VScalar for HadesCancelScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn duckdb::vtab::arrow::WritableVector,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> { unsafe {
         if input.len() == 0 {
             return Err("No input provided".into());
         }
@@ -235,7 +235,7 @@ impl VScalar for HadesCancelScalar {
         let flat = output.flat_vector();
         flat.insert(0, &response);
         Ok(())
-    }
+     }}
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
         vec![ScalarFunctionSignature::exact(
