@@ -364,7 +364,7 @@ pub fn merge_batches(
     merge_with_duckdb(&schema, all_batches, &decomposed.merge_sql)
 }
 
-/// Load batches into DuckDB via arrow(?) and run merge SQL.
+/// Load batches into DuckDB via trex_db_arrow(?) and run merge SQL.
 /// Replaces `_merged` with an inline arrow subquery (DuckDB doesn't allow
 /// prepared params in DDL).
 fn merge_with_duckdb(
@@ -379,11 +379,12 @@ fn merge_with_duckdb(
 
     let rewritten_sql = merge_sql.replace(
         "FROM _merged",
-        "FROM (SELECT * FROM arrow(?)) AS _merged",
+        "FROM (SELECT * FROM trex_db_arrow(?)) AS _merged",
     );
 
     crate::local_connections::with_connection(|conn| {
-        let _ = conn.register_table_function::<ArrowVTab>("arrow");
+        // Re-registered on every call over pooled connections; "already exists" is expected.
+        let _ = conn.register_table_function::<ArrowVTab>("trex_db_arrow");
 
         let batch = ArrowBatchRegistration::new(merged_batch);
 

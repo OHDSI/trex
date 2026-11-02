@@ -73,13 +73,13 @@ pub fn needs_final_pass(sql: &str) -> bool {
     DUCKDB_ONLY_FUNCTIONS.iter().any(|f| upper.contains(f))
 }
 
-/// Replace the first `FROM {table_ref}` with `FROM (SELECT * FROM arrow(?)) AS {table_ref}`.
+/// Replace the first `FROM {table_ref}` with `FROM (SELECT * FROM trex_db_arrow(?)) AS {table_ref}`.
 /// Case-insensitive search for the FROM keyword.
 pub fn rewrite_with_arrow_source(sql: &str, table_ref: &str) -> String {
     let upper = sql.to_uppercase();
     let needle = format!("FROM {}", table_ref.to_uppercase());
     if let Some(pos) = upper.find(&needle) {
-        let replacement = format!("FROM (SELECT * FROM arrow(?)) AS {table_ref}");
+        let replacement = format!("FROM (SELECT * FROM trex_db_arrow(?)) AS {table_ref}");
         format!("{}{}{}", &sql[..pos], replacement, &sql[pos + needle.len()..])
     } else {
         sql.to_string()
@@ -102,7 +102,8 @@ fn execute_on_connection(
         .map_err(|e| format!("Failed to concatenate record batches: {e}"))?;
 
     crate::local_connections::with_connection(|conn| {
-        let _ = conn.register_table_function::<ArrowVTab>("arrow");
+        // Re-registered on every call over pooled connections; "already exists" is expected.
+        let _ = conn.register_table_function::<ArrowVTab>("trex_db_arrow");
 
         let batch = ArrowBatchRegistration::new(merged);
         let mut stmt = conn
@@ -136,7 +137,7 @@ mod tests {
         let rewritten = rewrite_with_arrow_source(sql, "_result");
         assert_eq!(
             rewritten,
-            "SELECT a, b FROM (SELECT * FROM arrow(?)) AS _result WHERE a > 1"
+            "SELECT a, b FROM (SELECT * FROM trex_db_arrow(?)) AS _result WHERE a > 1"
         );
     }
 
@@ -145,7 +146,7 @@ mod tests {
         let sql = "SELECT * FROM _data UNION ALL SELECT * FROM _data";
         let rewritten = rewrite_with_arrow_source(sql, "_data");
         assert!(rewritten.starts_with(
-            "SELECT * FROM (SELECT * FROM arrow(?)) AS _data"
+            "SELECT * FROM (SELECT * FROM trex_db_arrow(?)) AS _data"
         ));
         assert!(rewritten.ends_with("SELECT * FROM _data"));
     }
