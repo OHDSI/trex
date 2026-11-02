@@ -243,7 +243,7 @@ jobs:
           - name: distributed
             display: "distributed (tier1/2/3)"
             exts: pool db
-            tests: test_tier1_single_node.py test_tier2_two_node.py test_tier3_aggregation.py
+            tests: test_tier1_single_node.py test_tier2_two_node.py test_tier3_aggregation.py test_regr_db_final_pass_functions.py
 
           - name: pgwire
             exts: pool db pgwire
