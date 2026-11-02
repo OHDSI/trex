@@ -28,7 +28,7 @@ RUN curl -fsSL https://raw.githubusercontent.com/technomancy/leiningen/stable/bi
 
 # libtrexsql (the DuckDB fork) — headers for the cargo build, .so for runtime linking.
 RUN case "${TARGETARCH:-$(dpkg --print-architecture)}" in amd64) A=amd64 ;; arm64) A=arm64 ;; esac \
-    && curl -fsSL -o /tmp/t.zip "https://github.com/p-hoffmann/trexsql-rs/releases/download/v1.4.4-trex/libtrexsql-linux-${A}.zip" \
+    && curl -fsSL -o /tmp/t.zip "https://github.com/p-hoffmann/trexsql-rs/releases/download/v2.0.0-trex/libtrexsql-linux-${A}.zip" \
     && mkdir -p /opt/trexsql && unzip -o /tmp/t.zip -d /opt/trexsql \
     && cp /opt/trexsql/libtrexsql.so /usr/local/lib/ \
     && cp /opt/trexsql/duckdb.h /usr/local/include/ 2>/dev/null || true \

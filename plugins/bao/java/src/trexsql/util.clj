@@ -49,7 +49,9 @@
     (catch Exception e
       (log/debug "circe load failed; trying direct path" e)
       (try
-        (let [ext-path "/data/.duckdb/extensions/v1.4.0/linux_amd64/circe.duckdb_extension"]
+        (let [ver (or (System/getenv "DUCKDB_VERSION") "2.0.0")
+              ver (if (.startsWith ^String ver "v") (subs ver 1) ver)
+              ext-path (str "/data/.duckdb/extensions/v" ver "/linux_amd64/circe.duckdb_extension")]
           (db/execute! db (format "LOAD '%s'" ext-path))
           (swap! (:extensions-loaded db) conj "circe")
           true)

@@ -21,7 +21,7 @@ apt-get update && apt-get install -y \
     && apt-get install -y -t testing libstdc++6 && \
     rm -rf /var/lib/apt/lists/*
 
-ARG TREXSQL_VERSION=v1.4.4-trex
+ARG TREXSQL_VERSION=v2.0.0-trex
 RUN mkdir -p /usr/local/lib && \
     wget -O /tmp/libtrexsql.zip \
       https://github.com/p-hoffmann/trexsql-rs/releases/download/${TREXSQL_VERSION}/libtrexsql-linux-amd64.zip && \
