@@ -25,6 +25,12 @@ enum Backend {
     Pool {
         session_id: u64,
     },
+    // A private in-memory database queried without prepared statements, so the
+    // connection can be routed to a remote server with `CONNECT` (see session.rs).
+    Session {
+        con: Mutex<ffi::duckdb_connection>,
+        raw_db: ffi::duckdb_database,
+    },
 }
 
 pub struct TrexDatabase {
@@ -112,8 +118,32 @@ impl TrexDatabase {
         })
     }
 
+    /// Open a private in-memory database whose statements run unprepared, so the
+    /// session can be routed to a remote server with `CONNECT 'quack:…'`.
+    pub fn open_session() -> Result<Self, String> {
+        unsafe {
+            let mut raw_db: ffi::duckdb_database = ptr::null_mut();
+            if ffi::duckdb_open(ptr::null(), &mut raw_db) != ffi::DuckDBSuccess {
+                return Err("Failed to open database".into());
+            }
+            let mut con: ffi::duckdb_connection = ptr::null_mut();
+            if ffi::duckdb_connect(raw_db, &mut con) != ffi::DuckDBSuccess {
+                ffi::duckdb_close(&mut raw_db);
+                return Err("Failed to create connection".into());
+            }
+            let _ = crate::session::query(con, "CALL disable_logging()");
+            Ok(TrexDatabase {
+                backend: Backend::Session { con: Mutex::new(con), raw_db },
+            })
+        }
+    }
+
     pub fn execute(&self, sql: &str) -> Result<(), String> {
         match &self.backend {
+            Backend::Session { con, .. } => {
+                let con = con.lock().map_err(|e| e.to_string())?;
+                unsafe { crate::session::query(*con, sql) }.map(|_| ())
+            }
             Backend::DuckDb { conn, .. } => {
                 let conn = conn.lock().map_err(|e| e.to_string())?;
                 conn.execute_batch(sql).map_err(|e| format!("{e}"))
@@ -126,6 +156,10 @@ impl TrexDatabase {
 
     pub fn query(&self, sql: &str) -> Result<TrexResult, String> {
         match &self.backend {
+            Backend::Session { con, .. } => {
+                let con = con.lock().map_err(|e| e.to_string())?;
+                unsafe { crate::session::query(*con, sql) }
+            }
             Backend::DuckDb { conn, .. } => {
                 let conn = conn.lock().map_err(|e| e.to_string())?;
                 TrexResult::from_query(&conn, sql)
@@ -138,11 +172,13 @@ impl TrexDatabase {
     }
 
     /// The underlying `duckdb_database` (for the appender API). Null for pool
-    /// sessions, where the appender path is unsupported (use SQL instead).
+    /// and routed sessions, where the appender path is unsupported (use SQL instead).
     pub fn raw_db(&self) -> ffi::duckdb_database {
         match &self.backend {
             Backend::DuckDb { raw_db, .. } => *raw_db,
-            Backend::Pool { .. } => ptr::null_mut(),
+            // A session may be routed to a remote server; a local appender would
+            // write to the wrong database.
+            Backend::Pool { .. } | Backend::Session { .. } => ptr::null_mut(),
         }
     }
 }
@@ -159,6 +195,13 @@ impl Drop for TrexDatabase {
             }
             Backend::Pool { session_id } => {
                 let _ = trex_pool_client::destroy_session(*session_id);
+            }
+            Backend::Session { con, raw_db } => {
+                let con = con.get_mut().unwrap_or_else(|e| e.into_inner());
+                unsafe {
+                    ffi::duckdb_disconnect(con);
+                    ffi::duckdb_close(raw_db);
+                }
             }
         }
     }
