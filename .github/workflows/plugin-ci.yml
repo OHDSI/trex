@@ -616,6 +616,11 @@ jobs:
           node-version: ${{ matrix.NODE_VERSION || '20.x' }}
           registry-url: "https://npm.pkg.github.com"
           scope: "@trex"
+      # `make configure` pip-installs duckdb==2.0.0, which needs Python >= 3.11;
+      # the ubuntu-22.04 leg of random_runner ships 3.10.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       # Opt-in per matrix entry, because it costs a registry round trip on
       # every leg that asks for it. Only ./plugins/studio does: npm's arborist
       # dereferences `node.parent` in #loadPeerSet after a recursive
