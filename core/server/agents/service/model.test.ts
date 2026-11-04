@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertThrows } from "jsr:@std/assert";
-import { bedrockSupportsPromptCaching, cacheProviderOptions, isAnthropicModel, isBedrockModel, isOpenAIModel, mergeProviderOptions, parseModelString, reasoningEffortProviderOptions, resolveModel, withSystemCachePoint, withToolCachePoint } from "./model.ts";
+import { bedrockSupportsPromptCaching, cacheProviderOptions, isAnthropicModel, isBedrockModel, isOpenAIModel, mergeProviderOptions, parseModelString, reasoningEffortProviderOptions, resolveModel, vertexSettings, withSystemCachePoint, withToolCachePoint } from "./model.ts";
 
 Deno.test("parseModelString splits on first slash only", () => {
   assertEquals(parseModelString("anthropic/claude-sonnet-5"), {
@@ -361,4 +361,139 @@ Deno.test("withToolCachePoint and withSystemCachePoint agree on which bedrock mo
     assertEquals(toolMarked, systemMarked, `disagreement on ${modelId}`);
     assertEquals(toolMarked, bedrockSupportsPromptCaching(model), `neither matches the narrow gate on ${modelId}`);
   }
+});
+
+// ---------- cloud provider routes ----------
+// Each test stubs fetch, starts a real request through the resolved model and
+// checks where it went and how it authenticated; the stub then fails the call.
+
+interface Captured { url: string; headers: Headers; body: string }
+
+async function captureRequests(
+  model: { doGenerate: (opts: unknown) => Promise<unknown> },
+  // deno-lint-ignore no-explicit-any
+  respond: (url: string) => Response | undefined = () => undefined,
+): Promise<Captured[]> {
+  const seen: Captured[] = [];
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input);
+    const headers = new Headers(input instanceof Request ? input.headers : init?.headers);
+    const body = typeof init?.body === "string" ? init.body : String(init?.body ?? "");
+    seen.push({ url, headers, body });
+    return respond(url) ?? new Response(JSON.stringify({ error: { message: "stubbed" } }), { status: 418 });
+  }) as typeof fetch;
+  try {
+    await model.doGenerate({ prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }] });
+  } catch { /* the stubbed 418 */ } finally {
+    globalThis.fetch = orig;
+  }
+  return seen;
+}
+
+const envOf = (vars: Record<string, string>) => (k: string) => vars[k];
+
+Deno.test("azure/ routes to the Azure OpenAI resource with api-key auth", async () => {
+  const m = resolveModel("azure/my-gpt-deployment", envOf({ AZURE_RESOURCE_NAME: "acme", AZURE_API_KEY: "az-key" }));
+  assertEquals(m.provider, "azure.responses");
+  const [req] = await captureRequests(m);
+  assertEquals(req.url, "https://acme.openai.azure.com/openai/v1/responses?api-version=v1");
+  assertEquals(req.headers.get("api-key"), "az-key");
+  assertEquals(JSON.parse(req.body).model, "my-gpt-deployment");
+});
+
+Deno.test("azure/ honours AZURE_BASE_URL and AZURE_API_VERSION", async () => {
+  const m = resolveModel("azure/dep", envOf({
+    AZURE_BASE_URL: "https://acme-eu.openai.azure.com/openai", AZURE_API_KEY: "k", AZURE_API_VERSION: "2025-04-01-preview",
+  }));
+  const [req] = await captureRequests(m);
+  assertEquals(req.url, "https://acme-eu.openai.azure.com/openai/v1/responses?api-version=2025-04-01-preview");
+});
+
+Deno.test("azure-anthropic/ routes to Microsoft Foundry's Anthropic API with x-api-key", async () => {
+  const m = resolveModel("azure-anthropic/sonnet-deployment", envOf({
+    ANTHROPIC_FOUNDRY_RESOURCE: "acme-foundry", ANTHROPIC_FOUNDRY_API_KEY: "f-key",
+  }));
+  assertEquals(isAnthropicModel(m), true);
+  const [req] = await captureRequests(m);
+  assertEquals(req.url, "https://acme-foundry.services.ai.azure.com/anthropic/v1/messages");
+  assertEquals(req.headers.get("x-api-key"), "f-key");
+  assertEquals(JSON.parse(req.body).model, "sonnet-deployment");
+});
+
+Deno.test("bedrock-openai/ routes to bedrock-mantle with the Bedrock API key", async () => {
+  const m = resolveModel("bedrock-openai/openai.gpt-oss-120b", envOf({ AWS_BEARER_TOKEN_BEDROCK: "br-key", AWS_REGION: "eu-west-1" }));
+  assertEquals(isOpenAIModel(m), true);
+  const [req] = await captureRequests(m);
+  assertEquals(req.url, "https://bedrock-mantle.eu-west-1.api.aws/openai/v1/responses");
+  assertEquals(req.headers.get("authorization"), "Bearer br-key");
+});
+
+Deno.test("bedrock/ signs with AWS access keys when there is no Bedrock API key", async () => {
+  const m = resolveModel("bedrock/minimax.minimax-m2.5", envOf({
+    AWS_REGION: "us-west-2", AWS_ACCESS_KEY_ID: "AKIATEST", AWS_SECRET_ACCESS_KEY: "secret", AWS_SESSION_TOKEN: "session",
+  }));
+  const [req] = await captureRequests(m);
+  assertEquals(req.url, "https://bedrock-runtime.us-west-2.amazonaws.com/model/minimax.minimax-m2.5/converse");
+  assert(req.headers.get("authorization")?.startsWith("AWS4-HMAC-SHA256 Credential=AKIATEST/"));
+  assertEquals(req.headers.get("x-amz-security-token"), "session");
+});
+
+Deno.test("vertex/ with an express-mode API key", async () => {
+  const m = resolveModel("vertex/gemini-2.5-pro", envOf({ GOOGLE_VERTEX_API_KEY: "v-key" }));
+  const [req] = await captureRequests(m);
+  assert(req.url.startsWith("https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-pro:generateContent"));
+  assertEquals(req.headers.get("x-goog-api-key"), "v-key");
+});
+
+// Service-account auth goes through google-auth-library's own HTTP client,
+// not fetch, so these tests check the settings and endpoints instead of a
+// captured request (a real token exchange would reach Google).
+
+Deno.test("vertexSettings passes service-account credentials to google-auth-library", () => {
+  const sa = { type: "service_account", client_email: "pythia@acme-proj.iam.gserviceaccount.com" };
+  assertEquals(
+    vertexSettings(envOf({
+      GOOGLE_VERTEX_PROJECT: "acme-proj", GOOGLE_VERTEX_LOCATION: "us-east5",
+      GOOGLE_VERTEX_CREDENTIALS: JSON.stringify(sa),
+    })),
+    { project: "acme-proj", location: "us-east5", googleAuthOptions: { credentials: sa } },
+  );
+  assertEquals(
+    vertexSettings(envOf({ GOOGLE_VERTEX_PROJECT: "p", GOOGLE_VERTEX_LOCATION: "global", GOOGLE_APPLICATION_CREDENTIALS: "/run/secrets/sa.json" })),
+    { project: "p", location: "global", googleAuthOptions: { keyFilename: "/run/secrets/sa.json" } },
+  );
+  // neither: google-auth-library's own discovery (metadata server etc.)
+  assertEquals(vertexSettings(envOf({ GOOGLE_VERTEX_PROJECT: "p", GOOGLE_VERTEX_LOCATION: "us-east5" })), {
+    project: "p", location: "us-east5",
+  });
+});
+
+Deno.test("vertex-anthropic/ targets the Anthropic publisher on the project's region", () => {
+  const m = resolveModel("vertex-anthropic/sonnet-model", envOf({
+    GOOGLE_VERTEX_PROJECT: "acme-proj", GOOGLE_VERTEX_LOCATION: "us-east5",
+  }));
+  assertEquals(isAnthropicModel(m), true);
+  assertEquals(
+    m.config.buildRequestUrl(m.config.baseURL, false),
+    "https://us-east5-aiplatform.googleapis.com/v1/projects/acme-proj/locations/us-east5/publishers/anthropic/models/sonnet-model:rawPredict",
+  );
+});
+
+Deno.test("vertex-maas/ targets the OpenAI-compatible Vertex endpoint", () => {
+  const m = resolveModel("vertex-maas/openai/gpt-oss-120b-maas", envOf({
+    GOOGLE_VERTEX_PROJECT: "acme-proj", GOOGLE_VERTEX_LOCATION: "us-central1",
+  }));
+  assertEquals(m.modelId, "openai/gpt-oss-120b-maas");
+  const url = m.config.url({ path: "/chat/completions", modelId: m.modelId });
+  assert(url.includes("/projects/acme-proj/locations/us-central1/endpoints/openapi/chat/completions"), url);
+});
+
+Deno.test("isAnthropicModel covers Anthropic models on Vertex", () => {
+  assertEquals(isAnthropicModel({ provider: "vertex.anthropic.messages" }), true);
+  assertEquals(withSystemCachePoint({ provider: "vertex.anthropic.messages" }, "sys"), {
+    role: "system",
+    content: "sys",
+    providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } },
+  });
 });

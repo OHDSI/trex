@@ -6,6 +6,10 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createAmazonBedrock } from "@ai-sdk/amazon-bedrock";
+import { createAzure } from "@ai-sdk/azure";
+import { createVertex } from "@ai-sdk/google-vertex";
+import { createVertexAnthropic } from "@ai-sdk/google-vertex/anthropic";
+import { createVertexMaas } from "@ai-sdk/google-vertex/maas";
 import type { AgentConfig, HookCtx, ModelSpec } from "../eve-shim/types.ts";
 
 export function parseModelString(s: string): { provider: string; modelId: string } {
@@ -64,6 +68,51 @@ function buildModel(provider: string, modelId: string, creds: Creds, env: EnvFn)
       // A spec apiKey is used as the bearer token (bedrock has no plain
       // apiKey concept — see bedrockModel's bearer-token auth path).
       return bedrockModel(modelId, env, creds.apiKey);
+    case "bedrock-openai": {
+      // OpenAI models on AWS are not on bedrock-runtime: they are served from
+      // the separate bedrock-mantle endpoint as an OpenAI-compatible Responses
+      // API, authenticated with the Bedrock API key. A prefix of its own keeps
+      // openai/ free for the direct OpenAI API.
+      const region = env("AWS_REGION") || "us-east-1";
+      return createOpenAI({
+        apiKey: creds.apiKey ?? env("AWS_BEARER_TOKEN_BEDROCK"),
+        baseURL: creds.baseURL ?? env("BEDROCK_OPENAI_BASE_URL") ??
+          `https://bedrock-mantle.${region}.api.aws/openai/v1`,
+      })(modelId);
+    }
+    case "azure": {
+      // Azure OpenAI; the model id is the deployment name.
+      const baseURL = creds.baseURL ?? env("AZURE_BASE_URL");
+      const apiVersion = env("AZURE_API_VERSION");
+      return createAzure({
+        apiKey: creds.apiKey ?? env("AZURE_API_KEY"),
+        ...(baseURL ? { baseURL } : { resourceName: env("AZURE_RESOURCE_NAME") }),
+        ...(apiVersion ? { apiVersion } : {}),
+      })(modelId);
+    }
+    case "azure-anthropic": {
+      // Anthropic models in Microsoft Foundry speak the Anthropic Messages API (x-api-key
+      // auth) under {resource}.services.ai.azure.com/anthropic/v1; the model id
+      // is the deployment name.
+      const resource = env("ANTHROPIC_FOUNDRY_RESOURCE");
+      return createAnthropic({
+        apiKey: creds.apiKey ?? env("ANTHROPIC_FOUNDRY_API_KEY"),
+        baseURL: creds.baseURL ?? env("ANTHROPIC_FOUNDRY_BASE_URL") ??
+          `https://${resource}.services.ai.azure.com/anthropic/v1`,
+      })(modelId);
+    }
+    case "vertex": {
+      // Gemini on Vertex AI: an express-mode API key, or project + location
+      // with a service account (see vertexSettings).
+      const apiKey = creds.apiKey ?? env("GOOGLE_VERTEX_API_KEY");
+      return createVertex(apiKey ? { apiKey, ...baseURLOf(creds) } : vertexSettings(env, creds))(modelId);
+    }
+    case "vertex-anthropic":
+      return createVertexAnthropic(vertexSettings(env, creds))(modelId);
+    case "vertex-maas":
+      // Partner and open models served by Vertex AI as an OpenAI-compatible
+      // endpoint, e.g. OpenAI's gpt-oss.
+      return createVertexMaas(vertexSettings(env, creds))(modelId);
     case "openai":
     default: {
       // openai and openai-compatible (custom base url)
@@ -71,6 +120,31 @@ function buildModel(provider: string, modelId: string, creds: Creds, env: EnvFn)
       return createOpenAI({ apiKey: creds.apiKey ?? env("OPENAI_API_KEY"), ...(baseURL ? { baseURL } : {}) })(modelId);
     }
   }
+}
+
+function baseURLOf(creds: Creds): { baseURL?: string } {
+  return creds.baseURL ? { baseURL: creds.baseURL } : {};
+}
+
+// Vertex AI project/location plus service-account auth. Agent workers only see
+// forwarded env (plugin/agents.ts), so the key is handed to google-auth-library
+// explicitly: GOOGLE_VERTEX_CREDENTIALS holds the service-account JSON itself,
+// GOOGLE_APPLICATION_CREDENTIALS a path to it. With neither, google-auth-library
+// falls back to its own discovery (e.g. a GCE/GKE metadata server).
+export function vertexSettings(env: EnvFn, creds: Creds = {}) {
+  const json = env("GOOGLE_VERTEX_CREDENTIALS");
+  const keyFilename = env("GOOGLE_APPLICATION_CREDENTIALS");
+  const googleAuthOptions = json
+    ? { credentials: JSON.parse(json) }
+    : keyFilename
+    ? { keyFilename }
+    : undefined;
+  return {
+    project: env("GOOGLE_VERTEX_PROJECT"),
+    location: env("GOOGLE_VERTEX_LOCATION"),
+    ...(googleAuthOptions ? { googleAuthOptions } : {}),
+    ...baseURLOf(creds),
+  };
 }
 
 // Resolution order for a single turn/chat request (spec H1): config.resolveModel
@@ -126,6 +200,14 @@ function bedrockModel(modelId: string, env: EnvFn, bearerTokenOverride?: string)
       }
       return origFetch(url, { ...init, body, headers });
     };
+  } else if (env("AWS_ACCESS_KEY_ID") && env("AWS_SECRET_ACCESS_KEY")) {
+    // Regular AWS credentials (SigV4), passed explicitly because the env the
+    // resolver reads (a worker's forwarded env, or a hook's) need not be
+    // process.env.
+    config.accessKeyId = env("AWS_ACCESS_KEY_ID");
+    config.secretAccessKey = env("AWS_SECRET_ACCESS_KEY");
+    const sessionToken = env("AWS_SESSION_TOKEN");
+    if (sessionToken) config.sessionToken = sessionToken;
   }
   return createAmazonBedrock(config)(modelId);
 }
@@ -168,9 +250,12 @@ export function bedrockSupportsPromptCaching(model: any): boolean {
 // providerOptions key it reads cacheControl from is still the plain
 // "anthropic" (get-cache-control.ts reads providerMetadata.anthropic), so
 // only this predicate — not the marker below — uses the dotted name.
+// Anthropic models on Vertex AI (vertex-anthropic/) report "vertex.anthropic.messages"
+// and read the same "anthropic" cacheControl key; Anthropic models in Microsoft
+// Foundry (azure-anthropic/) is the direct provider with another base URL.
 // deno-lint-ignore no-explicit-any
 export function isAnthropicModel(model: any): boolean {
-  return model?.provider === "anthropic.messages";
+  return model?.provider === "anthropic.messages" || model?.provider === "vertex.anthropic.messages";
 }
 
 // deno-lint-ignore no-explicit-any
