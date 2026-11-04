@@ -132,6 +132,32 @@ pub fn get_start_service_sql(extension: &str, config_json: &str) -> Result<Optio
                 batch_size, batch_timeout_ms, retry_delay_ms, retry_max_attempts
             )))
         }
+        // Quack client-server protocol; jdbc:trexsql:// clients (e.g. WebAPI) connect here.
+        "quack" => {
+            let token = config["token"]
+                .as_str()
+                .filter(|t| t.len() >= 4)
+                .ok_or("quack config requires a 'token' of at least 4 characters")?
+                .replace('\'', "''");
+            let host = config["host"].as_str().unwrap_or("0.0.0.0").replace('\'', "''");
+            let port = config["port"].as_u64().unwrap_or(9494);
+            let local = matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1");
+            let mut opts = format!("token := '{token}'");
+            if !local {
+                opts.push_str(", allow_other_hostname := true");
+            }
+            if let Some(disable) = config["disable_ssl"].as_bool() {
+                opts.push_str(&format!(", disable_ssl := {disable}"));
+            }
+            for key in ["ssl_cert_file", "ssl_key_file"] {
+                if let Some(v) = config[key].as_str().filter(|v| !v.is_empty()) {
+                    opts.push_str(&format!(", {key} := '{}'", v.replace('\'', "''")));
+                }
+            }
+            Ok(Some(format!(
+                "SELECT * FROM quack_serve('quack:{host}:{port}', {opts})"
+            )))
+        }
         "distributed-scheduler" => {
             let host = config["host"].as_str().unwrap_or("0.0.0.0").replace('\'', "''");
             let port = config["port"].as_u64().unwrap_or(50050);
@@ -981,6 +1007,33 @@ mod tests {
     }
 
     #[test]
+    fn start_sql_quack_defaults_to_all_interfaces() {
+        let sql = get_start_service_sql("quack", r#"{"token":"s3cret"}"#).unwrap().expect("some sql");
+        assert_eq!(
+            sql,
+            "SELECT * FROM quack_serve('quack:0.0.0.0:9494', token := 's3cret', allow_other_hostname := true)"
+        );
+    }
+
+    #[test]
+    fn start_sql_quack_local_tls_and_escaping() {
+        let cfg = r#"{"host":"127.0.0.1","port":9500,"token":"it's-a-token","disable_ssl":false,
+                      "ssl_cert_file":"/c.pem","ssl_key_file":"/k.pem"}"#;
+        let sql = get_start_service_sql("quack", cfg).unwrap().expect("some sql");
+        assert_eq!(
+            sql,
+            "SELECT * FROM quack_serve('quack:127.0.0.1:9500', token := 'it''s-a-token', \
+             disable_ssl := false, ssl_cert_file := '/c.pem', ssl_key_file := '/k.pem')"
+        );
+    }
+
+    #[test]
+    fn start_sql_quack_requires_token() {
+        assert!(get_start_service_sql("quack", "{}").is_err());
+        assert!(get_start_service_sql("quack", r#"{"token":"abc"}"#).is_err());
+    }
+
+    #[test]
     fn start_sql_trexas_passes_raw_config_escaped() {
         let cfg = r#"{"endpoint":"o'clock","other":1}"#;
         let sql = get_start_service_sql("trexas", cfg).unwrap().expect("some sql");
@@ -1109,6 +1162,7 @@ mod tests {
             ("etl", r#"{"pipeline_name":"p","connection_string":"c"}"#),
             ("distributed-scheduler", "{}"),
             ("distributed-executor", "{}"),
+            ("quack", r#"{"token":"abcd"}"#),
         ];
         for (ext, cfg) in known {
             let sql = get_start_service_sql(ext, cfg)

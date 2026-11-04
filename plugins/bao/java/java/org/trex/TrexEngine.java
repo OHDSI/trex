@@ -39,6 +39,7 @@ public interface TrexEngine extends Library {
     // host engine instance (same catalog/cache as the runtime). Returns null on
     // error. Used when the WebAPI runs embedded as the trex DuckDB extension.
     Pointer trexsql_open_pool_session();
+    Pointer trexsql_open_session();
     void trexsql_close(Pointer db);
 
     int trexsql_execute(Pointer db, String sql);
@@ -46,6 +47,7 @@ public interface TrexEngine extends Library {
 
     int trexsql_result_column_count(Pointer r);
     String trexsql_result_column_name(Pointer r, int col);
+    int trexsql_result_column_type(Pointer r, int col);
     int trexsql_result_next(Pointer r);
     int trexsql_result_is_null(Pointer r, int col);
     Pointer trexsql_result_get_string(Pointer r, int col);

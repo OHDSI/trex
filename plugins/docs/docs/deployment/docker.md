@@ -193,7 +193,7 @@ The image is built in multiple stages:
    pre-bundles the core Deno workers into eszips, and sets `trex` as the entry
    point.
 
-The `TREXSQL_VERSION` (`v2.0.0-trex`) and `CHDB_VERSION` (`v3.6.0`) build args
+The `TREXSQL_VERSION` (`v2.0.0-trex.1`) and `CHDB_VERSION` (`v3.6.0`) build args
 pin the upstream native libraries.
 
 ## Accessing Services

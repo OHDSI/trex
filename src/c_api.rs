@@ -53,6 +53,21 @@ pub unsafe extern "C" fn trexsql_open(
     }
 }
 
+/// Open a private in-memory database whose statements run unprepared, so it can
+/// be routed to a remote trex server with `CONNECT 'quack:host:port' (TOKEN …)`.
+/// Used by the jdbc:trexsql:// driver. Returns NULL on error.
+#[no_mangle]
+pub extern "C" fn trexsql_open_session() -> *mut TrexDatabase {
+    error::clear_last_error();
+    match TrexDatabase::open_session() {
+        Ok(db) => Box::into_raw(Box::new(db)),
+        Err(e) => {
+            error::set_last_error(&e);
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// Open a TrexSQL database that SHARES an existing `duckdb_database` handle owned
 /// by the caller, rather than opening a new instance. Used by the native WebAPI
 /// extension to run inside the trex engine's DuckDB instance (so a cache built by
@@ -189,6 +204,17 @@ pub unsafe extern "C" fn trexsql_result_column_name(
         return std::ptr::null();
     }
     (*r).column_name(col)
+}
+
+/// Get the type of a column (0-based) as a code from `result::TYPE_*`:
+/// 0 other, 1 boolean, 2 integer, 3 bigint, 4 double, 5 decimal, 6 varchar,
+/// 7 date, 8 timestamp, 9 time, 10 blob.
+#[no_mangle]
+pub unsafe extern "C" fn trexsql_result_column_type(r: *mut TrexResult, col: i32) -> i32 {
+    if r.is_null() {
+        return crate::result::TYPE_OTHER;
+    }
+    (*r).column_type(col)
 }
 
 /// Advance to the next row. Returns 1 if a row is available, 0 if done.
