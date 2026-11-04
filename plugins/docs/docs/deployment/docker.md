@@ -178,7 +178,7 @@ start service extensions:
 
 The image is built in multiple stages:
 
-1. **builder** (`debian:trixie-slim`) — Installs Rust 1.88, downloads the pinned
+1. **builder** (`debian:trixie-slim`) — Installs Rust 1.95, downloads the pinned
    `libtrexsql.so` from `github.com/p-hoffmann/trexsql-rs` (and `libchdb.so`),
    then builds the `trex` binary with cached dependency layers.
 2. **web-builder** (`node:22-trixie-slim`) — Builds the admin web UI (`plugins/web`).
@@ -193,7 +193,7 @@ The image is built in multiple stages:
    pre-bundles the core Deno workers into eszips, and sets `trex` as the entry
    point.
 
-The `TREXSQL_VERSION` (`v1.4.4-trex`) and `CHDB_VERSION` (`v3.6.0`) build args
+The `TREXSQL_VERSION` (`v2.0.0-trex`) and `CHDB_VERSION` (`v3.6.0`) build args
 pin the upstream native libraries.
 
 ## Accessing Services

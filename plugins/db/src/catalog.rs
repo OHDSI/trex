@@ -276,10 +276,9 @@ fn compute_schema_hash_duckdb(schema: &duckdb::arrow::datatypes::SchemaRef) -> u
 
 /// Publish `catalog:{table}` gossip keys for all local tables.
 pub fn advertise_local_tables() -> Result<usize, String> {
-    // SHOW TABLES enumerates every attached catalog, so it goes through the
-    // pool, whose catalog gate keeps it from overlapping a pg_clear_cache()
-    // (the overlap invalidates the database). The per-table lookups below are
-    // by name and stay on the local connection.
+    // SHOW TABLES enumerates every attached catalog and goes through the pool;
+    // postgres_clear_cache() overlapping it is safe since duckdb-postgres#399.
+    // The per-table lookups below are by name and stay on the local connection.
     let (_, batches) = crate::pool::read_arrow("SHOW TABLES")
         .map_err(|e| format!("Failed to execute SHOW TABLES: {e}"))?;
 

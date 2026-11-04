@@ -3,6 +3,7 @@
 use arrow::array::RecordBatch;
 use arrow::compute::take;
 use datafusion::common::hash_utils::create_hashes;
+use datafusion::physical_plan::repartition::REPARTITION_RANDOM_STATE;
 use datafusion::error::{DataFusionError, Result as DFResult};
 
 /// Split a batch into `num_partitions` by `hash(join_key_columns) % num_partitions`.
@@ -32,7 +33,8 @@ pub fn partition_batch(
         .collect();
 
     let mut hashes = vec![0u64; num_rows];
-    create_hashes(&hash_columns, &ahash::RandomState::with_seeds(0, 0, 0, 0), &mut hashes)?;
+    // Same fixed hash state as DataFusion's RepartitionExec.
+    create_hashes(&hash_columns, REPARTITION_RANDOM_STATE.random_state(), &mut hashes)?;
 
     let mut partition_indices: Vec<Vec<u32>> = vec![Vec::new(); num_partitions];
     for (row_idx, hash) in hashes.iter().enumerate() {

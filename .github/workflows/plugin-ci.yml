@@ -647,7 +647,7 @@ jobs:
       - uses: ./.github/actions/setup-libtrexsql
         if: matrix.PKGPATH == './plugins/bao'
         with:
-          version: v1.4.4-trex
+          version: v2.0.0-trex
       - name: Build bao native library
         if: matrix.PKGPATH == './plugins/bao'
         run: |
@@ -655,6 +655,14 @@ jobs:
           mkdir -p plugins/bao/java/resources/linux-x86-64
           cp target/release/libtrexsql_engine.so plugins/bao/java/resources/linux-x86-64/
           cp /tmp/trexsql/libtrexsql.so plugins/bao/java/resources/linux-x86-64/
+      # Opens a DuckDB 1.4-written file on 2.0; runs on PRs here (trexsql-jar.yml is tag-only).
+      - name: Test DuckDB 1.4 file compat
+        if: matrix.PKGPATH == './plugins/bao'
+        run: cargo test --test duckdb2_compat
+        env:
+          TREXSQL_LIB_DIR: /tmp/trexsql
+          LD_LIBRARY_PATH: /tmp/trexsql
+          TREX_EXTENSIONS: none
       - name: Set up Java 21
         if: matrix.PKGPATH == './plugins/bao'
         uses: actions/setup-java@v4
@@ -895,7 +903,7 @@ jobs:
           - PKGPATH: ./plugins/runtime
             SWAP: true
             CARGO_BUILD_JOBS: 4
-            PREBUILD: "sudo apt-get update && sudo apt-get install -y curl unzip clang libclang-dev libopenblas-dev libglib2.0-dev && curl -L -O https://github.com/p-hoffmann/trexsql-rs/releases/download/v1.4.4-trex/libtrexsql-linux-arm64.zip && unzip -o libtrexsql-linux-arm64.zip && sudo cp duckdb.h /usr/local/include/ && sudo cp libtrexsql.so /usr/local/lib/ && sudo ldconfig"
+            PREBUILD: "sudo apt-get update && sudo apt-get install -y curl unzip clang libclang-dev libopenblas-dev libglib2.0-dev && curl -L -O https://github.com/p-hoffmann/trexsql-rs/releases/download/v2.0.0-trex/libtrexsql-linux-arm64.zip && unzip -o libtrexsql-linux-arm64.zip && sudo cp duckdb.h /usr/local/include/ && sudo cp libtrexsql.so /usr/local/lib/ && sudo ldconfig"
 
     runs-on: ubuntu-24.04-arm
 

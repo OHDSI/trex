@@ -294,7 +294,7 @@ pub struct SwarmStartServiceScalar;
 impl VScalar for SwarmStartServiceScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -306,10 +306,9 @@ impl VScalar for SwarmStartServiceScalar {
         let ext_vector = input.flat_vector(0);
         let cfg_vector = input.flat_vector(1);
 
-        let ext_slice =
-            ext_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let cfg_slice =
-            cfg_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let ext_slice = unsafe { ext_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let cfg_slice = unsafe { cfg_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
 
         let extension = duckdb::types::DuckString::new(&mut { ext_slice[0] })
             .as_str()
@@ -391,7 +390,7 @@ pub struct SwarmStopServiceScalar;
 impl VScalar for SwarmStopServiceScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -401,8 +400,8 @@ impl VScalar for SwarmStopServiceScalar {
         }
 
         let ext_vector = input.flat_vector(0);
-        let ext_slice =
-            ext_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let ext_slice = unsafe { ext_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
         let extension = duckdb::types::DuckString::new(&mut { ext_slice[0] })
             .as_str()
             .to_string();
@@ -483,7 +482,7 @@ pub struct SwarmLoadScalar;
 impl VScalar for SwarmLoadScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -493,8 +492,8 @@ impl VScalar for SwarmLoadScalar {
         }
 
         let ext_vector = input.flat_vector(0);
-        let ext_slice =
-            ext_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let ext_slice = unsafe { ext_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
         let extension = duckdb::types::DuckString::new(&mut { ext_slice[0] })
             .as_str()
             .to_string();
@@ -530,7 +529,7 @@ pub struct SwarmSetKeyScalar;
 impl VScalar for SwarmSetKeyScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -542,10 +541,9 @@ impl VScalar for SwarmSetKeyScalar {
         let key_vector = input.flat_vector(0);
         let value_vector = input.flat_vector(1);
 
-        let key_slice =
-            key_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let value_slice =
-            value_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let key_slice = unsafe { key_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let value_slice = unsafe { value_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
 
         let key = duckdb::types::DuckString::new(&mut { key_slice[0] })
             .as_str()
@@ -580,7 +578,7 @@ pub struct SwarmDeleteKeyScalar;
 impl VScalar for SwarmDeleteKeyScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -590,8 +588,8 @@ impl VScalar for SwarmDeleteKeyScalar {
         }
 
         let key_vector = input.flat_vector(0);
-        let key_slice =
-            key_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let key_slice = unsafe { key_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
         let key = duckdb::types::DuckString::new(&mut { key_slice[0] })
             .as_str()
             .to_string();
@@ -619,7 +617,7 @@ pub struct SwarmRegisterServiceScalar;
 impl VScalar for SwarmRegisterServiceScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -632,11 +630,10 @@ impl VScalar for SwarmRegisterServiceScalar {
         let host_vector = input.flat_vector(1);
         let port_vector = input.flat_vector(2);
 
-        let name_slice =
-            name_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let host_slice =
-            host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let port_slice = port_vector.as_slice_with_len::<i32>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let name_slice = unsafe { name_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let host_slice = unsafe { host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let port_slice = unsafe { port_vector.as_slice_with_len::<i32>(input.len()) };
 
         let name = duckdb::types::DuckString::new(&mut { name_slice[0] })
             .as_str()
@@ -734,7 +731,7 @@ pub struct DbOrchestrateSwarmFromEnvScalar;
 impl VScalar for DbOrchestrateSwarmFromEnvScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         _input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -759,7 +756,7 @@ pub struct DbOrchestrateSwarmScalar;
 impl VScalar for DbOrchestrateSwarmScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -770,10 +767,9 @@ impl VScalar for DbOrchestrateSwarmScalar {
         let json_vector = input.flat_vector(0);
         let node_vector = input.flat_vector(1);
 
-        let json_slice =
-            json_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let node_slice =
-            node_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let json_slice = unsafe { json_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let node_slice = unsafe { node_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
 
         let swarm_json = duckdb::types::DuckString::new(&mut { json_slice[0] })
             .as_str()

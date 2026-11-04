@@ -2,14 +2,15 @@
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
-# Set to 1 to enable Unstable API (binaries will only work on TARGET_DUCKDB_VERSION, forwards compatibility will be broken)
-# Note: currently extension-template-rs requires this, as duckdb-rs relies on unstable C API functionality
-USE_UNSTABLE_C_API=1
+# DuckDB 2.0 loads stable-V1 (C_STRUCT, capi < 2) extensions via <name>_init_c_api;
+# chdb's API use was verified by LOAD on 2.0.
+USE_UNSTABLE_C_API=0
 
 # Extension configuration
 EXTENSION_NAME=chdb
-MINIMUM_DUCKDB_VERSION=v1.4.4
-TARGET_DUCKDB_VERSION=v1.4.4
+MINIMUM_DUCKDB_VERSION=v1.5.6
+TARGET_DUCKDB_VERSION=v1.5.6
+DUCKDB_TEST_VERSION=v2.0.0
 
 all: configure debug
 

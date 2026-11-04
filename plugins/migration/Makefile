@@ -4,13 +4,12 @@ PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 EXTENSION_NAME=migration
 
-# Required by duckdb-rs which relies on unstable C API
-USE_UNSTABLE_C_API=1
+# DuckDB 2.0 loads stable-V1 (C_STRUCT, capi < 2) extensions via <name>_init_c_api;
+# migration's API use was verified by LOAD on 2.0.
+USE_UNSTABLE_C_API=0
 
-TARGET_DUCKDB_VERSION=v1.4.4
-
-# Pin test DuckDB to match target version
-DUCKDB_TEST_VERSION=$(TARGET_DUCKDB_VERSION)
+TARGET_DUCKDB_VERSION=v1.5.6
+DUCKDB_TEST_VERSION=v2.0.0
 
 all: configure debug
 

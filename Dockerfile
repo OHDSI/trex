@@ -2,55 +2,26 @@
 # that uses them). DUCKDB_* are also exported as ENV in the final image for
 # introspection parity with older releases.
 ARG DENO_VERSION=v2.7.14
-ARG DUCKDB_VERSION=1.4.4
+ARG DUCKDB_VERSION=2.0.0
 # NOTE: DuckDB publishes the SQLite reader as `sqlite_scanner`; there is no
 # standalone `sqlite` extension at extensions.duckdb.org (the URL 404s), so it is
 # intentionally NOT listed here — with fail-loud fetching it would abort the build.
 ARG DUCKDB_CORE_EXTENSIONS="avro aws delta ducklake fts httpfs icu iceberg inet json mysql_scanner parquet postgres_scanner spatial sqlite_scanner vss"
-# NOTE: `bigquery` is not fetched from community-extensions.duckdb.org — see
-# DUCKDB_BIGQUERY_* below.
-#
-# `snowflake` is redistributable: the extension is MIT (duckdb/community-
-# extensions extensions/snowflake/description.yml, upstream iqea-ai/duckdb-
-# snowflake), unlike the SAP HANA and Simba BigQuery JDBC drivers that have to
-# be fetched at container start. It is published for v1.4.4 on both linux_amd64
-# and linux_arm64, so it belongs in the fail-loud list rather than the optional
-# one. ~11MB compressed.
-#
-# It is a thin wrapper that dlopen()s the Apache Arrow ADBC Snowflake driver
-# (Apache-2.0) at ATTACH time, and that driver is NOT bundled with it, so the
-# prod stage installs it into /usr/local/lib.
-ARG DUCKDB_COMMUNITY_EXTENSIONS="snowflake"
+# `snowflake` is MIT-licensed and published for v2.0.0 on linux_amd64 and
+# linux_arm64. It dlopen()s the Apache Arrow ADBC Snowflake driver at ATTACH time;
+# that driver is not bundled, so the prod stage installs it into /usr/local/lib.
+ARG DUCKDB_COMMUNITY_EXTENSIONS="snowflake bigquery"
 ARG DUCKDB_OPTIONAL_EXTENSIONS=""
-# DuckDB extensions taken from a prebuilt release rather than extensions.duckdb.org.
-# Recorded as ENV in the final image so `docker inspect` still shows which
-# extensions are present.
-ARG DUCKDB_SOURCE_EXTENSIONS="bigquery"
-
-# duckdb-bigquery does not come from community-extensions.duckdb.org because the
-# published build does not carry the DuckDB 1.4 write-path backport:
-# community-extensions resolves the 1.4 line via the `andium` ref in
-# extensions/bigquery/description.yml, and that build path (build_andium.yml) is
-# disabled upstream, so no published 1.4.4 artifact contains it.
-#
-# The binary is built and released by the fork's own PrebuiltRelease workflow
-# (same DuckDB version and vcpkg pin community-extensions uses, so the
-# gRPC/protobuf/Arrow/google-cloud-cpp graph matches a known-good build) and
-# downloaded here. Building it in-image instead cost a full vcpkg run per target
-# platform — with the linux_arm64 pass emulated — on every cache miss. Move
-# `bigquery` back into DUCKDB_COMMUNITY_EXTENSIONS once upstream publishes 1.4.4.
-ARG DUCKDB_BIGQUERY_RELEASE_REPO="https://github.com/p-hoffmann/duckdb-bigquery"
-ARG DUCKDB_BIGQUERY_RELEASE_TAG="v1.4.4-write-path.1"
 
 # Stage 1: Build the trex binary
 FROM debian:trixie-slim AS builder
 
-ARG TREXSQL_VERSION=v1.4.4-trex
+ARG TREXSQL_VERSION=v2.0.0-trex
 ARG CHDB_VERSION=v3.6.0
 ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y curl unzip wget gcc libc6-dev && rm -rf /var/lib/apt/lists/*
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.95.0
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Download libtrexsql from GitHub release (arch-specific)
@@ -88,26 +59,6 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs && \
 
 COPY src/ /usr/src/trexsql/src/
 RUN cargo build --release
-
-# Stage 1b: Fetch the prebuilt duckdb-bigquery extension.
-#
-# The release asset is built by the fork's PrebuiltRelease workflow against the
-# same DuckDB version, so the version/platform the extension records match the
-# running engine — DuckDB refuses to LOAD one whose metadata disagrees.
-FROM debian:trixie-slim AS bigquery-ext-builder
-
-ARG TARGETARCH
-ARG DUCKDB_BIGQUERY_RELEASE_REPO
-ARG DUCKDB_BIGQUERY_RELEASE_TAG
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates wget && \
-    rm -rf /var/lib/apt/lists/*
-
-RUN mkdir -p /out && \
-    wget -q -O /out/bigquery.duckdb_extension \
-      "${DUCKDB_BIGQUERY_RELEASE_REPO}/releases/download/${DUCKDB_BIGQUERY_RELEASE_TAG}/bigquery-linux_${TARGETARCH}.duckdb_extension" && \
-    ls -l /out/
 
 # Stage 2: Build web frontend
 FROM node:22-trixie-slim AS web-builder
@@ -259,18 +210,6 @@ RUN set -eu; \
     ln -sfn "$DEST" "${HOME_EXT_PARENT}/${DUCKDB_PLATFORM}"; \
     echo "DuckDB extensions present for ${DUCKDB_PLATFORM}:"; ls -1 "$DEST"
 
-# duckdb-bigquery, fetched in the bigquery-ext-builder stage from the fork's own
-# release rather than from community-extensions.duckdb.org. It lands in the same
-# per-arch directory the downloads above populate, so extension resolution (and the
-# /home/node symlink seeded just above, which points at the directory) picks it up
-# unchanged.
-#
-# This binary is unsigned, unlike the community downloads. trex already opens every
-# DuckDB connection with allow_unsigned_extensions (src/main.rs, src/engine.rs,
-# plugins/pg_trex/src/worker.rs, plugins/runtime/ext/trex/lib.rs), so LOAD works.
-COPY --from=bigquery-ext-builder /out/bigquery.duckdb_extension \
-     /usr/share/trexsql/extensions/v${DUCKDB_VERSION}/linux_${TARGETARCH}/
-
 # Override npm extensions with CI-built ones
 # Supports both flat layout (local builds) and arch-specific layout (CI multi-arch builds)
 COPY extensions/ /tmp/all-extensions/
@@ -399,7 +338,6 @@ ARG DUCKDB_VERSION
 ARG DUCKDB_CORE_EXTENSIONS
 ARG DUCKDB_COMMUNITY_EXTENSIONS
 ARG DUCKDB_OPTIONAL_EXTENSIONS
-ARG DUCKDB_SOURCE_EXTENSIONS
 
 # openssl: used by /usr/src/entrypoint.sh to generate the per-container TLS cert.
 # openssh-client: git's SSH commit signing (gpg.format=ssh) shells out to
@@ -495,7 +433,8 @@ ENV DUCKDB_VERSION="${DUCKDB_VERSION}"
 ENV DUCKDB_CORE_EXTENSIONS="${DUCKDB_CORE_EXTENSIONS}"
 ENV DUCKDB_COMMUNITY_EXTENSIONS="${DUCKDB_COMMUNITY_EXTENSIONS}"
 ENV DUCKDB_OPTIONAL_EXTENSIONS="${DUCKDB_OPTIONAL_EXTENSIONS}"
-ENV DUCKDB_SOURCE_EXTENSIONS="${DUCKDB_SOURCE_EXTENSIONS}"
+# The image already ships its extensions; stop the engine auto-installing trex ones.
+ENV TREX_EXTENSIONS=none
 
 # Ensure config directories exist for OAuth token persistence
 RUN mkdir -p /home/node/.claude /home/node/.config/gh && \
@@ -524,7 +463,7 @@ ENTRYPOINT ["/usr/src/entrypoint.sh"]
 # build's metadata step runs `git describe`, which fails inside the build
 # context (no .git) and would otherwise bake the error string into the
 # extension's ABI metadata, making it unloadable.
-FROM rust:1.88-bookworm AS devx-ext-builder
+FROM rust:1.95-bookworm AS devx-ext-builder
 ARG DEVX_EXT_VERSION=dev
 WORKDIR /work/plugins/devx-ext
 RUN apt-get update && apt-get install -y --no-install-recommends \

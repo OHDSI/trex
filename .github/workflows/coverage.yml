@@ -61,7 +61,7 @@ jobs:
       - uses: ./.github/actions/setup-libtrexsql
         if: matrix.plugin == 'pg_trex' || matrix.plugin == 'runtime'
         with:
-          version: v1.4.4-trex
+          version: v2.0.0-trex
 
       - name: Install cargo-pgrx (pg_trex only)
         if: matrix.plugin == 'pg_trex'

@@ -1,7 +1,6 @@
 //! DataFusion `TableProvider` backed by a trexsql connection. Resolves schema
 //! via `PRAGMA table_info` and delegates execution through `datafusion-federation`.
 
-use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
@@ -242,10 +241,6 @@ impl fmt::Debug for DuckDBTableProvider {
 
 #[async_trait]
 impl TableProvider for DuckDBTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         Arc::clone(&self.schema)
     }
@@ -295,10 +290,6 @@ impl fmt::Debug for DuckDBTableProviderInner {
 
 #[async_trait]
 impl TableProvider for DuckDBTableProviderInner {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         Arc::clone(&self.schema)
     }
@@ -347,10 +338,6 @@ impl DuckDBTableSource {
 }
 
 impl datafusion::logical_expr::TableSource for DuckDBTableSource {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         Arc::clone(&self.schema)
     }

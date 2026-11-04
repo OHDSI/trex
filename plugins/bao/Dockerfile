@@ -21,7 +21,7 @@ apt-get update && apt-get install -y \
     && apt-get install -y -t testing libstdc++6 && \
     rm -rf /var/lib/apt/lists/*
 
-ARG TREXSQL_VERSION=v1.4.4-trex
+ARG TREXSQL_VERSION=v2.0.0-trex
 RUN mkdir -p /usr/local/lib && \
     wget -O /tmp/libtrexsql.zip \
       https://github.com/p-hoffmann/trexsql-rs/releases/download/${TREXSQL_VERSION}/libtrexsql-linux-amd64.zip && \
@@ -58,6 +58,8 @@ ENV TLS_CERT_PATH=""
 ENV TLS_KEY_PATH=""
 ENV TLS_PORT=9443
 ENV MAIN_PATH=/usr/src/main
+# Skip the engine's extension auto-install at startup.
+ENV TREX_EXTENSIONS=none
 
 EXPOSE 33001 5432 33000
 

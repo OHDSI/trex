@@ -155,7 +155,7 @@ jobs:
       - uses: ./.github/actions/setup-libtrexsql
         if: matrix.tool == 'pgrx' || matrix.libtrexsql
         with:
-          version: v1.4.4-trex
+          version: v2.0.0-trex
 
       - if: matrix.tool == 'pgrx'
         uses: taiki-e/install-action@v2
@@ -243,11 +243,11 @@ jobs:
           - name: distributed
             display: "distributed (tier1/2/3)"
             exts: pool db
-            tests: test_tier1_single_node.py test_tier2_two_node.py test_tier3_aggregation.py
+            tests: test_tier1_single_node.py test_tier2_two_node.py test_tier3_aggregation.py test_regr_db_final_pass_functions.py
 
           - name: pgwire
             exts: pool db pgwire
-            tests: test_pgwire_standalone.py test_pgwire_db.py
+            tests: test_pgwire_standalone.py test_pgwire_db.py test_duckdb2_semantics.py
 
           - name: atlas
             exts: pool atlas

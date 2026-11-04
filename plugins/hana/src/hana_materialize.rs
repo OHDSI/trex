@@ -361,7 +361,7 @@ pub struct HanaMaterializeCohortScalar;
 impl VScalar for HanaMaterializeCohortScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -380,7 +380,9 @@ impl VScalar for HanaMaterializeCohortScalar {
 
         let read_varchar = |idx: usize| -> String {
             let v = input.flat_vector(idx);
-            let slice = v.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+            // SAFETY: input column is VARCHAR; len == input.len()
+            let slice =
+                unsafe { v.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
             let mut binding = slice[0];
             duckdb::types::DuckString::new(&mut binding).as_str().to_string()
         };
@@ -389,7 +391,9 @@ impl VScalar for HanaMaterializeCohortScalar {
         let source_sql = read_varchar(1);
         let source_params_json = read_varchar(2);
         let results_schema = read_varchar(3);
-        let cohort_definition_id = input.flat_vector(4).as_slice_with_len::<i64>(input.len())[0];
+        // SAFETY: input column is i64; len == input.len()
+        let cohort_definition_id =
+            (unsafe { input.flat_vector(4).as_slice_with_len::<i64>(input.len()) })[0];
         let session_vars_json = read_varchar(5);
 
         let processed = run_materialize(
@@ -402,7 +406,8 @@ impl VScalar for HanaMaterializeCohortScalar {
         )?;
 
         let mut out = output.flat_vector();
-        out.as_mut_slice::<i64>()[0] = processed;
+        // SAFETY: output vector holds i64 and is sized for the rows written
+        (unsafe { out.as_mut_slice::<i64>() })[0] = processed;
         Ok(())
     }
 

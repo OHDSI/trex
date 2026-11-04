@@ -9,7 +9,7 @@ pub struct EtlStopScalar;
 impl VScalar for EtlStopScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -19,8 +19,9 @@ impl VScalar for EtlStopScalar {
         }
 
         let name_vector = input.flat_vector(0);
+        // SAFETY: input column is VARCHAR; len == input.len()
         let name_slice =
-            name_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+            unsafe { name_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
 
         let pipeline_name = duckdb::types::DuckString::new(&mut { name_slice[0] })
             .as_str()

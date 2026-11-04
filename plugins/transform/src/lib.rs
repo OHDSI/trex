@@ -14,7 +14,7 @@ mod state;
 mod test;
 
 use duckdb::Connection;
-use libduckdb_sys as ffi;
+use duckdb_loadable_macros::duckdb_entrypoint_c_api;
 use std::cell::Cell;
 use std::error::Error;
 
@@ -177,7 +177,8 @@ pub fn escape_sql_str(s: &str) -> String {
 }
 
 
-unsafe fn extension_entrypoint(connection: Connection) -> Result<(), Box<dyn Error>> {
+#[duckdb_entrypoint_c_api(ext_name = "transform", min_duckdb_version = "v1.5.6")]
+pub unsafe fn extension_entrypoint(connection: Connection) -> Result<(), Box<dyn Error>> {
     connection.register_table_function::<compile::CompileVTab>("trex_transform_compile")?;
     connection.register_table_function::<plan::PlanVTab>("trex_transform_plan")?;
     connection.register_table_function::<run::RunVTab>("trex_transform_run")?;
@@ -185,50 +186,6 @@ unsafe fn extension_entrypoint(connection: Connection) -> Result<(), Box<dyn Err
     connection.register_table_function::<test::TestVTab>("trex_transform_test")?;
     connection.register_table_function::<freshness::FreshnessVTab>("trex_transform_freshness")?;
     Ok(())
-}
-
-unsafe fn transform_init_c_api_internal(
-    info: ffi::duckdb_extension_info,
-    access: *const ffi::duckdb_extension_access,
-) -> Result<bool, Box<dyn Error>> {
-    let have_api_struct = ffi::duckdb_rs_extension_api_init(info, access, "v1.3.2").unwrap();
-
-    if !have_api_struct {
-        return Ok(false);
-    }
-
-    let db: ffi::duckdb_database = *(*access).get_database.unwrap()(info);
-
-    // Pool already initialized by db plugin
-    let connection = Connection::open_from_raw(db.cast())?;
-    extension_entrypoint(connection)?;
-
-    Ok(true)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn transform_init_c_api(
-    info: ffi::duckdb_extension_info,
-    access: *const ffi::duckdb_extension_access,
-) -> bool {
-    let init_result = transform_init_c_api_internal(info, access);
-
-    if let Err(x) = init_result {
-        let error_c_string = std::ffi::CString::new(x.to_string());
-        match error_c_string {
-            Ok(e) => {
-                (*access).set_error.unwrap()(info, e.as_ptr());
-            }
-            Err(_) => {
-                let error_msg =
-                    c"An error occurred but the extension failed to allocate an error string";
-                (*access).set_error.unwrap()(info, error_msg.as_ptr());
-            }
-        }
-        return false;
-    }
-
-    init_result.unwrap()
 }
 
 #[cfg(test)]

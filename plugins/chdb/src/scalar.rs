@@ -10,14 +10,17 @@ pub struct StartChdbDatabaseScalar;
 impl VScalar for StartChdbDatabaseScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let data_path = if input.len() > 0 {
             let path_vector = input.flat_vector(0);
-            let path_slice = path_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+            // SAFETY: input column is VARCHAR; len == input.len()
+            let path_slice = unsafe {
+                path_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
+            };
             if let Some(first_path) = path_slice.get(0) {
                 let path = duckdb::types::DuckString::new(&mut { *first_path }).as_str().to_string();
                 if path.is_empty() { None } else { Some(path) }
@@ -53,7 +56,7 @@ pub struct StopChdbDatabaseScalar;
 impl VScalar for StopChdbDatabaseScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         _input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -81,7 +84,7 @@ pub struct ExecuteDmlScalar;
 impl VScalar for ExecuteDmlScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -93,7 +96,10 @@ impl VScalar for ExecuteDmlScalar {
         }
         
         let query_vector = input.flat_vector(0);
-        let query_slice = query_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: input column is VARCHAR; len == input.len()
+        let query_slice = unsafe {
+            query_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
+        };
         
         if let Some(first_query) = query_slice.get(0) {
             let query = duckdb::types::DuckString::new(&mut { *first_query }).as_str().to_string();     

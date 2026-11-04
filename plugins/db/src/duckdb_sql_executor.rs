@@ -8,7 +8,7 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::error::Result as DFResult;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::physical_plan::SendableRecordBatchStream;
+use datafusion::physical_plan::{PhysicalExpr, SendableRecordBatchStream};
 use datafusion::sql::unparser::dialect::{Dialect, DuckDBDialect};
 use datafusion_federation::sql::SQLExecutor;
 use futures::stream;
@@ -30,7 +30,12 @@ impl SQLExecutor for DuckDBSQLExecutor {
         Arc::new(DuckDBDialect::new())
     }
 
-    fn execute(&self, sql: &str, schema: SchemaRef) -> DFResult<SendableRecordBatchStream> {
+    fn execute(
+        &self,
+        sql: &str,
+        schema: SchemaRef,
+        _filters: &[Arc<dyn PhysicalExpr>],
+    ) -> DFResult<SendableRecordBatchStream> {
         let batches = execute_on_duckdb(sql)?;
 
         let stream = stream::iter(batches.into_iter().map(Ok));
@@ -113,7 +118,7 @@ mod tests {
     fn test_execute_without_connection_returns_error() {
         let executor = DuckDBSQLExecutor;
         let schema = Arc::new(arrow::datatypes::Schema::empty());
-        let result = executor.execute("SELECT 1", schema);
+        let result = executor.execute("SELECT 1", schema, &[]);
         match result {
             Err(e) => {
                 let err_msg = format!("{e}");

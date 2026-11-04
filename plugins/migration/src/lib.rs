@@ -8,7 +8,7 @@ use duckdb::{
     vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab},
     Connection,
 };
-use libduckdb_sys as ffi;
+use duckdb_loadable_macros::duckdb_entrypoint_c_api;
 use siphasher::sip::SipHasher13;
 use std::{
     collections::HashMap,
@@ -486,7 +486,8 @@ impl VTab for MigrateVTab {
         let result = &init_data.results[current_index];
 
         let mut version_vector = output.flat_vector(0);
-        version_vector.as_mut_slice::<i32>()[0] = result.version;
+        // SAFETY: version column is declared INTEGER; vector has at least one row
+        (unsafe { version_vector.as_mut_slice::<i32>() })[0] = result.version;
 
         let name_vector = output.flat_vector(1);
         name_vector.insert(0, result.name.as_str());
@@ -600,7 +601,8 @@ impl VTab for MigrationStatusVTab {
         let result = &init_data.results[current_index];
 
         let mut version_vector = output.flat_vector(0);
-        version_vector.as_mut_slice::<i32>()[0] = result.version;
+        // SAFETY: version column is declared INTEGER; vector has at least one row
+        (unsafe { version_vector.as_mut_slice::<i32>() })[0] = result.version;
 
         let name_vector = output.flat_vector(1);
         name_vector.insert(0, result.name.as_str());
@@ -949,7 +951,8 @@ impl VTab for MigrateSchemaVTab {
         let result = &init_data.results[current_index];
 
         let mut version_vector = output.flat_vector(0);
-        version_vector.as_mut_slice::<i32>()[0] = result.version;
+        // SAFETY: version column is declared INTEGER; vector has at least one row
+        (unsafe { version_vector.as_mut_slice::<i32>() })[0] = result.version;
 
         let name_vector = output.flat_vector(1);
         name_vector.insert(0, result.name.as_str());
@@ -1083,7 +1086,8 @@ impl VTab for MigrationStatusSchemaVTab {
         let result = &init_data.results[current_index];
 
         let mut version_vector = output.flat_vector(0);
-        version_vector.as_mut_slice::<i32>()[0] = result.version;
+        // SAFETY: version column is declared INTEGER; vector has at least one row
+        (unsafe { version_vector.as_mut_slice::<i32>() })[0] = result.version;
 
         let name_vector = output.flat_vector(1);
         name_vector.insert(0, result.name.as_str());
@@ -1111,59 +1115,14 @@ impl VTab for MigrationStatusSchemaVTab {
 }
 
 
-unsafe fn extension_entrypoint(connection: Connection) -> Result<(), Box<dyn Error>> {
+#[duckdb_entrypoint_c_api(ext_name = "migration", min_duckdb_version = "v1.5.6")]
+pub unsafe fn extension_entrypoint(connection: Connection) -> Result<(), Box<dyn Error>> {
     connection.register_table_function::<MigrateVTab>("trex_migration_run")?;
     connection.register_table_function::<MigrationStatusVTab>("trex_migration_status")?;
     connection.register_table_function::<MigrateSchemaVTab>("trex_migration_run_schema")?;
     connection
         .register_table_function::<MigrationStatusSchemaVTab>("trex_migration_status_schema")?;
     Ok(())
-}
-
-unsafe fn migration_init_c_api_internal(
-    info: ffi::duckdb_extension_info,
-    access: *const ffi::duckdb_extension_access,
-) -> Result<bool, Box<dyn Error>> {
-    let have_api_struct =
-        ffi::duckdb_rs_extension_api_init(info, access, "v1.3.2")?;
-
-    if !have_api_struct {
-        return Ok(false);
-    }
-
-    let db: ffi::duckdb_database = *(*access).get_database.unwrap()(info);
-
-    // Pool already initialized by db plugin
-    let connection = Connection::open_from_raw(db.cast())?;
-    extension_entrypoint(connection)?;
-
-    Ok(true)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn migration_init_c_api(
-    info: ffi::duckdb_extension_info,
-    access: *const ffi::duckdb_extension_access,
-) -> bool {
-    let init_result = migration_init_c_api_internal(info, access);
-
-    match init_result {
-        Ok(val) => val,
-        Err(x) => {
-            let error_c_string = std::ffi::CString::new(x.to_string());
-            match error_c_string {
-                Ok(e) => {
-                    (*access).set_error.unwrap()(info, e.as_ptr());
-                }
-                Err(_) => {
-                    let error_msg =
-                        c"An error occurred but the extension failed to allocate an error string";
-                    (*access).set_error.unwrap()(info, error_msg.as_ptr());
-                }
-            }
-            false
-        }
-    }
 }
 
 #[cfg(test)]

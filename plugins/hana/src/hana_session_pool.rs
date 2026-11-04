@@ -116,7 +116,7 @@ pub struct HanaEvictSessionScalar;
 impl VScalar for HanaEvictSessionScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -126,8 +126,10 @@ impl VScalar for HanaEvictSessionScalar {
         }
 
         let session_id_vector = input.flat_vector(0);
-        let session_id_slice =
-            session_id_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: input column is VARCHAR; len == input.len()
+        let session_id_slice = unsafe {
+            session_id_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
+        };
 
         let flat_vector = output.flat_vector();
         for row in 0..input.len() {

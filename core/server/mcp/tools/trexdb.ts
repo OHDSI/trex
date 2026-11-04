@@ -104,9 +104,9 @@ export function registerTrexdbTools(server: McpServer) {
           extensionName: r.extension_name || r[0] || "",
           loaded: r.loaded ?? r[1] ?? false,
           installed: r.installed ?? r[2] ?? false,
-          extensionVersion: r.extension_version || r[3] || null,
+          extensionVersion: r.extension_version || r[6] || null,
           description: r.description || r[4] || null,
-          installPath: r.install_path || r[5] || null,
+          installPath: r.install_path || r[3] || null,
         }));
         return { content: [{ type: "text", text: JSON.stringify(extensions, null, 2) }] };
       } catch (err: any) {

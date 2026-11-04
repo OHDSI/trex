@@ -733,7 +733,7 @@ impl VTab for TpmDeleteVTab {
 
 const EXTENSION_NAME: &str = env!("CARGO_PKG_NAME");
 
-#[duckdb_entrypoint_c_api()]
+#[duckdb_entrypoint_c_api(min_duckdb_version = "v1.5.6")]
 pub unsafe fn extension_entrypoint(
   con: Connection,
 ) -> Result<(), Box<dyn Error>> {

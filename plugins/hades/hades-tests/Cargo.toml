@@ -8,4 +8,4 @@ edition = "2021"
 # Connection::open_in_memory() works in the test binary.
 
 [dependencies]
-duckdb = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex", features = ["bundled"] }
+duckdb = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex", features = ["bundled"] }

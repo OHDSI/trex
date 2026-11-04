@@ -20,7 +20,7 @@ static EXTENSION_NAME: &str = "chdb";
 #[allow(dead_code)]
 static EXTENSION_VERSION: &str = "0.1.0";
 
-#[duckdb_entrypoint_c_api(ext_name = "chdb", min_duckdb_version = "v1.3.2")]
+#[duckdb_entrypoint_c_api(ext_name = "chdb", min_duckdb_version = "v1.5.6")]
 pub unsafe fn extension_entrypoint(connection: Connection) -> Result<(), Box<dyn Error>> {
     connection.register_table_function::<vtab::ChdbScanVTab>("trex_chdb_scan")?;
     connection.register_table_function::<vtab::ChdbScanVTab>("trex_chdb_query")?;

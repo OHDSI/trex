@@ -251,7 +251,7 @@ fn emit(output: &mut dyn WritableVector, value: &str) {
 struct WebApiStart;
 impl VScalar for WebApiStart {
     type State = ();
-    unsafe fn invoke(
+    fn invoke(
         _: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -271,7 +271,7 @@ impl VScalar for WebApiStart {
 struct WebApiStartNoWait;
 impl VScalar for WebApiStartNoWait {
     type State = ();
-    unsafe fn invoke(
+    fn invoke(
         _: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -291,7 +291,7 @@ impl VScalar for WebApiStartNoWait {
 struct WebApiStop;
 impl VScalar for WebApiStop {
     type State = ();
-    unsafe fn invoke(
+    fn invoke(
         _: &Self::State,
         _input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -308,7 +308,7 @@ impl VScalar for WebApiStop {
 struct WebApiStatus;
 impl VScalar for WebApiStatus {
     type State = ();
-    unsafe fn invoke(
+    fn invoke(
         _: &Self::State,
         _input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -322,7 +322,7 @@ impl VScalar for WebApiStatus {
     }
 }
 
-#[duckdb_entrypoint_c_api()]
+#[duckdb_entrypoint_c_api(min_duckdb_version = "v1.5.6")]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     // Capture the host engine's duckdb_database so webapi_start can pass it to the
     // embedded WebAPI, which then shares this instance instead of opening its own.

@@ -55,7 +55,8 @@ fn fill_typed<T: Default + Copy + 'static>(
 ) {
     let mut null_indices = Vec::new();
     {
-        let slice = vector.as_mut_slice::<T>();
+        // SAFETY: T matches the column's physical type, chosen by the caller.
+        let slice = unsafe { vector.as_mut_slice::<T>() };
         for row_idx in 0..chunk_size {
             match &rows[offset + row_idx][col_idx] {
                 Some(v) => match parse(v) {

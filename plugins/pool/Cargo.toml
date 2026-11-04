@@ -10,14 +10,14 @@ name = "pool"
 crate-type = ["cdylib"]
 
 [dependencies]
-duckdb = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex", features = ["vtab-loadable"] }
-duckdb-loadable-macros = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex" }
-libduckdb-sys = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex", features = ["loadable-extension"] }
+duckdb = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex", features = ["vtab-loadable"] }
+duckdb-loadable-macros = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex" }
+libduckdb-sys = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex", features = ["loadable-extension"] }
 crossbeam-channel = "0.5"
 serde_json = "1.0"
 chrono = "0.4"
 tracing = "0.1"
-arrow-ipc = "57"
-arrow-schema = "57"
-arrow-array = "57"
+arrow-ipc = "59"
+arrow-schema = "59"
+arrow-array = "59"
 trex-db-client = { path = "../db-client" }

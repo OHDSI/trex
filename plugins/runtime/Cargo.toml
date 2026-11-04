@@ -12,9 +12,9 @@ strip = true
 
 [dependencies]
 # trexsql bindings
-duckdb = { version = "1.4.4", features = ["vtab-loadable", "vtab-arrow", "vscalar"] }
-duckdb-loadable-macros = "0.1.14"
-libduckdb-sys = { version = "1.4.4", features = ["loadable-extension"] }
+duckdb = { version = "1.20000.1", features = ["vtab-loadable", "vtab-arrow", "vscalar"] }
+duckdb-loadable-macros = "1.20000.1"
+libduckdb-sys = { version = "1.20000.1", features = ["loadable-extension"] }
 
 # local path deps via submodule
 deno_facade = { path = "./trex-runtime/crates/deno_facade" }
@@ -54,9 +54,9 @@ trex_core = { path = "./ext/trex" }
 # that feature.
 
 # DuckDB Rust bindings fork
-duckdb = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex" }
-libduckdb-sys = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex" }
-duckdb-loadable-macros = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex" }
+duckdb = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex" }
+libduckdb-sys = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex" }
+duckdb-loadable-macros = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex" }
 
 # Standalone forks
 v8 = { git = "https://github.com/p-hoffmann/rusty_v8", branch = "supabase-v150.4.0" }

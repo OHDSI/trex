@@ -4,21 +4,21 @@
 # DuckDB instance" fix, for overlaying onto an existing trexsql base:
 #   - libtrexsql_engine.so  (new trexsql_open_existing C API)
 #   - webapi.trex           (captures host duckdb_database, passes via webapi_start)
-# Both pull the duckdb crate at rev 9d6d6fb (Connection::raw_database accessor).
+# Both pull the duckdb crate from trexsql-rs tag v2.0.0-trex (Connection::raw_database accessor).
 #
 #   DOCKER_BUILDKIT=1 docker build --platform linux/arm64 -f Dockerfile.trexfix \
 #     --target export -o type=local,dest=./out-trexfix .
 
 FROM debian:trixie-slim AS builder
 
-ARG TREXSQL_VERSION=v1.4.4-trex
+ARG TREXSQL_VERSION=v2.0.0-trex
 ARG CHDB_VERSION=v3.6.0
 ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl unzip wget gcc libc6-dev git make python3 python3-venv pkg-config ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.95.0
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 RUN mkdir -p /opt/trexsql && \

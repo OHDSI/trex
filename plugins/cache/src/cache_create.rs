@@ -14,7 +14,8 @@ fn read_string(
     row: usize,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let v = input.flat_vector(col);
-    let slice = v.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+    // SAFETY: input column is VARCHAR; len == input.len()
+    let slice = unsafe { v.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
     let mut cell = *slice
         .get(row)
         .ok_or_else(|| -> Box<dyn std::error::Error> { "input row index out of bounds".into() })?;
@@ -24,7 +25,7 @@ fn read_string(
 impl VScalar for CacheCreateScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,

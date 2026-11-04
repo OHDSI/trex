@@ -1212,7 +1212,8 @@ impl VTab for RunVTab {
         mat_vector.insert(0, result.materialized.as_str());
 
         let mut dur_vector = output.flat_vector(3);
-        dur_vector.as_mut_slice::<i64>()[0] = result.duration_ms;
+        // SAFETY: output column is declared i64; vector has at least one row
+        (unsafe { dur_vector.as_mut_slice::<i64>() })[0] = result.duration_ms;
 
         let msg_vector = output.flat_vector(4);
         msg_vector.insert(0, result.message.as_str());

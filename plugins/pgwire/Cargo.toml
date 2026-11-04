@@ -23,10 +23,10 @@ path = "src/wasm_lib.rs"
 crate-type = ["staticlib"]
 
 [dependencies]
-duckdb = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex", features = ["vtab-loadable", "vscalar", "vtab-arrow"] }
-duckdb-loadable-macros = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex" }
-libduckdb-sys = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex", features = ["loadable-extension"] }
-pgwire = { version = "0.37.3", features = ["server-api-aws-lc-rs"] }
+duckdb = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex", features = ["vtab-loadable", "vscalar", "vtab-arrow"] }
+duckdb-loadable-macros = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex" }
+libduckdb-sys = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex", features = ["loadable-extension"] }
+pgwire = { version = "0.41", features = ["server-api-aws-lc-rs"] }
 # Pinned to control feature set: rustls 0.23+ requires explicit CryptoProvider
 # selection when multiple providers are pulled in transitively. The pgwire
 # `server-api-aws-lc-rs` feature pulls aws-lc-rs while other transitive deps
@@ -36,7 +36,7 @@ pgwire = { version = "0.37.3", features = ["server-api-aws-lc-rs"] }
 # the first handshake).
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tokio = { version = "1.19", features = ["rt-multi-thread", "net", "macros", "time"] }
-arrow-pg = "0.11.0"
+arrow-pg = "0.16"
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 futures = "0.3"

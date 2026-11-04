@@ -121,3 +121,30 @@ fn encode_batches_safely_zero_row_batch() {
 // would require maintaining an unstable hand-rolled Array impl. The panic
 // recovery path is observed indirectly when arrow-pg encounters malformed
 // inputs in production; covering it here is not worth the brittleness.
+
+// ---------- DuckDB 2.0 NULL-typed column (`SELECT NULL AS x`) ----------
+
+#[test]
+fn null_typed_column_encodes() {
+    use duckdb::arrow::array::NullArray;
+    let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Null, true)]));
+    let header = schema_to_field_info(&schema, &Format::UnifiedText).unwrap();
+    assert_eq!(header[0].datatype().oid(), 25, "NULL column is advertised as text");
+    let rb = RecordBatch::try_new(schema, vec![Arc::new(NullArray::new(1))]).unwrap();
+    let rows = encode_batches_safely(Arc::new(header), vec![rb]);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].is_ok(), "NULL row must encode: {:?}", rows[0]);
+}
+
+// VARIANT decoding fails inside the pool session; the wire error must be
+// SQLSTATE 0A000. The live round trip is covered by psql against the loaded
+// extension, since cargo test has no DuckDB C API table.
+#[test]
+fn variant_column_encodes_or_errors_cleanly() {
+    // Live VARIANT round-trip needs a real LOAD; this pins the SQLSTATE mapping it relies on.
+    let msg = "query exec: Conversion error from type Variant at index: 0, decoding Variant columns is not supported";
+    assert_eq!(exec_error_sqlstate(msg), "0A000");
+    assert_eq!(exec_error_sqlstate("Catalog Error: table x does not exist"), "XX000");
+    assert_eq!(exec_error_sqlstate("Conversion Error: Could not convert string 'a' to INT32"), "XX000");
+    assert_eq!(exec_error_sqlstate("Not implemented Error: feature not supported"), "XX000");
+}

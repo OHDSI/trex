@@ -1,11 +1,11 @@
 # ── Stage 1: Build the trex binary ──────────────────────────────────────────
 FROM debian:trixie-slim AS trex-builder
 
-ARG TREXSQL_VERSION=v1.4.4-trex
+ARG TREXSQL_VERSION=v2.0.0-trex
 ARG CHDB_VERSION=v3.6.0
 
 RUN apt-get update && apt-get install -y curl unzip wget gcc libc6-dev && rm -rf /var/lib/apt/lists/*
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.95.0
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 RUN mkdir -p /opt/trexsql && \
@@ -44,7 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 SHELL ["/bin/bash", "-c"]
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.95.0
 
 RUN . /root/.cargo/env && cargo install cargo-pgrx --version 0.16.1 --locked
 RUN . /root/.cargo/env && cargo pgrx init --pg17=$(which pg_config)
@@ -85,7 +85,7 @@ RUN mkdir -p /usr/lib/trexsql/extensions && \
     find node_modules/@trex -name "*.trex" -exec cp {} /usr/lib/trexsql/extensions/ \; && \
     find node_modules/@trex -name "*.duckdb_extension" -exec cp {} /usr/lib/trexsql/extensions/ \;
 
-ENV DUCKDB_VERSION=1.4.4
+ENV DUCKDB_VERSION=2.0.0
 RUN mkdir -p /root/.duckdb/extensions/v${DUCKDB_VERSION}/linux_amd64 && \
     cd /root/.duckdb/extensions/v${DUCKDB_VERSION}/linux_amd64 && \
     for lib in avro aws delta ducklake fts httpfs icu iceberg inet json mysql_scanner parquet postgres_scanner spatial sqlite sqlite_scanner vss; do \
@@ -114,13 +114,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     rm -rf /var/lib/apt/lists/*
 
 # ── libtrexsql for pg_trex (into PG lib dir) ──
-COPY --from=trex-builder /opt/trexsql/libtrexsql.so /usr/lib/postgresql/17/lib/libtrexsql.so.1.4
-RUN ln -sf libtrexsql.so.1.4 /usr/lib/postgresql/17/lib/libtrexsql.so && \
-    echo "/usr/lib/postgresql/17/lib" >> /etc/ld.so.conf.d/pg_trex.conf
+COPY --from=trex-builder /opt/trexsql/libtrexsql.so /usr/lib/postgresql/17/lib/libtrexsql.so
+RUN echo "/usr/lib/postgresql/17/lib" >> /etc/ld.so.conf.d/pg_trex.conf
 
-# ── Libraries for trex binary + versioned soname for pg_trex ──
-COPY --from=trex-builder /opt/trexsql/libtrexsql.so /usr/lib/libtrexsql.so.1.4
-RUN ln -sf libtrexsql.so.1.4 /usr/lib/libtrexsql.so
+# ── Libraries for trex binary (the 2.0 lib's SONAME is plain libtrexsql.so) ──
+COPY --from=trex-builder /opt/trexsql/libtrexsql.so /usr/lib/libtrexsql.so
 COPY --from=trex-builder /opt/libchdb.so /usr/lib/
 COPY --from=trex-builder /usr/src/trexsql/target/release/libtrexsql_engine.so /usr/lib/
 RUN ldconfig
@@ -137,7 +135,9 @@ COPY plugins/pg_trex/sql/pg_trex--0.1.0.sql /usr/share/postgresql/17/extension/
 COPY --from=npm-deps /usr/lib/trexsql/extensions/ /usr/lib/trexsql/extensions/
 
 # ── DuckDB extensions (for both postgres user and root) ──
-ENV DUCKDB_VERSION=1.4.4
+ENV DUCKDB_VERSION=2.0.0
+# Skip the engine's extension auto-install at startup.
+ENV TREX_EXTENSIONS=none
 COPY --from=npm-deps /root/.duckdb/extensions/ /var/lib/postgresql/.duckdb/extensions/
 COPY --from=npm-deps /root/.duckdb/extensions/ /root/.duckdb/extensions/
 RUN chown -R postgres:postgres /var/lib/postgresql/.duckdb

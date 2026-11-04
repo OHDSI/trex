@@ -1,14 +1,14 @@
 //! DataFusion `ExecutionPlan` that receives shuffled partitions from the
 //! shuffle registry, waiting for all expected source nodes to deliver data.
 
-use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
-use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
@@ -30,7 +30,7 @@ pub struct ShuffleReaderExec {
     expected_sources: usize,
     schema: SchemaRef,
     runtime_handle: tokio::runtime::Handle,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
 }
 
 impl ShuffleReaderExec {
@@ -54,7 +54,7 @@ impl ShuffleReaderExec {
             expected_sources,
             schema,
             runtime_handle,
-            properties,
+            properties: Arc::new(properties),
         }
     }
 }
@@ -74,12 +74,15 @@ impl ExecutionPlan for ShuffleReaderExec {
         "ShuffleReaderExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
     }
 
-    fn properties(&self) -> &PlanProperties {
-        &self.properties
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DFResult<TreeNodeRecursion>,
+    ) -> DFResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {

@@ -16,9 +16,9 @@ path = "src/wasm_lib.rs"
 crate-type = ["staticlib"]
 
 [dependencies]
-duckdb = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex", features = ["vtab-loadable", "vscalar", "vtab-arrow"] }
-duckdb-loadable-macros = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex" }
-libduckdb-sys = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex", features = ["loadable-extension"] }
+duckdb = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex", features = ["vtab-loadable", "vscalar", "vtab-arrow"] }
+duckdb-loadable-macros = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex" }
+libduckdb-sys = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex", features = ["loadable-extension"] }
 tokio = { version = "1.19", features = ["rt", "net", "macros", "time", "sync"] }
 axum = { version = "0.8", default-features = false, features = ["json", "matched-path", "query", "tokio", "http1"] }
 serde = { version = "1", features = ["derive"] }

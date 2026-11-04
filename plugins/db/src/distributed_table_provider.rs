@@ -1,6 +1,5 @@
 //! Sharded table provider that fans out scans to all shards via Arrow Flight.
 
-use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
@@ -13,7 +12,8 @@ use datafusion::datasource::TableType;
 use datafusion::error::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::TableProviderFilterPushDown;
-use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
@@ -128,10 +128,6 @@ impl DistributedTableProvider {
 
 #[async_trait::async_trait]
 impl TableProvider for DistributedTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -196,7 +192,7 @@ pub struct DistributedExec {
     shards: Vec<ShardInfo>,
     shard_sql: String,
     runtime_handle: tokio::runtime::Handle,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
 }
 
 impl DistributedExec {
@@ -220,7 +216,7 @@ impl DistributedExec {
             shards,
             shard_sql,
             runtime_handle,
-            properties,
+            properties: Arc::new(properties),
         }
     }
 }
@@ -241,12 +237,15 @@ impl ExecutionPlan for DistributedExec {
         "DistributedExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
     }
 
-    fn properties(&self) -> &PlanProperties {
-        &self.properties
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DFResult<TreeNodeRecursion>,
+    ) -> DFResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
@@ -617,8 +616,8 @@ mod tests {
             "SELECT * FROM orders".to_string(),
             rt.handle().clone(),
         );
-        let any = exec.as_any();
-        assert!(any.is::<DistributedExec>());
+        let plan: Arc<dyn ExecutionPlan> = Arc::new(exec);
+        assert!(plan.is::<DistributedExec>());
     }
 
     #[test]

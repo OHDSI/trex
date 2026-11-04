@@ -228,7 +228,7 @@ pub struct HanaDetachScalar;
 impl VScalar for HanaDetachScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -239,8 +239,12 @@ impl VScalar for HanaDetachScalar {
 
         let dbname_vec = input.flat_vector(0);
         let schema_vec = input.flat_vector(1);
-        let dbname_slice = dbname_vec.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let schema_slice = schema_vec.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: input column is VARCHAR; len == input.len()
+        let dbname_slice =
+            unsafe { dbname_vec.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        // SAFETY: input column is VARCHAR; len == input.len()
+        let schema_slice =
+            unsafe { schema_vec.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
 
         let dbname = {
             let mut binding = dbname_slice[0];

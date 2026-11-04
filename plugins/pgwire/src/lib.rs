@@ -61,7 +61,7 @@ struct PgwireVersionScalar;
 impl VScalar for PgwireVersionScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -86,7 +86,7 @@ struct StartPgWireServerScalar;
 impl VScalar for StartPgWireServerScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -96,10 +96,11 @@ impl VScalar for StartPgWireServerScalar {
         let password_vector = input.flat_vector(2);
         let db_credentials_vector = input.flat_vector(3);
 
-        let host_slice = host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let port_slice = port_vector.as_slice_with_len::<i32>(input.len());
-        let password_slice = password_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let db_credentials_slice = db_credentials_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let host_slice = unsafe { host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let port_slice = unsafe { port_vector.as_slice_with_len::<i32>(input.len()) };
+        let password_slice = unsafe { password_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let db_credentials_slice = unsafe { db_credentials_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
 
         if input.len() == 0 {
             return Err("No input provided".into());
@@ -138,7 +139,7 @@ struct StopPgWireServerScalar;
 impl VScalar for StopPgWireServerScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
@@ -146,8 +147,9 @@ impl VScalar for StopPgWireServerScalar {
         let host_vector = input.flat_vector(0);
         let port_vector = input.flat_vector(1);
         
-        let host_slice = host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
-        let port_slice = port_vector.as_slice_with_len::<i32>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let host_slice = unsafe { host_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
+        let port_slice = unsafe { port_vector.as_slice_with_len::<i32>(input.len()) };
         
         if input.len() == 0 {
             return Err("No input provided".into());
@@ -182,14 +184,15 @@ struct UpdateDbCredentialsScalar;
 impl VScalar for UpdateDbCredentialsScalar {
     type State = ();
 
-    unsafe fn invoke(
+    fn invoke(
         _state: &Self::State,
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let credentials_vector = input.flat_vector(0);
         
-        let credentials_slice = credentials_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        // SAFETY: column types match the declared signature; length is input.len().
+        let credentials_slice = unsafe { credentials_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
         
         if input.len() == 0 {
             return Err("No input provided".into());
@@ -289,7 +292,7 @@ impl VTab for PgWireServerStatusTable {
     }
 }
 
-#[duckdb_entrypoint_c_api()]
+#[duckdb_entrypoint_c_api(min_duckdb_version = "v1.5.6")]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     store_shared_connection(&con)?;
 
