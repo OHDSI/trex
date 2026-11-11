@@ -2,7 +2,7 @@ use std::ffi::CString;
 use std::mem::ManuallyDrop;
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::Mutex;
+use std::sync::{Mutex, Once};
 
 use duckdb::ffi;
 use duckdb::Connection;
@@ -121,6 +121,15 @@ impl TrexDatabase {
     /// Open a private in-memory database whose statements run unprepared, so the
     /// session can be routed to a remote server with `CONNECT 'quack:…'`.
     pub fn open_session() -> Result<Self, String> {
+        // libtrexsql fetches its trex extensions from GitHub on every open unless
+        // TREX_EXTENSIONS is set; a client session only needs the bundled quack.
+        // Process-wide, and only when unset, so an explicit value still wins.
+        static SKIP_DOWNLOADS: Once = Once::new();
+        SKIP_DOWNLOADS.call_once(|| {
+            if std::env::var_os("TREX_EXTENSIONS").is_none() {
+                std::env::set_var("TREX_EXTENSIONS", "none");
+            }
+        });
         unsafe {
             let mut raw_db: ffi::duckdb_database = ptr::null_mut();
             if ffi::duckdb_open(ptr::null(), &mut raw_db) != ffi::DuckDBSuccess {

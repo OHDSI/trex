@@ -153,6 +153,25 @@
       (.setMaxRows s 2)
       (is (= 2 (count (rows (.executeQuery s "SELECT * FROM range(10)"))))))
     (is (thrown? SQLFeatureNotSupportedException (.prepareCall c "CALL x()")))
+    (testing "getTables"
+      (with-open [s (.createStatement c)]
+        (.execute s "CREATE SCHEMA s; CREATE TABLE s.t1(x INT); CREATE TABLE s.a_b(x INT); CREATE TABLE s.a1b(x INT); CREATE TEMP TABLE tmp1(x INT)"))
+      (let [tables (fn [schema pattern types]
+                     (mapv #(subvec % 1 4)
+                           (rows (.getTables md nil schema pattern (some-> types into-array)))))]
+        (is (= ["TABLE_CAT" "TABLE_SCHEM" "TABLE_NAME" "TABLE_TYPE" "REMARKS" "TYPE_CAT" "TYPE_SCHEM"
+                "TYPE_NAME" "SELF_REFERENCING_COL_NAME" "REF_GENERATION"]
+               (let [m (.getMetaData (.getTables md nil nil nil nil))]
+                 (mapv #(.getColumnLabel m (int %)) (range 1 (inc (.getColumnCount m)))))))
+        (is (= [["s" "t1" "TABLE"]] (tables "s" "t%" ["TABLE"])))
+        (is (= [["main" "tmp1" "LOCAL TEMPORARY"]] (tables nil "tmp%" ["LOCAL TEMPORARY"])))
+        (is (= [] (tables "s" "t%" ["LOCAL TEMPORARY"])))
+        (is (= [["main" "tmp1" "LOCAL TEMPORARY"] ["s" "t1" "TABLE"]]
+               (filterv #(#{"t1" "tmp1"} (second %)) (tables nil nil nil)))
+            "nil types means all types, ordered by TABLE_TYPE then name")
+        (is (= [["s" "a1b" "TABLE"] ["s" "a_b" "TABLE"]] (tables "s" "a_b" nil)) "_ is a single-character wildcard")
+        (is (= [["s" "a_b" "TABLE"]] (tables "s" "a\\_b" nil)) "the search string escape makes _ literal")
+        (is (= [] (tables "s'" nil nil)) "patterns are bound as quoted literals")))
     (.close c)
     (is (.isClosed c))
     (is (not (.isValid c 1)))
@@ -183,6 +202,29 @@
           (.setAutoCommit c true)
           (is (= [[0]] (rows (.executeQuery s "SELECT count(*) FROM jdbc_it.cohort WHERE cid = 2")))))
         (.execute s "DROP SCHEMA jdbc_it CASCADE")))))
+
+(deftest ^:integration remote-get-tables-test
+  (when-let [url (System/getenv "TREX_IT_QUACK_URL")]
+    (let [props (doto (Properties.) (.setProperty "password" (System/getenv "TREX_IT_QUACK_TOKEN")))]
+      (with-open [c (DriverManager/getConnection url props)
+                  s (.createStatement c)]
+        (.execute s "CREATE SCHEMA IF NOT EXISTS jdbc_it")
+        (try
+          (.execute s "CREATE OR REPLACE TABLE jdbc_it.tmp_abc (x INT)")
+          (is (= [["jdbc_it" "tmp_abc" "TABLE"]]
+                 (mapv #(subvec % 1 4)
+                       (rows (.getTables (.getMetaData c) nil "jdbc_it" "tmp%"
+                                         (into-array ["TABLE" "GLOBAL TEMPORARY" "LOCAL TEMPORARY"]))))))
+          (finally (.execute s "DROP SCHEMA jdbc_it CASCADE")))))))
+
+(deftest ^:integration remote-connect-is-fast
+  (when-let [url (System/getenv "TREX_IT_QUACK_URL")]
+    (let [props (doto (Properties.) (.setProperty "password" (System/getenv "TREX_IT_QUACK_TOKEN")))
+          start (System/nanoTime)
+          c (DriverManager/getConnection url props)
+          ms (/ (- (System/nanoTime) start) 1e6)]
+      (.close c)
+      (is (< ms 2000) (str "getConnection took " (long ms) " ms")))))
 
 (deftest ^:integration remote-bad-token-test
   (when-let [url (System/getenv "TREX_IT_QUACK_URL")]
