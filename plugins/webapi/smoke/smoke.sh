@@ -133,6 +133,16 @@ grep -nE "Caused by|NoSuchField|NoSuchMethod|ClassNotFound|getField|getDeclaredF
 echo "=== harness.log boot output (full) ==="
 grep -vE "WEBAPI_STATUS=" /tmp/harness.log | head -300
 
+# /sqlrender/translate needs 'list', which anonymous lacks. Grant it before the
+# first request: authorizations are cached per user once loaded.
+su postgres -c "psql -q -d webapi" <<'SQL'
+INSERT INTO webapi.sec_role_permission(id, role_id, permission_id)
+SELECT nextval('webapi.sec_role_permission_sequence'), sr.id, sp.id
+FROM webapi.sec_permission sp, webapi.sec_role sr
+WHERE sp.value = 'list' AND sr.name = 'anonymous'
+  AND NOT EXISTS (SELECT 1 FROM webapi.sec_role_permission x WHERE x.role_id = sr.id AND x.permission_id = sp.id);
+SQL
+
 echo "=== endpoint probes (http code) ==="
 BASE=http://localhost:8080/WebAPI
 echo "=== WebAPI endpoint sweep (code  path) ==="
@@ -147,6 +157,19 @@ for path in \
   code=$(curl -s -m 12 -o /dev/null -w "%{http_code}" "$BASE$path" 2>/dev/null || echo "ERR")
   echo "  $code  $path"
 done
+
+echo "=== trexsql SqlRender dialect ==="
+translate_code=$(curl -s -m 12 -X POST "$BASE/sqlrender/translate" -H 'Content-Type: application/json' \
+  -d '{"SQL":"SELECT TOP 5 x FROM t;","targetdialect":"trexsql"}' \
+  -o /tmp/smoke-translate.json -w "%{http_code}" 2>/dev/null || echo ERR)
+if [ "$translate_code" = 200 ] && grep -q '"targetSQL":"[^"]*LIMIT 5' /tmp/smoke-translate.json; then
+  echo "SMOKE_TRANSLATE=ok"
+else
+  echo "SMOKE_TRANSLATE=failed ($translate_code)"
+  head -c 400 /tmp/smoke-translate.json 2>/dev/null; echo
+  echo "FAIL: trexsql SqlRender dialect not registered in the native image"
+fi
+grep -E "Registered SqlRender dialect" /tmp/harness.log | head -3
 
 echo "=== native-scanner cache create probe ==="
 # Register a self-referential Postgres source, then create a cache for the

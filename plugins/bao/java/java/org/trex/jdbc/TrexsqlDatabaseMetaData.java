@@ -2,9 +2,12 @@ package org.trex.jdbc;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.RowIdLifetime;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
 
 /** The metadata Spring JDBC and connection pools ask for. */
 final class TrexsqlDatabaseMetaData extends BaseDatabaseMetaData {
@@ -233,6 +236,55 @@ final class TrexsqlDatabaseMetaData extends BaseDatabaseMetaData {
     @Override
     public boolean nullsAreSortedAtEnd() {
         return true;
+    }
+
+    private static final String TABLE_TYPE =
+            "CASE table_type WHEN 'BASE TABLE' THEN 'TABLE' ELSE table_type END";
+
+    // Placeholders are bound client-side as literals, so this also works on a
+    // session routed to a remote server, where the engine cannot prepare.
+    @Override
+    public ResultSet getTables(String catalog, String schemaPattern, String tableNamePattern, String[] types)
+            throws SQLException {
+        StringBuilder sql = new StringBuilder("SELECT table_catalog AS \"TABLE_CAT\", table_schema AS \"TABLE_SCHEM\", "
+                + "table_name AS \"TABLE_NAME\", " + TABLE_TYPE + " AS \"TABLE_TYPE\", "
+                + "NULL::VARCHAR AS \"REMARKS\", NULL::VARCHAR AS \"TYPE_CAT\", NULL::VARCHAR AS \"TYPE_SCHEM\", "
+                + "NULL::VARCHAR AS \"TYPE_NAME\", NULL::VARCHAR AS \"SELF_REFERENCING_COL_NAME\", "
+                + "NULL::VARCHAR AS \"REF_GENERATION\" FROM information_schema.tables WHERE true");
+        List<Object> params = new ArrayList<>();
+        if (catalog != null) {
+            sql.append(" AND table_catalog = ?");
+            params.add(catalog);
+        }
+        if (schemaPattern != null) {
+            sql.append(" AND table_schema LIKE ? ESCAPE '\\'");
+            params.add(schemaPattern);
+        }
+        if (tableNamePattern != null) {
+            sql.append(" AND table_name LIKE ? ESCAPE '\\'");
+            params.add(tableNamePattern);
+        }
+        if (types != null) {
+            sql.append(" AND ").append(TABLE_TYPE).append(" IN (NULL");
+            for (String t : types) {
+                sql.append(", ?");
+                params.add(t);
+            }
+            sql.append(")");
+        }
+        sql.append(" ORDER BY \"TABLE_TYPE\", \"TABLE_CAT\", \"TABLE_SCHEM\", \"TABLE_NAME\"");
+        PreparedStatement ps = conn.prepareStatement(sql.toString());
+        try {
+            for (int i = 0; i < params.size(); i++) {
+                ps.setObject(i + 1, params.get(i));
+            }
+            ResultSet rs = ps.executeQuery();
+            ps.closeOnCompletion();
+            return rs;
+        } catch (SQLException e) {
+            ps.close();
+            throw e;
+        }
     }
 
     @Override
