@@ -26,6 +26,8 @@
     <!-- Overridden by build-native-lib.sh with the version `lein install`
          actually published, so bumping the plugin cannot orphan this. -->
     <trexsql.version>0.3.1</trexsql.version>
+    <!-- build-native-lib.sh passes the version read from webapi-be/pom.xml -->
+    <webapi.version>3.0.1-SNAPSHOT</webapi.version>
   </properties>
 
   <!-- Replicate WebAPI's own dependency versions. dependencyManagement is NOT
@@ -70,7 +72,7 @@
     <dependency>
       <groupId>org.ohdsi</groupId>
       <artifactId>WebAPI</artifactId>
-      <version>3.0.0-SNAPSHOT</version>
+      <version>${webapi.version}</version>
     </dependency>
 
     <!-- trexsql/bao integration (installed to local .m2 by `lein install`).

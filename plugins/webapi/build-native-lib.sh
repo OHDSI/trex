@@ -40,7 +40,15 @@ if [ -z "$TREXSQL_VERSION" ]; then
 fi
 echo "[webapi-native] trexsql version: $TREXSQL_VERSION"
 
-# --- 3. Install the WebAPI jar to local .m2 (org.ohdsi:WebAPI:3.0.0-SNAPSHOT) ---
+# --- 3. Install the WebAPI jar to local .m2 (org.ohdsi:WebAPI:<its pom version>) ---
+# Read the version off webapi-be/pom.xml for the same reason as trexsql above:
+# a WebAPI version bump must not leave the wrapper asking for an old coordinate.
+WEBAPI_VERSION="$(awk '/<artifactId>WebAPI<\/artifactId>/{f=1} f && /<version>/{gsub(/.*<version>|<\/version>.*/,""); print; exit}' "$WEBAPI_BE_DIR/pom.xml")"
+if [ -z "$WEBAPI_VERSION" ]; then
+  echo "[webapi-native] could not read WebAPI version from pom.xml" >&2
+  exit 1
+fi
+echo "[webapi-native] WebAPI version: $WEBAPI_VERSION"
 # WebAPI binds surefire's skipTests to ${skipUnitTests} (and failsafe to
 # ${skipITtests}), so the standard -DskipTests is ignored — use WebAPI's own
 # skip properties, otherwise its tests run and fail (no embedded Postgres on arm).
@@ -108,7 +116,7 @@ echo "[webapi-native] building native shared library"
 # aborts before the multi-hour native-image step rather than after it. This is
 # the only Maven invocation for this module in CI, so it is the only place the
 # unit tests can run automatically.
-( cd "$WRAPPER_DIR" && mvn -B -DskipTests=false -Dtrexsql.version="$TREXSQL_VERSION" package )
+( cd "$WRAPPER_DIR" && mvn -B -DskipTests=false -Dtrexsql.version="$TREXSQL_VERSION" -Dwebapi.version="$WEBAPI_VERSION" package )
 
 kill "$(cat /tmp/oidc_mock.pid 2>/dev/null)" 2>/dev/null || true
 service postgresql stop || true

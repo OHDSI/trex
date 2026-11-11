@@ -765,6 +765,12 @@
       },
       {
         "pattern": "templates/.*"
+      },
+      {
+        "pattern": "\\Qinst/csv/replacementPatterns.csv\\E"
+      },
+      {
+        "pattern": "\\Qinst/csv/supportedDialects.csv\\E"
       }
     ]
   },
