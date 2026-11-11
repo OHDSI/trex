@@ -645,13 +645,19 @@ fn is_postgres_database(database: &str) -> Result<bool, Box<dyn Error>> {
         .unwrap_or(false))
 }
 
-fn postgres_execute_sql(database: &str, sql: &str) -> Result<(), Box<dyn Error>> {
-    let escaped_sql = escape_sql_str(sql);
-    execute_sql(&format!(
-        "CALL postgres_execute('{}', '{}')",
+// prepare = false: since DuckDB 2.0 postgres_execute prepares the SQL to describe
+// its result, and Postgres cannot prepare more than one statement. Migration files
+// are multi-statement, so run them as a plain command instead.
+fn postgres_execute_statement(database: &str, sql: &str) -> String {
+    format!(
+        "CALL postgres_execute('{}', '{}', prepare = false)",
         escape_sql_str(database),
-        escaped_sql
-    ))
+        escape_sql_str(sql)
+    )
+}
+
+fn postgres_execute_sql(database: &str, sql: &str) -> Result<(), Box<dyn Error>> {
+    execute_sql(&postgres_execute_statement(database, sql))
 }
 
 fn setup_schema_context(
@@ -1281,5 +1287,28 @@ mod parser_tests {
             "INSERT INTO refinery_schema_history (version, name, applied_on, checksum) VALUES (7, "
         ));
         assert!(sql.ends_with(", '42')"));
+    }
+}
+
+#[cfg(test)]
+mod postgres_execute_tests {
+    use super::*;
+
+    #[test]
+    fn runs_unprepared_so_multi_statement_migrations_work() {
+        let sql = postgres_execute_statement("_config", "CREATE TABLE a(x int); CREATE TABLE b(y int);");
+        assert_eq!(
+            sql,
+            "CALL postgres_execute('_config', 'CREATE TABLE a(x int); CREATE TABLE b(y int);', prepare = false)"
+        );
+    }
+
+    #[test]
+    fn escapes_quotes_in_database_and_sql() {
+        let sql = postgres_execute_statement("my'db", "DO $$ BEGIN RAISE NOTICE 'hi'; END $$;");
+        assert_eq!(
+            sql,
+            "CALL postgres_execute('my''db', 'DO $$ BEGIN RAISE NOTICE ''hi''; END $$;', prepare = false)"
+        );
     }
 }

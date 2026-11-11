@@ -262,7 +262,7 @@ fn main() {
 
     if is_data_node() {
         for stmt in pre_migration_role_statements() {
-            let sql = format!("CALL postgres_execute('_config', '{stmt}')");
+            let sql = format!("CALL postgres_execute('_config', '{stmt}', prepare = false)");
             if let Err(e) = conn.execute(&sql, []) {
                 let msg = e.to_string();
                 // Already present is the normal case on every boot after the
