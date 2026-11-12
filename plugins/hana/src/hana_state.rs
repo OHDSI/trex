@@ -1,43 +1,5 @@
-use libduckdb_sys as ffi;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock, RwLock};
-
-/// Wraps a raw connection for static storage. Protected by Mutex.
-struct DdlConn(ffi::duckdb_connection);
-
-// SAFETY: exclusive access via Mutex.
-unsafe impl Send for DdlConn {}
-unsafe impl Sync for DdlConn {}
-
-impl Drop for DdlConn {
-    fn drop(&mut self) {
-        unsafe {
-            if !self.0.is_null() {
-                ffi::duckdb_disconnect(&mut self.0);
-            }
-        }
-    }
-}
-
-static DDL_CONNECTION: OnceLock<Mutex<DdlConn>> = OnceLock::new();
-
-/// Create and store a DDL connection. Must be called during extension init.
-pub fn init_ddl_connection(db: ffi::duckdb_database) -> Result<(), String> {
-    if DDL_CONNECTION.get().is_some() {
-        return Ok(());
-    }
-    unsafe {
-        let mut conn: ffi::duckdb_connection = std::ptr::null_mut();
-        let state = ffi::duckdb_connect(db, &mut conn);
-        if state != ffi::duckdb_state_DuckDBSuccess {
-            return Err("Failed to create DDL connection".to_string());
-        }
-        if DDL_CONNECTION.set(Mutex::new(DdlConn(conn))).is_err() {
-            ffi::duckdb_disconnect(&mut conn);
-        }
-        Ok(())
-    }
-}
+use std::sync::{OnceLock, RwLock};
 
 #[derive(Debug, Clone)]
 pub struct TableAttachmentInfo {
@@ -101,46 +63,38 @@ pub fn escape_identifier(s: &str) -> String {
     s.replace('"', "\"\"")
 }
 
-pub fn execute_ddl(sql: &str) -> Result<(), String> {
-    execute_ddl_batch(&[sql])
-}
-
-/// Execute SQL statements sequentially. Stops at the first error.
-pub fn execute_ddl_batch(statements: &[&str]) -> Result<(), String> {
-    let ddl_mutex = DDL_CONNECTION
-        .get()
-        .ok_or("DDL connection not initialized")?;
-    let ddl_guard = ddl_mutex
-        .lock()
-        .map_err(|_| "DDL connection mutex poisoned".to_string())?;
-    let conn = ddl_guard.0;
-
-    unsafe {
-        for sql in statements {
-            let c_sql = std::ffi::CString::new(*sql)
-                .map_err(|e| format!("CString error: {}", e))?;
-            let mut result: ffi::duckdb_result = std::mem::zeroed();
-            let q_state = ffi::duckdb_query(conn, c_sql.as_ptr(), &mut result);
-
-            let ok = if q_state != ffi::duckdb_state_DuckDBSuccess {
-                let err_ptr = ffi::duckdb_result_error(&mut result);
-                let err_msg = if err_ptr.is_null() {
-                    format!("DDL execution failed: {}", sql)
-                } else {
-                    let c_str = std::ffi::CStr::from_ptr(err_ptr);
-                    format!("DDL execution failed: {}", c_str.to_string_lossy())
-                };
-                Err(err_msg)
-            } else {
-                Ok(())
-            };
-
-            ffi::duckdb_destroy_result(&mut result);
-            ok?;
+/// HANA (query, url) for a replacement-scan name, or `None` when the name is not ours.
+///
+/// The last part is matched against the flat `HANA__<dbname>_<schema>_<table>`
+/// registry. Otherwise a `<dbname>_<schema>.<table>` name resolves to an attached
+/// table, standing in for the per-attachment views v1 created over SQL.
+pub fn resolve_scan(parts: &[String]) -> Option<(String, String)> {
+    let table = parts.last()?;
+    let upper = table.to_uppercase();
+    read_state(|state| {
+        if let Some(entry) = state.table_registry.get(&upper) {
+            return Some((
+                format!("SELECT * FROM \"{}\".\"{}\"", entry.hana_schema, entry.hana_table),
+                entry.url.clone(),
+            ));
         }
-    }
-
-    Ok(())
+        let schema = parts.len().checked_sub(2).map(|i| parts[i].to_lowercase())?;
+        let table = table.to_lowercase();
+        state.attachments.values().find_map(|att| {
+            if duckdb_schema_name(&att.dbname, &att.schema).to_lowercase() != schema {
+                return None;
+            }
+            let hana_table = att.table_names.iter().find(|t| t.to_lowercase() == table)?;
+            Some((
+                format!(
+                    "SELECT * FROM \"{}\".\"{}\"",
+                    escape_identifier(&att.schema),
+                    escape_identifier(hana_table)
+                ),
+                att.url.clone(),
+            ))
+        })
+    })
 }
 
 #[cfg(test)]
@@ -184,5 +138,42 @@ mod tests {
         });
         let found = read_state(|state| state.table_registry.contains_key("HANA__DEV_SYS_DUMMY"));
         assert!(found);
+    }
+
+    #[test]
+    fn test_resolve_scan_flat_and_qualified() {
+        write_state(|state| {
+            state.table_registry.insert(
+                "HANA__RS_SCH_T1".to_string(),
+                TableAttachmentInfo {
+                    url: "hdbsql://u:p@h:30015/HDB".to_string(),
+                    hana_schema: "SCH".to_string(),
+                    hana_table: "T1".to_string(),
+                },
+            );
+            state.attachments.insert(
+                attachment_key("rs", "SCH"),
+                AttachedDatabase {
+                    url: "hdbsql://u:p@h:30015/HDB".to_string(),
+                    dbname: "rs".to_string(),
+                    schema: "SCH".to_string(),
+                    table_names: vec!["T1".to_string(), "My\"Tab".to_string()],
+                },
+            );
+        });
+        let parts = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        let (query, url) = resolve_scan(&parts(&["hana__rs_sch_t1"])).unwrap();
+        assert_eq!(query, r#"SELECT * FROM "SCH"."T1""#);
+        assert_eq!(url, "hdbsql://u:p@h:30015/HDB");
+        assert!(resolve_scan(&parts(&["main", "HANA__RS_SCH_T1"])).is_some());
+
+        let (query, _) = resolve_scan(&parts(&["RS_sch", "my\"tab"])).unwrap();
+        assert_eq!(query, r#"SELECT * FROM "SCH"."My""Tab""#);
+        assert!(resolve_scan(&parts(&["memory", "rs_SCH", "t1"])).is_some());
+
+        assert!(resolve_scan(&parts(&["T1"])).is_none());
+        assert!(resolve_scan(&parts(&["rs_SCH", "T2"])).is_none());
+        assert!(resolve_scan(&parts(&["other_SCH", "T1"])).is_none());
     }
 }

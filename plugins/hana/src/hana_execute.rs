@@ -1,9 +1,14 @@
-use duckdb::{
-    core::{DataChunkHandle, LogicalTypeId, Inserter},
-    vtab::arrow::WritableVector,
-    vscalar::{VScalar, ScalarFunctionSignature},
+use duckdb_neo::{
+    connection::Context,
+    data_chunk::VectorCollection,
+    extension::Extension,
+    scalar::ScalarCallbacks,
+    signature::SignatureBuilder,
+    vector::{Unknown, Vector},
+    DuckDBType,
 };
 use std::error::Error;
+use crate::v2_util::{exec_error, input_string, positional, write_strings};
 use std::panic::{self, AssertUnwindSafe};
 use crate::HanaError;
 
@@ -175,82 +180,52 @@ pub fn split_sql_statements(sql: &str) -> Vec<String> {
 
 pub struct HanaExecuteScalar;
 
-impl VScalar for HanaExecuteScalar {
-    type State = ();
+impl HanaExecuteScalar {
+    /// (connection_url, sql) and (connection_url, sql, session_id), all VARCHAR -> VARCHAR.
+    pub fn signatures(extension: &Extension) -> duckdb_neo::Result<Vec<SignatureBuilder>> {
+        let two = SignatureBuilder::new()
+            .param(positional::<String>(0)) // connection_url
+            .param(positional::<String>(1)) // sql
+            .return_type(String::logical_type(extension)?);
+        let three = SignatureBuilder::new()
+            .param(positional::<String>(0)) // connection_url
+            .param(positional::<String>(1)) // sql
+            .param(positional::<String>(2)) // session_id
+            .return_type(String::logical_type(extension)?);
+        Ok(vec![two, three])
+    }
+}
 
-    fn invoke(
-        _state: &Self::State,
-        input: &mut DataChunkHandle,
-        output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if input.len() == 0 {
-            return Err("No input provided".into());
+impl ScalarCallbacks for HanaExecuteScalar {
+    type BindData = ();
+    type InitData = ();
+
+    fn exec(
+        &self,
+        _bind_data: Option<&Self::BindData>,
+        _init_data: Option<&mut Self::InitData>,
+        _context: &Context,
+        input: &mut VectorCollection,
+        output: Vector<'_, Unknown>,
+    ) -> duckdb_neo::Result<()> {
+        let rows = input.row_count()?;
+        if rows == 0 {
+            return Err(exec_error("No input provided"));
         }
 
-        let connection_string_vector = input.flat_vector(0);
-        let sql_statement_vector = input.flat_vector(1);
-        
-        // SAFETY: input column is VARCHAR; len == input.len()
-        let connection_string_slice = unsafe {
-            connection_string_vector
-                .as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
-        };
-        // SAFETY: input column is VARCHAR; len == input.len()
-        let sql_statement_slice = unsafe {
-            sql_statement_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
-        };
-        
-        let connection_string = {
-            let mut binding = connection_string_slice[0];
-            duckdb::types::DuckString::new(&mut binding).as_str().to_string()
-        };
-        
-        let sql_statement = {
-            let mut binding = sql_statement_slice[0];
-            duckdb::types::DuckString::new(&mut binding).as_str().to_string()
-        };
-
-        let session_id = if input.num_columns() > 2 {
-            let session_id_vector = input.flat_vector(2);
-            // SAFETY: input column is VARCHAR; len == input.len()
-            let session_id_slice = unsafe {
-                session_id_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
-            };
-            let session_id_str = {
-                let mut binding = session_id_slice[0];
-                duckdb::types::DuckString::new(&mut binding).as_str().to_string()
-            };
-            crate::hana_session_pool::parse_session_id(&session_id_str)
+        let connection_string = input_string(input, 0, 0)?;
+        let sql_statement = input_string(input, 1, 0)?;
+        let session_id = if input.col_count() > 2 {
+            crate::hana_session_pool::parse_session_id(&input_string(input, 2, 0)?)
         } else {
             0
         };
 
-        let statements_executed = execute_hana_statement(&connection_string, &sql_statement, session_id)?;
-        let result = format!("{} statement(s) executed", statements_executed);
-
-        let flat_vector = output.flat_vector();
-        flat_vector.insert(0, &result);
-        Ok(())
-    }
-
-    fn signatures() -> Vec<ScalarFunctionSignature> {
-        vec![
-            ScalarFunctionSignature::exact(
-                vec![
-                    LogicalTypeId::Varchar.into(),
-                    LogicalTypeId::Varchar.into(),
-                ],
-                LogicalTypeId::Varchar.into()
-            ),
-            ScalarFunctionSignature::exact(
-                vec![
-                    LogicalTypeId::Varchar.into(),
-                    LogicalTypeId::Varchar.into(),
-                    LogicalTypeId::Varchar.into(),
-                ],
-                LogicalTypeId::Varchar.into()
-            ),
-        ]
+        let statements_executed =
+            execute_hana_statement(&connection_string, &sql_statement, session_id).map_err(exec_error)?;
+        let mut results = vec![None; rows];
+        results[0] = Some(format!("{} statement(s) executed", statements_executed));
+        write_strings(output, &results)
     }
 }
 
@@ -264,7 +239,7 @@ fn is_benign_affected_rowcount_error(msg: &str) -> bool {
     msg.contains("affected-row-count") && msg.contains("expected a single Success")
 }
 
-fn execute_hana_statement(connection_string: &str, sql_statement: &str, session_id: u64) -> Result<usize, Box<dyn Error>> {
+pub fn execute_hana_statement(connection_string: &str, sql_statement: &str, session_id: u64) -> Result<usize, Box<dyn Error>> {
     let connection = match panic::catch_unwind(AssertUnwindSafe(|| {
         crate::hana_session_pool::get_or_create(session_id, connection_string)
     })) {

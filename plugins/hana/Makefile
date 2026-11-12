@@ -2,14 +2,15 @@
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
-# DuckDB 2.0 loads stable-V1 (C_STRUCT, capi < 2) extensions via <name>_init_c_api;
-# hana's API use was verified by LOAD on 2.0.
-USE_UNSTABLE_C_API=0
+# V2 C API extension (hana_scan_init_c_api_v2). The V2 API has no stable surface,
+# so DuckDB only loads C_STRUCT_UNSTABLE builds pinned to its exact version.
+USE_UNSTABLE_C_API=1
+CAPI_VERSION=2
 
 # Extension configuration
 EXTENSION_NAME=hana_scan
-MINIMUM_DUCKDB_VERSION=v1.5.6
-TARGET_DUCKDB_VERSION=v1.5.6
+MINIMUM_DUCKDB_VERSION=v2.0.0
+TARGET_DUCKDB_VERSION=v2.0.0
 DUCKDB_TEST_VERSION=v2.0.0
 
 all: configure debug

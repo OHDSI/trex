@@ -22,51 +22,24 @@
 
 mod common;
 
-use duckdb::Connection;
-use hana_scan::{HanaConnection, HanaExecuteScalar, HanaMaterializeCohortScalar};
+// The functions behind `trex_hana_execute` / `trex_hana_materialize_cohort`
+// are driven directly: registering the SQL functions needs a host DuckDB that
+// LOADs the v2 extension, which this test binary does not link.
+use hana_scan::{execute_hana_statement, run_materialize, HanaConnection};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Open an in-memory DuckDB connection and register the two scalar functions
-/// under test directly from the rlib.  We do NOT `LOAD` the .trex file because
-/// the test binary already links against the hana_scan rlib; loading the cdylib
-/// on top would produce duplicate-symbol conflicts.
-fn make_test_db() -> Connection {
-    let db = Connection::open_in_memory().expect("open in-memory DuckDB");
-    db.register_scalar_function::<HanaExecuteScalar>("trex_hana_execute")
-        .expect("register trex_hana_execute");
-    db.register_scalar_function::<HanaMaterializeCohortScalar>("trex_hana_materialize_cohort")
-        .expect("register trex_hana_materialize_cohort");
-    db
-}
-
-/// Escape single quotes for safe embedding inside a SQL string literal.
-fn esc(s: &str) -> String {
-    s.replace('\'', "''")
-}
-
-/// Run a HANA DDL/DML statement through `trex_hana_execute`; panics on error.
-fn exec_hana(db: &Connection, con: &str, hana_sql: &str) {
-    let sql = format!(
-        "SELECT trex_hana_execute('{}', '{}')",
-        esc(con),
-        esc(hana_sql)
-    );
-    let _: String = db
-        .query_row(&sql, [], |row| row.get(0))
+/// Run a HANA DDL/DML statement through `trex_hana_execute`'s path; panics on error.
+fn exec_hana(con: &str, hana_sql: &str) {
+    execute_hana_statement(con, hana_sql, 0)
         .unwrap_or_else(|e| panic!("trex_hana_execute failed for [{hana_sql}]: {e}"));
 }
 
 /// Like `exec_hana` but silently ignores errors (used for best-effort cleanup).
-fn try_exec_hana(db: &Connection, con: &str, hana_sql: &str) {
-    let sql = format!(
-        "SELECT trex_hana_execute('{}', '{}')",
-        esc(con),
-        esc(hana_sql)
-    );
-    let _ = db.query_row::<String, _, _>(&sql, [], |row| row.get(0));
+fn try_exec_hana(con: &str, hana_sql: &str) {
+    let _ = execute_hana_statement(con, hana_sql, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -91,15 +64,12 @@ fn materialize_cohort_end_to_end() {
     // previously crashed run) don't collide.
     let schema = format!("TREX_MAT_TEST_{}", std::process::id());
 
-    let db = make_test_db();
-
     // Best-effort cleanup in case a previous test run left this schema behind.
-    try_exec_hana(&db, &con, &format!("DROP SCHEMA {schema} CASCADE"));
+    try_exec_hana(&con, &format!("DROP SCHEMA {schema} CASCADE"));
 
     // --- Create HANA fixtures ---
-    exec_hana(&db, &con, &format!("CREATE SCHEMA {schema}"));
+    exec_hana(&con, &format!("CREATE SCHEMA {schema}"));
     exec_hana(
-        &db,
         &con,
         &format!(
             "CREATE COLUMN TABLE {schema}.COHORT (\
@@ -114,7 +84,6 @@ fn materialize_cohort_end_to_end() {
     // sends as `source_sql`.  The by-name extraction must pick SUBJECT_ID,
     // COHORT_START_DATE, COHORT_END_DATE and ignore COHORT_DEFINITION_ID.
     exec_hana(
-        &db,
         &con,
         &format!(
             "CREATE COLUMN TABLE {schema}.SRC (\
@@ -129,7 +98,6 @@ fn materialize_cohort_end_to_end() {
     // (distinct from the target cohort id 42) to verify it is ignored.
     for i in 1i64..=5 {
         exec_hana(
-            &db,
             &con,
             &format!(
                 "INSERT INTO {schema}.SRC VALUES (99, {i}, CURRENT_DATE, CURRENT_DATE)"
@@ -148,25 +116,17 @@ fn materialize_cohort_end_to_end() {
 
     // --- Exercise trex_hana_materialize_cohort ---
     // Source query matches the REAL d2e generated shape: 4 columns, COHORT_DEFINITION_ID first.
-    // The session_vars JSON `{"APPLICATION":"project-cohorts"}` contains
-    // double quotes; embed it with Rust-escaped \" inside the SQL literal.
-    let con_esc = esc(&con);
-    let processed: i64 = db
-        .query_row(
-            &format!(
-                "SELECT trex_hana_materialize_cohort(\
-                    '{con_esc}', \
-                    'SELECT COHORT_DEFINITION_ID, SUBJECT_ID, COHORT_START_DATE, COHORT_END_DATE FROM {schema}.SRC', \
-                    '[]', \
-                    '{schema}', \
-                    42, \
-                    '{{\"APPLICATION\":\"project-cohorts\"}}'\
-                )"
-            ),
-            [],
-            |row| row.get(0),
-        )
-        .expect("trex_hana_materialize_cohort failed");
+    let processed: i64 = run_materialize(
+        &con,
+        &format!(
+            "SELECT COHORT_DEFINITION_ID, SUBJECT_ID, COHORT_START_DATE, COHORT_END_DATE FROM {schema}.SRC"
+        ),
+        "[]",
+        &schema,
+        42,
+        r#"{"APPLICATION":"project-cohorts"}"#,
+    )
+    .expect("trex_hana_materialize_cohort failed");
 
     assert_eq!(processed, 5, "Expected 5 processed rows, got {processed}");
     println!("✓ trex_hana_materialize_cohort returned {processed} (expected 5)");
@@ -194,7 +154,7 @@ fn materialize_cohort_end_to_end() {
     );
 
     // --- Cleanup ---
-    try_exec_hana(&db, &con, &format!("DROP SCHEMA {schema} CASCADE"));
+    try_exec_hana(&con, &format!("DROP SCHEMA {schema} CASCADE"));
     #[allow(deprecated)]
     std::env::remove_var("HANA_MATERIALIZE_BATCH_SIZE");
     #[allow(deprecated)]

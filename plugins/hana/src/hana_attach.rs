@@ -1,18 +1,57 @@
-use duckdb::{
-    vtab::{BindInfo, InitInfo, VTab, TableFunctionInfo},
-    core::{LogicalTypeId, LogicalTypeHandle, DataChunkHandle, Inserter},
-    vscalar::{VScalar, ScalarFunctionSignature},
-    vtab::arrow::WritableVector,
+use duckdb_neo::{
+    bind_arguments::BindArgument,
+    connection::Context,
+    data_chunk::{DataChunkRef, VectorCollection},
+    extension::Extension,
+    scalar::ScalarCallbacks,
+    signature::SignatureBuilder,
+    table_function::{BindFunctionHandle, ExecColumnInfo, InitColumnData, TableFunctionCallbacks},
+    vector::{Unknown, Vector},
+    DuckDBType,
 };
 use std::error::Error;
-use std::sync::RwLock;
+use std::sync::Mutex;
 
 use crate::hana_scan::{validate_hana_connection, safe_hana_connect, HanaError};
 use crate::hana_state::{
     self, TableAttachmentInfo, AttachedDatabase,
-    prefixed_name, duckdb_schema_name, attachment_key, escape_identifier,
-    execute_ddl, execute_ddl_batch,
+    prefixed_name, attachment_key,
 };
+use crate::v2_util::{arg_string, bind_error, exec_error, input_string, positional, write_strings};
+
+const OUTPUT_BATCH: usize = 2048;
+
+/// Emit the next batch of VARCHAR rows; an empty batch ends the scan.
+fn emit_rows<const N: usize>(
+    output: &mut DataChunkRef<'_>,
+    rows: &[[String; N]],
+    cursor: &Mutex<usize>,
+) -> duckdb_neo::Result<()> {
+    let mut current = cursor.lock().map_err(|_| exec_error(HanaError::new("lock error")))?;
+    let remaining = rows.len().saturating_sub(*current);
+    if remaining == 0 {
+        return Ok(());
+    }
+    let batch = std::cmp::min(remaining, OUTPUT_BATCH);
+    for col in 0..N {
+        let mut vector = output.get_vector_at_mut::<String>(col)?;
+        vector.set_size(batch)?;
+        let mut writer = vector.writer()?;
+        for (i, row) in rows[*current..*current + batch].iter().enumerate() {
+            writer.set(i, Some(row[col].as_str()))?;
+        }
+    }
+    *current += batch;
+    Ok(())
+}
+
+fn add_varchar_columns(context: &Context, bind: &BindFunctionHandle<'_>, names: &[&str]) -> duckdb_neo::Result<()> {
+    let varchar = String::logical_type(context)?;
+    for name in names {
+        bind.add_result_column(name, &varchar)?;
+    }
+    Ok(())
+}
 
 #[derive(Debug)]
 pub struct HanaAttachBindData {
@@ -24,22 +63,24 @@ pub struct HanaAttachBindData {
 
 #[derive(Debug)]
 pub struct HanaAttachInitData {
-    tables: Vec<(String, String)>,
-    ddl_statements: Vec<String>,
-    current_row: RwLock<usize>,
-    ddl_done: RwLock<bool>,
+    tables: Vec<[String; 2]>,
+    current_row: Mutex<usize>,
 }
 
 pub struct HanaAttachVTab;
 
-impl VTab for HanaAttachVTab {
-    type InitData = HanaAttachInitData;
-    type BindData = HanaAttachBindData;
+impl HanaAttachVTab {
+    pub fn signature() -> SignatureBuilder {
+        SignatureBuilder::new()
+            .param(positional::<String>(0)) // url
+            .param(positional::<String>(1)) // dbname
+            .param(positional::<String>(2)) // schema
+    }
 
-    fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
-        let url = bind.get_parameter(0).to_string();
-        let dbname = bind.get_parameter(1).to_string();
-        let schema = bind.get_parameter(2).to_string();
+    fn bind_inner(arguments: &[BindArgument]) -> Result<HanaAttachBindData, Box<dyn Error>> {
+        let url = arg_string(arguments, 0)?;
+        let dbname = arg_string(arguments, 1)?;
+        let schema = arg_string(arguments, 2)?;
 
         validate_hana_connection(&url)?;
 
@@ -91,23 +132,41 @@ impl VTab for HanaAttachVTab {
             ));
         }
 
-        bind.add_result_column("table_name", LogicalTypeHandle::from(LogicalTypeId::Varchar));
-        bind.add_result_column("full_name", LogicalTypeHandle::from(LogicalTypeId::Varchar));
-
         Ok(HanaAttachBindData { url, dbname, schema, table_names })
     }
+}
 
-    fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
-        let bind_data = init.get_bind_data::<Self::BindData>();
-        let bind_ref = unsafe { &*bind_data };
+impl TableFunctionCallbacks for HanaAttachVTab {
+    type BindData = HanaAttachBindData;
+    type GlobalState = HanaAttachInitData;
+    type LocalState = ();
 
+    fn bind(
+        &self,
+        context: &Context,
+        arguments: Vec<BindArgument>,
+        bind_handle: BindFunctionHandle<'_>,
+    ) -> duckdb_neo::Result<Self::BindData> {
+        let bind_data = Self::bind_inner(&arguments).map_err(bind_error)?;
+        add_varchar_columns(context, &bind_handle, &["table_name", "full_name"])?;
+        Ok(bind_data)
+    }
+
+    fn init_global_state(
+        &self,
+        bind_ref: &Self::BindData,
+        _context: &Context,
+        _column_data: InitColumnData<'_>,
+    ) -> duckdb_neo::Result<(Option<Self::GlobalState>, Option<usize>)> {
         let url = &bind_ref.url;
         let dbname = &bind_ref.dbname;
         let schema = &bind_ref.schema;
         let table_names = &bind_ref.table_names;
 
-        let mut tables: Vec<(String, String)> = Vec::new();
+        let mut tables: Vec<[String; 2]> = Vec::new();
 
+        // Registry only: the replacement scan resolves both the flat names and
+        // `<dbname>_<schema>.<table>`, so no catalog DDL runs from inside the query.
         hana_state::write_state(|state| {
             let att_key = attachment_key(dbname, schema);
             if let Some(prev) = state.attachments.remove(&att_key) {
@@ -128,7 +187,7 @@ impl VTab for HanaAttachVTab {
                         hana_table: table.clone(),
                     },
                 );
-                tables.push((table.clone(), flat));
+                tables.push([table.clone(), flat]);
             }
 
             state.attachments.insert(
@@ -142,118 +201,53 @@ impl VTab for HanaAttachVTab {
             );
         });
 
-        // DDL is deferred to func phase to avoid DuckDB catalog lock re-entrancy.
-        let duck_schema = escape_identifier(&duckdb_schema_name(dbname, schema));
-        let safe_url = url.replace('\'', "''");
-        let safe_hana_schema = escape_identifier(schema);
-        let mut ddl_statements: Vec<String> = Vec::with_capacity(table_names.len() + 1);
-        ddl_statements.push(format!(
-            "CREATE SCHEMA IF NOT EXISTS \"{}\"",
-            duck_schema
-        ));
-        for table in table_names {
-            let safe_table = escape_identifier(table);
-            ddl_statements.push(format!(
-                "CREATE OR REPLACE VIEW \"{}\".\"{}\" AS SELECT * FROM hana_scan('SELECT * FROM \"{}\".\"{}\"', '{}')",
-                duck_schema, safe_table, safe_hana_schema, safe_table, safe_url,
-            ));
-        }
-
-        Ok(HanaAttachInitData {
-            tables,
-            ddl_statements,
-            current_row: RwLock::new(0),
-            ddl_done: RwLock::new(false),
-        })
+        Ok((Some(HanaAttachInitData { tables, current_row: Mutex::new(0) }), Some(1)))
     }
 
-    fn func(
-        info: &TableFunctionInfo<Self>,
-        output: &mut DataChunkHandle,
-    ) -> Result<(), Box<dyn Error>> {
-        let init_data = &*(info.get_init_data());
-
-        // Best-effort DDL; replacement scan works regardless.
-        {
-            let done = *init_data.ddl_done.read().map_err(|_| HanaError::new("lock error"))?;
-            if !done {
-                let ddl_refs: Vec<&str> = init_data.ddl_statements.iter().map(|s| s.as_str()).collect();
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    execute_ddl_batch(&ddl_refs)
-                })) {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => {
-                        eprintln!("[WARN] ATTACH Could not create schema/views (replacement scan still works): {}", e);
-                    }
-                    Err(_) => {
-                        eprintln!("[WARN] ATTACH Schema/view creation panicked (replacement scan still works)");
-                    }
-                }
-                *init_data.ddl_done.write().map_err(|_| HanaError::new("lock error"))? = true;
-            }
-        }
-
-        let current = *init_data.current_row.read().map_err(|_| HanaError::new("lock error"))?;
-        let remaining = init_data.tables.len().saturating_sub(current);
-        if remaining == 0 {
-            output.set_len(0);
-            return Ok(());
-        }
-        let batch = std::cmp::min(remaining, 2048);
-        output.set_len(batch);
-
-        let name_vec = output.flat_vector(0);
-        let full_vec = output.flat_vector(1);
-        for i in 0..batch {
-            let (ref tname, ref fname) = init_data.tables[current + i];
-            name_vec.insert(i, tname.as_str());
-            full_vec.insert(i, fname.as_str());
-        }
-
-        *init_data.current_row.write().map_err(|_| HanaError::new("lock error"))? += batch;
-        Ok(())
-    }
-
-    fn parameters() -> Option<Vec<LogicalTypeHandle>> {
-        Some(vec![
-            LogicalTypeHandle::from(LogicalTypeId::Varchar), // url
-            LogicalTypeHandle::from(LogicalTypeId::Varchar), // dbname
-            LogicalTypeHandle::from(LogicalTypeId::Varchar), // schema
-        ])
+    fn exec(
+        &self,
+        _bind_data: &Self::BindData,
+        global_state: Option<&Self::GlobalState>,
+        _local_state: Option<&mut Self::LocalState>,
+        _context: &Context,
+        mut output: DataChunkRef<'_>,
+        _column_info: ExecColumnInfo<'_>,
+    ) -> duckdb_neo::Result<()> {
+        let init_data = global_state.ok_or_else(|| exec_error(HanaError::new("lock error")))?;
+        emit_rows(&mut output, &init_data.tables, &init_data.current_row)
     }
 }
 
 pub struct HanaDetachScalar;
 
-impl VScalar for HanaDetachScalar {
-    type State = ();
+impl HanaDetachScalar {
+    pub fn signature(extension: &Extension) -> duckdb_neo::Result<SignatureBuilder> {
+        Ok(SignatureBuilder::new()
+            .param(positional::<String>(0)) // dbname
+            .param(positional::<String>(1)) // schema
+            .return_type(String::logical_type(extension)?))
+    }
+}
 
-    fn invoke(
-        _state: &Self::State,
-        input: &mut DataChunkHandle,
-        output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn Error>> {
-        if input.len() == 0 {
-            return Err("No input provided".into());
+impl ScalarCallbacks for HanaDetachScalar {
+    type BindData = ();
+    type InitData = ();
+
+    fn exec(
+        &self,
+        _bind_data: Option<&Self::BindData>,
+        _init_data: Option<&mut Self::InitData>,
+        _context: &Context,
+        input: &mut VectorCollection,
+        output: Vector<'_, Unknown>,
+    ) -> duckdb_neo::Result<()> {
+        let rows = input.row_count()?;
+        if rows == 0 {
+            return Err(exec_error("No input provided"));
         }
 
-        let dbname_vec = input.flat_vector(0);
-        let schema_vec = input.flat_vector(1);
-        // SAFETY: input column is VARCHAR; len == input.len()
-        let dbname_slice =
-            unsafe { dbname_vec.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
-        // SAFETY: input column is VARCHAR; len == input.len()
-        let schema_slice =
-            unsafe { schema_vec.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
-
-        let dbname = {
-            let mut binding = dbname_slice[0];
-            duckdb::types::DuckString::new(&mut binding).as_str().to_string()
-        };
-        let schema = {
-            let mut binding = schema_slice[0];
-            duckdb::types::DuckString::new(&mut binding).as_str().to_string()
-        };
+        let dbname = input_string(input, 0, 0)?;
+        let schema = input_string(input, 1, 0)?;
 
         let removed_count = hana_state::write_state(|state| {
             let att_key = attachment_key(&dbname, &schema);
@@ -269,63 +263,49 @@ impl VScalar for HanaDetachScalar {
             count
         });
 
-        let duck_schema = escape_identifier(&duckdb_schema_name(&dbname, &schema));
-        let _ = execute_ddl(&format!(
-            "DROP SCHEMA IF EXISTS \"{}\" CASCADE",
-            duck_schema
-        ));
-
-        let msg = format!("Detached {} tables from {}.{}", removed_count, dbname, schema);
-        let flat = output.flat_vector();
-        flat.insert(0, &msg);
-        Ok(())
-    }
-
-    fn signatures() -> Vec<ScalarFunctionSignature> {
-        vec![ScalarFunctionSignature::exact(
-            vec![
-                LogicalTypeId::Varchar.into(), // dbname
-                LogicalTypeId::Varchar.into(), // schema
-            ],
-            LogicalTypeId::Varchar.into(),
-        )]
+        let mut results = vec![None; rows];
+        results[0] = Some(format!("Detached {} tables from {}.{}", removed_count, dbname, schema));
+        write_strings(output, &results)
     }
 }
 
 #[derive(Debug)]
 pub struct HanaTablesBindData {
-    rows: Vec<(String, String, String, String)>,
+    rows: Vec<[String; 4]>,
 }
 
 #[derive(Debug)]
 pub struct HanaTablesInitData {
-    rows: Vec<(String, String, String, String)>,
-    current_row: RwLock<usize>,
+    current_row: Mutex<usize>,
 }
 
 pub struct HanaTablesVTab;
 
-impl VTab for HanaTablesVTab {
-    type InitData = HanaTablesInitData;
-    type BindData = HanaTablesBindData;
+impl HanaTablesVTab {
+    pub fn signature() -> SignatureBuilder {
+        SignatureBuilder::new()
+    }
+}
 
-    fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
-        bind.add_result_column("table_name", LogicalTypeHandle::from(LogicalTypeId::Varchar));
-        bind.add_result_column("schema_name", LogicalTypeHandle::from(LogicalTypeId::Varchar));
-        bind.add_result_column("dbname", LogicalTypeHandle::from(LogicalTypeId::Varchar));
-        bind.add_result_column("full_name", LogicalTypeHandle::from(LogicalTypeId::Varchar));
+impl TableFunctionCallbacks for HanaTablesVTab {
+    type BindData = HanaTablesBindData;
+    type GlobalState = HanaTablesInitData;
+    type LocalState = ();
+
+    fn bind(
+        &self,
+        context: &Context,
+        _arguments: Vec<BindArgument>,
+        bind_handle: BindFunctionHandle<'_>,
+    ) -> duckdb_neo::Result<Self::BindData> {
+        add_varchar_columns(context, &bind_handle, &["table_name", "schema_name", "dbname", "full_name"])?;
 
         let rows = hana_state::read_state(|state| {
             let mut out = Vec::new();
             for att in state.attachments.values() {
                 for table in &att.table_names {
                     let flat = prefixed_name(&att.dbname, &att.schema, table);
-                    out.push((
-                        table.clone(),
-                        att.schema.clone(),
-                        att.dbname.clone(),
-                        flat,
-                    ));
+                    out.push([table.clone(), att.schema.clone(), att.dbname.clone(), flat]);
                 }
             }
             out
@@ -334,46 +314,25 @@ impl VTab for HanaTablesVTab {
         Ok(HanaTablesBindData { rows })
     }
 
-    fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
-        let bind_data = init.get_bind_data::<Self::BindData>();
-        let bind_ref = unsafe { &*bind_data };
-        Ok(HanaTablesInitData {
-            rows: bind_ref.rows.clone(),
-            current_row: RwLock::new(0),
-        })
+    fn init_global_state(
+        &self,
+        _bind_data: &Self::BindData,
+        _context: &Context,
+        _column_data: InitColumnData<'_>,
+    ) -> duckdb_neo::Result<(Option<Self::GlobalState>, Option<usize>)> {
+        Ok((Some(HanaTablesInitData { current_row: Mutex::new(0) }), Some(1)))
     }
 
-    fn func(
-        info: &TableFunctionInfo<Self>,
-        output: &mut DataChunkHandle,
-    ) -> Result<(), Box<dyn Error>> {
-        let init_data = &*(info.get_init_data());
-        let current = *init_data.current_row.read().map_err(|_| HanaError::new("lock error"))?;
-        let remaining = init_data.rows.len().saturating_sub(current);
-        if remaining == 0 {
-            output.set_len(0);
-            return Ok(());
-        }
-        let batch = std::cmp::min(remaining, 2048);
-        output.set_len(batch);
-
-        let col0 = output.flat_vector(0);
-        let col1 = output.flat_vector(1);
-        let col2 = output.flat_vector(2);
-        let col3 = output.flat_vector(3);
-        for i in 0..batch {
-            let (ref tname, ref sname, ref dname, ref fname) = init_data.rows[current + i];
-            col0.insert(i, tname.as_str());
-            col1.insert(i, sname.as_str());
-            col2.insert(i, dname.as_str());
-            col3.insert(i, fname.as_str());
-        }
-
-        *init_data.current_row.write().map_err(|_| HanaError::new("lock error"))? += batch;
-        Ok(())
-    }
-
-    fn parameters() -> Option<Vec<LogicalTypeHandle>> {
-        Some(vec![]) // no parameters
+    fn exec(
+        &self,
+        bind_data: &Self::BindData,
+        global_state: Option<&Self::GlobalState>,
+        _local_state: Option<&mut Self::LocalState>,
+        _context: &Context,
+        mut output: DataChunkRef<'_>,
+        _column_info: ExecColumnInfo<'_>,
+    ) -> duckdb_neo::Result<()> {
+        let init_data = global_state.ok_or_else(|| exec_error(HanaError::new("lock error")))?;
+        emit_rows(&mut output, &bind_data.rows, &init_data.current_row)
     }
 }

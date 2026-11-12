@@ -1,13 +1,18 @@
-use duckdb::{
-    core::{DataChunkHandle, LogicalTypeId},
-    vtab::arrow::WritableVector,
-    vscalar::{VScalar, ScalarFunctionSignature},
+use duckdb_neo::{
+    connection::Context,
+    data_chunk::VectorCollection,
+    extension::Extension,
+    scalar::ScalarCallbacks,
+    signature::SignatureBuilder,
+    vector::{Unknown, Vector},
+    DuckDBType,
 };
 use hdbconnect::{HdbValue, ResultSetMetadata, TypeId};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::panic::{self, AssertUnwindSafe};
 use crate::{HanaConnection, HanaError, redact_url_password};
+use crate::v2_util::{exec_error, input_string, positional};
 
 fn parse_source_params(json: &str) -> Result<Vec<HdbValue<'static>>, Box<dyn Error>> {
     let trimmed = json.trim();
@@ -251,7 +256,7 @@ fn coerce_to_target(value: HdbValue<'static>, target: TypeId) -> HdbValue<'stati
     }
 }
 
-fn run_materialize(
+pub fn run_materialize(
     connection_string: &str,
     source_sql: &str,
     source_params_json: &str,
@@ -358,43 +363,55 @@ fn run_materialize(
 
 pub struct HanaMaterializeCohortScalar;
 
-impl VScalar for HanaMaterializeCohortScalar {
-    type State = ();
+impl HanaMaterializeCohortScalar {
+    pub fn signature(extension: &Extension) -> duckdb_neo::Result<SignatureBuilder> {
+        Ok(SignatureBuilder::new()
+            .param(positional::<String>(0)) // connection_string
+            .param(positional::<String>(1)) // source_sql
+            .param(positional::<String>(2)) // source_params_json
+            .param(positional::<String>(3)) // results_schema
+            .param(positional::<i64>(4)) // cohort_definition_id
+            .param(positional::<String>(5)) // session_vars_json
+            .return_type(i64::logical_type(extension)?)) // processed_rows
+    }
+}
 
-    fn invoke(
-        _state: &Self::State,
-        input: &mut DataChunkHandle,
-        output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+impl ScalarCallbacks for HanaMaterializeCohortScalar {
+    type BindData = ();
+    type InitData = ();
+
+    fn exec(
+        &self,
+        _bind_data: Option<&Self::BindData>,
+        _init_data: Option<&mut Self::InitData>,
+        _context: &Context,
+        input: &mut VectorCollection,
+        output: Vector<'_, Unknown>,
+    ) -> duckdb_neo::Result<()> {
         // This scalar performs side effects (streams rows into HANA) and writes a
         // single BIGINT result. It is only ever invoked with the constant scalar
         // arguments of a `SELECT trex_hana_materialize_cohort(...)`, i.e. one row.
         // Reject any vectorized call so we never silently ignore extra rows or
         // leave output entries uninitialized.
-        if input.len() != 1 {
-            return Err(Box::new(HanaError::new(&format!(
+        let rows = input.row_count()?;
+        if rows != 1 {
+            return Err(exec_error(HanaError::new(&format!(
                 "trex_hana_materialize_cohort expects exactly one input row, got {}",
-                input.len()
+                rows
             ))));
         }
 
-        let read_varchar = |idx: usize| -> String {
-            let v = input.flat_vector(idx);
-            // SAFETY: input column is VARCHAR; len == input.len()
-            let slice =
-                unsafe { v.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len()) };
-            let mut binding = slice[0];
-            duckdb::types::DuckString::new(&mut binding).as_str().to_string()
-        };
-
-        let connection_string = read_varchar(0);
-        let source_sql = read_varchar(1);
-        let source_params_json = read_varchar(2);
-        let results_schema = read_varchar(3);
-        // SAFETY: input column is i64; len == input.len()
-        let cohort_definition_id =
-            (unsafe { input.flat_vector(4).as_slice_with_len::<i64>(input.len()) })[0];
-        let session_vars_json = read_varchar(5);
+        let connection_string = input_string(input, 0, 0)?;
+        let source_sql = input_string(input, 1, 0)?;
+        let source_params_json = input_string(input, 2, 0)?;
+        let results_schema = input_string(input, 3, 0)?;
+        let cohort_definition_id = input
+            .get_vector_at::<i64>(4)?
+            .reader()?
+            .get(0)?
+            .copied()
+            .unwrap_or_default();
+        let session_vars_json = input_string(input, 5, 0)?;
 
         let processed = run_materialize(
             &connection_string,
@@ -403,26 +420,12 @@ impl VScalar for HanaMaterializeCohortScalar {
             &results_schema,
             cohort_definition_id,
             &session_vars_json,
-        )?;
+        )
+        .map_err(exec_error)?;
 
-        let mut out = output.flat_vector();
-        // SAFETY: output vector holds i64 and is sized for the rows written
-        (unsafe { out.as_mut_slice::<i64>() })[0] = processed;
-        Ok(())
-    }
-
-    fn signatures() -> Vec<ScalarFunctionSignature> {
-        vec![ScalarFunctionSignature::exact(
-            vec![
-                LogicalTypeId::Varchar.into(), // connection_string
-                LogicalTypeId::Varchar.into(), // source_sql
-                LogicalTypeId::Varchar.into(), // source_params_json
-                LogicalTypeId::Varchar.into(), // results_schema
-                LogicalTypeId::Bigint.into(),  // cohort_definition_id
-                LogicalTypeId::Varchar.into(), // session_vars_json
-            ],
-            LogicalTypeId::Bigint.into(),      // processed_rows
-        )]
+        let mut out = output.cast::<i64>()?;
+        out.set_size(1)?;
+        out.writer()?.set(0, Some(processed))
     }
 }
 

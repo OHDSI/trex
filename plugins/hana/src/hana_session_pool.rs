@@ -2,12 +2,18 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use duckdb::{
-    core::{DataChunkHandle, Inserter, LogicalTypeId},
-    vscalar::{ScalarFunctionSignature, VScalar},
-    vtab::arrow::WritableVector,
+use duckdb_neo::{
+    connection::Context,
+    data_chunk::VectorCollection,
+    extension::Extension,
+    scalar::ScalarCallbacks,
+    signature::SignatureBuilder,
+    vector::{Unknown, Vector},
+    DuckDBType,
 };
 use hdbconnect::HdbError;
+
+use crate::v2_util::{exec_error, input_string, positional, write_strings};
 
 use crate::HanaConnection;
 
@@ -113,41 +119,36 @@ pub fn evict(session_id: u64) -> usize {
 /// `#temp` tables) via SQL, without depending on the `hana` crate directly.
 pub struct HanaEvictSessionScalar;
 
-impl VScalar for HanaEvictSessionScalar {
-    type State = ();
-
-    fn invoke(
-        _state: &Self::State,
-        input: &mut DataChunkHandle,
-        output: &mut dyn WritableVector,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if input.len() == 0 {
-            return Err("No input provided".into());
-        }
-
-        let session_id_vector = input.flat_vector(0);
-        // SAFETY: input column is VARCHAR; len == input.len()
-        let session_id_slice = unsafe {
-            session_id_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len())
-        };
-
-        let flat_vector = output.flat_vector();
-        for row in 0..input.len() {
-            let session_id_str = {
-                let mut binding = session_id_slice[row];
-                duckdb::types::DuckString::new(&mut binding).as_str().to_string()
-            };
-            let n = evict(parse_session_id(&session_id_str));
-            flat_vector.insert(row, &format!("evicted {}", n));
-        }
-        Ok(())
+impl HanaEvictSessionScalar {
+    pub fn signature(extension: &Extension) -> duckdb_neo::Result<SignatureBuilder> {
+        Ok(SignatureBuilder::new()
+            .param(positional::<String>(0)) // session_id
+            .return_type(String::logical_type(extension)?))
     }
+}
 
-    fn signatures() -> Vec<ScalarFunctionSignature> {
-        vec![ScalarFunctionSignature::exact(
-            vec![LogicalTypeId::Varchar.into()],
-            LogicalTypeId::Varchar.into(),
-        )]
+impl ScalarCallbacks for HanaEvictSessionScalar {
+    type BindData = ();
+    type InitData = ();
+
+    fn exec(
+        &self,
+        _bind_data: Option<&Self::BindData>,
+        _init_data: Option<&mut Self::InitData>,
+        _context: &Context,
+        input: &mut VectorCollection,
+        output: Vector<'_, Unknown>,
+    ) -> duckdb_neo::Result<()> {
+        let rows = input.row_count()?;
+        if rows == 0 {
+            return Err(exec_error("No input provided"));
+        }
+        let mut results = Vec::with_capacity(rows);
+        for row in 0..rows {
+            let n = evict(parse_session_id(&input_string(input, 0, row)?));
+            results.push(Some(format!("evicted {}", n)));
+        }
+        write_strings(output, &results)
     }
 }
 
