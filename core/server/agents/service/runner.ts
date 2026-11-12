@@ -255,6 +255,7 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
       // undefined is exactly the same as not passing it at all.
       abortSignal: opts.abortSignal,
       stopWhen: stepCountIs(agent.config.maxSteps ?? 25),
+      maxOutputTokens: agent.config.maxOutputTokens,
       // openai/Responses caches automatically; a stable per-agent key keeps the
       // TOOLS+SYSTEM prefix routed to the same cache across turns. No-op ({}) for
       // bedrock/anthropic (they cache via withSystemCachePoint's markers above).

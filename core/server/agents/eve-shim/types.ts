@@ -87,6 +87,11 @@ export interface AgentEngine {
 export interface AgentConfig {
   model?: string; // eve/AI-Gateway format: "provider/model-id"
   maxSteps?: number;
+  // Cap on output tokens per model call. A model that degenerates into
+  // endless text otherwise streams until the provider's own limit (128k
+  // tokens observed) and starves the worker's heartbeat, so the turn is
+  // reaped as abandoned 10 minutes later instead of failing fast.
+  maxOutputTokens?: number;
   context?: Partial<ContextConfig>;
   // Per-subagent role config (task-14, ported from codex's role.rs). Only
   // `skills` is REDUCING ONLY: when declared on a subagent, it is
