@@ -313,6 +313,72 @@ export function stepToEvent(row: { turn_id: string; kind: string; name: string |
   }
 }
 
+type PersistedStep = Parameters<typeof stepToEvent>[0];
+
+export const CROSS_WORKER_POLL_MS = 500;
+// A turn that ended this recently is the one a just-attaching eve client is
+// waiting for (it POSTs, then opens /stream). Anything older was already read
+// by whoever attached, so re-sending it would only hand a re-attaching relay a
+// stale turn boundary.
+export const CROSS_WORKER_GRACE_MS = 30_000;
+
+// publish() reaches only the subscribers of the worker that ran the turn, and
+// session.waiting / session.failed are never persisted. The edge runtime can
+// boot more than one worker for an agent's servicePath, so a /stream request
+// served by a different worker than the turn's sees nothing live, replay has
+// no boundary event, and an eve client (t.send(), MessageResponse.result())
+// waits forever. Until a live event shows this worker runs the turn, poll the
+// DB and send the awaited turn's persisted events plus the boundary that live
+// delivery would have sent.
+async function startCrossWorkerFallback(opts: {
+  store: Pick<AgentStore, "listEvents" | "getLatestTurn">;
+  sessionId: string;
+  startIndex: number;
+  allRows: PersistedStep[];
+  controller: ReadableStreamDefaultController<Uint8Array>;
+}): Promise<(() => void) | undefined> {
+  const { store, sessionId, startIndex, allRows, controller } = opts;
+  const latest = await store.getLatestTurn(sessionId).catch(() => null);
+  if (!latest) return undefined;
+  const recent = latest.finishedAt !== null && Date.now() - latest.finishedAt.getTime() < CROSS_WORKER_GRACE_MS;
+  if (latest.status !== "running" && !recent) return undefined;
+
+  const awaited = latest.id;
+  const sent = new Set<number>();
+  allRows.forEach((_, i) => { if (i >= startIndex) sent.add(i); });
+  let stopped = false;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const stop = () => {
+    stopped = true;
+    if (timer !== undefined) clearInterval(timer);
+  };
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const turn = await store.getLatestTurn(sessionId);
+      if (stopped || !turn || turn.id !== awaited || turn.status === "running") return;
+      const rows = await store.listEvents(sessionId);
+      if (stopped) return;
+      rows.forEach((row, i) => {
+        if (row.turn_id === awaited && !sent.has(i)) {
+          controller.enqueue(ndjsonEncode(stepToEvent(row)));
+          sent.add(i);
+        }
+      });
+      const failure = rows.find((r) => r.turn_id === awaited && r.kind === "error");
+      controller.enqueue(ndjsonEncode(failure
+        ? { type: "session.failed", data: { sessionId, message: String((failure.payload as { message?: unknown } | null)?.message ?? "turn failed") } }
+        : { type: "session.waiting", data: { wait: "next-user-message" } }));
+      stop();
+    } catch {
+      // A closed stream or a transient DB error; the next tick retries.
+    }
+  };
+  timer = setInterval(tick, CROSS_WORKER_POLL_MS);
+  void tick();
+  return stop;
+}
+
 // Per-request context for the agent's resolveModel/buildInstructions hooks —
 // built fresh on every call, never cached. `userId` must come from the caller's
 // x-user-id-derived value only (never metadata, which is client-supplied
@@ -1764,6 +1830,8 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // Hoisted so the abort listener and the stream's cancel() (consumer
       // detached without an abort event) share the same unsubscribe.
       let unsub: (() => void) | undefined;
+      let stopFallback: (() => void) | undefined;
+      let detached = false;
       const body = new ReadableStream({
         async start(controller) {
           // Flush a byte before anything that can await. The response headers
@@ -1796,14 +1864,17 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
           const buffer: AgentEvent[] = [];
           if (!replayOnly) {
             unsub = subscribe(sessionId, (e) => {
+              stopFallback?.();
               try {
                 if (buffering) buffer.push(e);
                 else controller.enqueue(ndjsonEncode(e));
               } catch { unsub?.(); }
             });
           }
+          let allRows: PersistedStep[] = [];
           try {
-            const past = (await store.listEvents(sessionId)).slice(startIndex);
+            allRows = await store.listEvents(sessionId);
+            const past = allRows.slice(startIndex);
             for (const ev of past) controller.enqueue(ndjsonEncode(stepToEvent(ev)));
           } catch (e) {
             // If replay fails, the subscriber registered above would leak
@@ -1823,9 +1894,14 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
           for (const e of buffer) {
             try { controller.enqueue(ndjsonEncode(e)); } catch { unsub?.(); break; }
           }
-          req.signal.addEventListener("abort", () => { unsub?.(); try { controller.close(); } catch { /* closed */ } });
+          if (buffer.length === 0 && !detached) {
+            stopFallback = await startCrossWorkerFallback({ store, sessionId, startIndex, allRows, controller });
+            // The consumer can detach while the fallback's first lookup is in flight.
+            if (detached) stopFallback?.();
+          }
+          req.signal.addEventListener("abort", () => { detached = true; unsub?.(); stopFallback?.(); try { controller.close(); } catch { /* closed */ } });
         },
-        cancel() { unsub?.(); },
+        cancel() { detached = true; unsub?.(); stopFallback?.(); },
       });
       return new Response(body, {
         headers: { "content-type": "application/x-ndjson", "cache-control": "no-cache", connection: "keep-alive" },

@@ -344,6 +344,17 @@ export function createStore(query: QueryFn) {
       return row ? { id: row.id, seq: Number(row.seq), startedAt: row.started_at } : null;
     },
 
+    async getLatestTurn(sessionId: string): Promise<{ id: string; status: string; finishedAt: Date | null } | null> {
+      const r = await query(
+        `SELECT id, status, finished_at FROM agents.turns
+          WHERE session_id = $1
+          ORDER BY seq DESC LIMIT 1`,
+        [sessionId],
+      );
+      const row = r.rows[0] as { id: string; status: string; finished_at: Date | null } | undefined;
+      return row ? { id: row.id, status: row.status, finishedAt: row.finished_at } : null;
+    },
+
     // 21 of 263 turns were observed stuck `running` forever because
     // nothing ever ended an abandoned turn (a worker crash/redeploy mid-turn
     // leaves no other signal). Marks every `running` turn older than the

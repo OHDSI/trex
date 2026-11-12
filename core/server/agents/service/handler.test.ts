@@ -79,7 +79,7 @@ function inMemoryDb() {
   const turns: Array<
     {
       id: string; session_id: string; seq: number; status: string; error: string | null; message: unknown;
-      startedAt: Date; touched_paths?: string[]; metadata?: unknown;
+      startedAt: Date; finishedAt?: Date; touched_paths?: string[]; metadata?: unknown;
     }
   > = [];
   const steps: Array<{ turn_id: string; seq: number; kind: string; name: string | null; payload: unknown; usage: unknown }> = [];
@@ -233,6 +233,13 @@ function inMemoryDb() {
       if (s) s.consecutive_wakes = 0;
       return Promise.resolve({ rows: [] });
     }
+    if (sql.includes("SELECT id, status, finished_at FROM agents.turns")) {
+      // getLatestTurn — the session's highest-seq turn, whatever its status.
+      const latest = turns.filter((t) => t.session_id === params[0]).sort((a, b) => b.seq - a.seq)[0];
+      return Promise.resolve({
+        rows: latest ? [{ id: latest.id, status: latest.status, finished_at: latest.finishedAt ?? null }] : [],
+      });
+    }
     if (sql.includes("SELECT id, seq, started_at FROM agents.turns")) {
       // getRunningTurn — the most-recently-started running turn.
       const running = turns.filter((t) => t.session_id === params[0] && t.status === "running")
@@ -275,6 +282,7 @@ function inMemoryDb() {
       if (!t) return Promise.resolve({ rows: [] });
       t.status = params[1] as string;
       t.error = (params[2] as string | null) ?? null;
+      t.finishedAt = new Date();
       return Promise.resolve({ rows: [{ id: t.id }] });
     }
     if (sql.includes("UPDATE agents.turns") && sql.includes("RETURNING id")) {
@@ -5458,12 +5466,13 @@ Deno.test("GET /stream yields a first chunk even with nothing to replay", async 
   const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}/stream?startIndex=9999`));
   assertEquals(res.headers.get("content-type"), "application/x-ndjson");
   const reader = res.body!.getReader();
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     // Must resolve without waiting for an event to be published. A hang here
     // is the deadlock; the timeout is what distinguishes the two.
     const first = await Promise.race([
       reader.read(),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("stream produced no chunk")), 5_000)),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("stream produced no chunk")), 5_000); }),
     ]);
     assert(!first.done, "the stream closed instead of staying open for live events");
     // The priming chunk is a blank line: framing-neutral, and every consumer
@@ -5471,6 +5480,111 @@ Deno.test("GET /stream yields a first chunk even with nothing to replay", async 
     const text = new TextDecoder().decode(first.value);
     assertEquals(text.trim(), "");
   } finally {
+    clearTimeout(timer);
     await reader.cancel();
   }
+});
+
+async function readStreamTypes(res: Response, opts: { until?: string; ms: number }): Promise<string[]> {
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  const types: string[] = [];
+  let buf = "";
+  const deadline = Date.now() + opts.ms;
+  try {
+    while (Date.now() < deadline) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const next = await Promise.race([
+        reader.read(),
+        new Promise<null>((r) => { timer = setTimeout(() => r(null), Math.max(1, deadline - Date.now())); }),
+      ]);
+      clearTimeout(timer);
+      if (next === null || next.done) break;
+      buf += decoder.decode(next.value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i).trim();
+        buf = buf.slice(i + 1);
+        if (line === "") continue;
+        types.push((JSON.parse(line) as { type: string }).type);
+      }
+      if (opts.until && types.includes(opts.until)) break;
+    }
+  } finally {
+    await reader.cancel();
+  }
+  return types;
+}
+
+// eve's client POSTs and then opens /stream. A fast turn can finish before the
+// stream attaches; session.waiting is live-only, so without the DB fallback the
+// replay ends at turn.completed and the client waits for a boundary forever.
+Deno.test("GET /stream ends a turn that finished before the stream attached with session.waiting", async () => {
+  const { handler, db } = await makeHandler();
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => settled(db));
+
+  const types = await readStreamTypes(
+    await handler(new Request(`${BASE}/eve/v1/session/${sid}/stream`)),
+    { until: "session.waiting", ms: 5_000 },
+  );
+  assert(types.includes("session.waiting"), `no session.waiting: [${types.join(", ")}]`);
+  assert(types.indexOf("turn.completed") < types.indexOf("session.waiting"), `boundary before the turn: [${types.join(", ")}]`);
+});
+
+// The edge runtime can run an agent in more than one worker, and publish()
+// only reaches the worker that ran the turn. Here the turn's progress happens
+// purely in the DB (nothing is published), which is what a stream served by
+// the other worker sees.
+Deno.test("GET /stream on a worker that did not run the turn still delivers the turn and its boundary", async () => {
+  const { handler, db } = await makeHandler();
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => settled(db));
+
+  const turn = db.turns[0];
+  const finished = db.steps.filter((s) => s.turn_id === turn.id);
+  const pending = finished.splice(0);
+  for (const s of pending) db.steps.splice(db.steps.indexOf(s), 1);
+  turn.status = "running";
+  turn.finishedAt = undefined;
+
+  const streamRes = await handler(new Request(`${BASE}/eve/v1/session/${sid}/stream`));
+  setTimeout(() => {
+    db.steps.push(...pending);
+    turn.status = "completed";
+    turn.finishedAt = new Date();
+  }, 300);
+  const types = await readStreamTypes(streamRes, { until: "session.waiting", ms: 5_000 });
+
+  assertEquals(types.filter((t) => t === "turn.completed").length, 1, `turn sent more than once: [${types.join(", ")}]`);
+  assert(types.includes("message.completed"), `turn events missing: [${types.join(", ")}]`);
+  assertEquals(types[types.length - 1], "session.waiting");
+});
+
+// A relay re-attaching at its own cursor long after a turn ended (claw does
+// this before sending an approval decision) must not be handed that old turn
+// and a boundary it would read as a new turn ending.
+Deno.test("GET /stream does not resend a turn that finished before the grace window", async () => {
+  const { handler, db } = await makeHandler();
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => settled(db));
+  db.turns[0].finishedAt = new Date(Date.now() - 60_000);
+
+  const types = await readStreamTypes(
+    await handler(new Request(`${BASE}/eve/v1/session/${sid}/stream?startIndex=9999`)),
+    { ms: 1_500 },
+  );
+  assertEquals(types, []);
 });
