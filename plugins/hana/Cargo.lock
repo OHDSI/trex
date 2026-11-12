@@ -232,7 +232,7 @@ dependencies = [
 [[package]]
 name = "duckdb-loadable-macros"
 version = "1.20000.1"
-source = "git+https://github.com/p-hoffmann/trexsql-rs?tag=v2.0.0-trex#04b51fb3bf65ea44b687ce0a8b1913208a0d6e60"
+source = "git+https://github.com/p-hoffmann/trexsql-rs?branch=p-hoffmann%2Fstorage-extension-capi#fb7cd1b076803a47bb287d6d18599c6daae1d59b"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -243,7 +243,7 @@ dependencies = [
 [[package]]
 name = "duckdb-neo"
 version = "0.20000.1"
-source = "git+https://github.com/p-hoffmann/trexsql-rs?tag=v2.0.0-trex#04b51fb3bf65ea44b687ce0a8b1913208a0d6e60"
+source = "git+https://github.com/p-hoffmann/trexsql-rs?branch=p-hoffmann%2Fstorage-extension-capi#fb7cd1b076803a47bb287d6d18599c6daae1d59b"
 dependencies = [
  "duckdb-loadable-macros",
  "libduckdb-sys",
@@ -594,7 +594,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 [[package]]
 name = "libduckdb-sys"
 version = "1.20000.1"
-source = "git+https://github.com/p-hoffmann/trexsql-rs?tag=v2.0.0-trex#04b51fb3bf65ea44b687ce0a8b1913208a0d6e60"
+source = "git+https://github.com/p-hoffmann/trexsql-rs?branch=p-hoffmann%2Fstorage-extension-capi#fb7cd1b076803a47bb287d6d18599c6daae1d59b"
 dependencies = [
  "flate2",
  "prettyplease",

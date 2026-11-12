@@ -20,7 +20,7 @@ path = "src/wasm_lib.rs"
 crate-type = ["staticlib"]
 
 [dependencies]
-duckdb-neo = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v2.0.0-trex.2", default-features = false, features = ["build-extension"] }
+duckdb-neo = { git = "https://github.com/p-hoffmann/trexsql-rs", branch = "p-hoffmann/storage-extension-capi", default-features = false, features = ["build-extension"] }
 hdbconnect = "0.31.0"  # Using older version compatible with current Cargo
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
