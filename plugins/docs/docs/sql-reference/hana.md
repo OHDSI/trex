@@ -17,9 +17,9 @@ modes:
 
 In healthcare and OHDSI deployments, OMOP CDM data often lives in SAP HANA.
 Pulling those tables across a network on every analytical query is slow.
-With `hana_attach`, the Trex query planner pushes filters and projections
-into HANA, fetches only the needed columns, and joins them with local Trex
-data — typically order-of-magnitude faster than streaming whole tables.
+With `ATTACH ... (TYPE hana)`, HANA schemas and tables become a Trex
+catalog you can query and join with local Trex data in plain SQL. For
+selective reads, push the filter into HANA yourself with `trex_hana_scan`.
 
 ## Connection URLs
 
@@ -54,22 +54,42 @@ SELECT * FROM trex_hana_scan(
   'hdbsqls://user:pass@hana:39015/HDB?insecure_omit_server_certificate_check'
 );
 
--- Persistent: attach a schema, then query naturally
-SELECT * FROM trex_hana_attach(
-  'hdbsqls://user:pass@hana:39015/HDB?insecure_omit_server_certificate_check',
-  'omop',     -- local Trex DB name to register the virtual tables under
-  'CDM'       -- HANA schema to mirror
-);
+-- Persistent: attach HANA as a catalog, then query naturally
+ATTACH 'hdbsqls://user:pass@hana:39015/HDB?insecure_omit_server_certificate_check'
+  AS omop (TYPE hana, SCHEMA 'CDM');
 
--- Now CDM tables appear as omop.CDM.<table>
+-- Tables appear as omop.CDM.<table>, or omop.<table> for the SCHEMA option
 SELECT person_id, COUNT(*) AS observation_count
-  FROM omop.CDM.OBSERVATION
+  FROM omop.OBSERVATION
  GROUP BY person_id
  LIMIT 10;
 
 -- Detach when done
-SELECT trex_hana_detach('omop', 'CDM');
+DETACH omop;
 ```
+
+## Attaching HANA
+
+```sql
+ATTACH '<hdbsql(s) url>' AS <name> (TYPE hana [, SCHEMA '<schema>']);
+ATTACH 'hana:<hdbsql(s) url>' AS <name>;   -- the hana: prefix selects the type too
+```
+
+ATTACH connects once, so a bad URL or bad credentials fail the ATTACH
+itself. The attached database is a read-only catalog:
+
+- **Schemas** are the HANA schemas you have privileges on (`SYS.SCHEMAS`).
+- **Tables** are the tables and views of each schema (`SYS.TABLES`,
+  `SYS.VIEWS`). Names match case-insensitively.
+- **`SCHEMA` option**: the schema that `<name>.<table>` and `USE <name>`
+  resolve to. Without it, two-part names look for a `main` schema.
+- Schemas and tables are listed lazily and cached until `DETACH`; detach and
+  attach again to see new HANA tables.
+- Each table is read through `trex_hana_scan('SELECT * FROM "S"."T"', url)`.
+  Its columns are learned on first use with a `LIMIT 1` probe, so listing a
+  whole schema (e.g. `SHOW ALL TABLES`) probes every table in it.
+- `CREATE`, `INSERT`, `UPDATE`, `DELETE`, `DROP` against it fail as read-only;
+  use `trex_hana_execute` to change HANA.
 
 ## Functions
 
@@ -96,60 +116,6 @@ SELECT * FROM trex_hana_scan(
 ```
 
 `hana_scan` and `trex_hana_query` are aliases — same function, three names.
-
-### `trex_hana_attach(url, dbname, schema)`
-
-Mirror every table in a HANA schema as virtual tables under a Trex catalog.
-The mirror is metadata-only — no data is copied; queries against the virtual
-tables are rewritten into HANA SQL and pushed down at execution time.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| url | VARCHAR | HANA connection URL. |
-| dbname | VARCHAR | Local Trex catalog name to register the virtual tables under. |
-| schema | VARCHAR | HANA schema name to mirror. |
-
-**Returns:** TABLE(table_name VARCHAR, full_name VARCHAR) — one row per table mirrored.
-
-```sql
-SELECT * FROM trex_hana_attach(
-  'hdbsqls://user:pass@hana:39015/HDB',
-  'hana_db',
-  'CDM'
-);
-```
-
-After attach:
-- Trex's planner pushes `WHERE` and column projection into HANA.
-- The connection persists across queries (auto-pinned to the calling
-  session — see [Concepts → Connection Pool](../concepts/connection-pool)).
-- Virtual tables share the same lifetime as the attach: a `detach` removes
-  them.
-
-### `trex_hana_detach(dbname, schema)`
-
-Remove a previously attached schema and its virtual tables.
-
-```sql
-SELECT trex_hana_detach('hana_db', 'CDM');
-```
-
-### `trex_hana_tables()`
-
-List every HANA virtual table currently attached on this node.
-
-**Returns:** TABLE
-
-| Column | Description |
-|--------|-------------|
-| table_name | Local table name. |
-| schema_name | HANA schema. |
-| dbname | Local Trex catalog name. |
-| full_name | Fully-qualified name (`dbname.schema.table`). |
-
-```sql
-SELECT * FROM trex_hana_tables();
-```
 
 ### `trex_hana_execute(connection_string, sql_statement [, session_id])`
 
@@ -231,16 +197,15 @@ Insert batching is tuned by `HANA_MATERIALIZE_BATCH_SIZE` (default 30000) and
 
 ## Operational notes
 
-- **Pushdown coverage**: filters (`WHERE`), projections (`SELECT cols`), and
-  basic comparison operators push into HANA. Joins between HANA tables push
-  down. Joins between HANA and Trex-local tables stream the HANA side and
-  join in the engine.
+- **No pushdown through ATTACH yet**: a query against an attached table
+  streams the whole HANA table and filters and joins in the engine. For large
+  tables, write the selective query in HANA SQL with `trex_hana_scan`.
 - **HANA Express in Docker** requires `vm.max_map_count >= 262144`:
   ```bash
   sudo sysctl -w vm.max_map_count=262144
   ```
-- **Credentials in URLs are visible** in `trex_hana_tables()` output and
-  query plans. For shared environments, use the management API's database
+- **Credentials in URLs are visible** in `duckdb_databases()` (the ATTACH
+  path) and query plans. For shared environments, use the management API's database
   registry to keep them out of SQL strings.
 - **No write replication.** This extension reads/writes to HANA on demand; it
   does not replicate HANA changes into Trex. For continuous data movement,

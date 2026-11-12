@@ -26,7 +26,7 @@ flowchart LR
 
     PG -->|ATTACH| Trex
     S3 -->|read_parquet| Trex
-    HANA -->|trex_hana_attach| Trex
+    HANA -->|ATTACH| Trex
 
     Trex --> Transform["transform plugin<br/>(daily rollup)"]
     Transform --> Endpoint["GET /plugins/transform/...<br/>JSON / CSV"]
@@ -159,11 +159,8 @@ INSERT INTO CDM.REGION_META VALUES
 In Trex:
 
 ```sql
-SELECT * FROM trex_hana_attach(
-  'hdbsqls://user:pass@hana:39015/HDB?insecure_omit_server_certificate_check',
-  'hana_db',
-  'CDM'
-);
+ATTACH 'hdbsqls://user:pass@hana:39015/HDB?insecure_omit_server_certificate_check'
+  AS hana_db (TYPE hana);
 -- Now hana_db.CDM.REGION_META is queryable
 ```
 

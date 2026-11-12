@@ -1,12 +1,18 @@
-use duckdb::{
-    vtab::{BindInfo, InitInfo, VTab, TableFunctionInfo},
-    core::{LogicalTypeId, DataChunkHandle, Inserter},
-    Result,
+use duckdb_neo::{
+    bind_arguments::BindArgument,
+    connection::{Context, FFILink},
+    data_chunk::DataChunkRef,
+    logical_type::LogicalTypeID as LogicalTypeId,
+    signature::{FunctionParameter, FunctionParameterKind, SignatureBuilder},
+    table_function::{BindFunctionHandle, ExecColumnInfo, InitColumnData, TableFunctionCallbacks},
+    types::{Any, BlobValue},
+    Parameters,
 };
 use std::error::Error;
+use std::sync::Mutex;
+use crate::v2_util::{arg_string, arg_varchar, bind_error, exec_error, positional};
 use hdbconnect::{Connection as HanaConnection, Row};
 use std::fmt;
-use std::sync::RwLock;
 use std::env;
 use std::panic::{self, AssertUnwindSafe};
 
@@ -287,7 +293,7 @@ impl HanaError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HanaScanBindData {
     pub url: String,
     pub user: String,
@@ -308,57 +314,19 @@ pub struct HanaScanBindData {
     pub session_id: u64,
 }
 
-impl Clone for HanaScanBindData {
-    fn clone(&self) -> Self {
-        let cloned_types = self.column_types.iter().map(|t| {
-            match t {
-                LogicalTypeId::Boolean => LogicalTypeId::Boolean,
-                LogicalTypeId::Tinyint => LogicalTypeId::Tinyint,
-                LogicalTypeId::Smallint => LogicalTypeId::Smallint,
-                LogicalTypeId::Integer => LogicalTypeId::Integer,
-                LogicalTypeId::Bigint => LogicalTypeId::Bigint,
-                LogicalTypeId::Float => LogicalTypeId::Float,
-                LogicalTypeId::Double => LogicalTypeId::Double,
-                LogicalTypeId::Decimal => LogicalTypeId::Decimal,
-                LogicalTypeId::Varchar => LogicalTypeId::Varchar,
-                LogicalTypeId::Blob => LogicalTypeId::Blob,
-                _other => LogicalTypeId::Varchar,
-            }
-        }).collect();
-        HanaScanBindData {
-            url: self.url.clone(),
-            user: self.user.clone(),
-            password: self.password.clone(),
-            host: self.host.clone(),
-            port: self.port,
-            database: self.database.clone(),
-            query: self.query.clone(),
-            column_names: self.column_names.clone(),
-            column_types: cloned_types,
-            temporal_cols: self.temporal_cols.clone(),
-            batch_size: self.batch_size,
-            max_retries: self.max_retries,
-            session_id: self.session_id,
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct HanaScanInitData {
-    bind_data: HanaScanBindData,
     result_rows: Vec<Row>,
-    current_row: RwLock<usize>,
-    total_rows: usize,
-    done: RwLock<bool>,
+    current_row: Mutex<usize>,
 }
 
 fn map_hana_type(hana_type: hdbconnect::TypeId) -> LogicalTypeId {
     match hana_type {
         hdbconnect::TypeId::BOOLEAN => LogicalTypeId::Boolean,
-        hdbconnect::TypeId::TINYINT => LogicalTypeId::Smallint, // HANA TINYINT is u8 (0-255), doesn't fit trexsql i8
-        hdbconnect::TypeId::SMALLINT => LogicalTypeId::Smallint,
+        hdbconnect::TypeId::TINYINT => LogicalTypeId::SmallInt, // HANA TINYINT is u8 (0-255), doesn't fit trexsql i8
+        hdbconnect::TypeId::SMALLINT => LogicalTypeId::SmallInt,
         hdbconnect::TypeId::INT => LogicalTypeId::Integer,
-        hdbconnect::TypeId::BIGINT => LogicalTypeId::Bigint,
+        hdbconnect::TypeId::BIGINT => LogicalTypeId::BigInt,
         hdbconnect::TypeId::REAL => LogicalTypeId::Float,
         hdbconnect::TypeId::DOUBLE => LogicalTypeId::Double,
         // HANA delivers DECIMAL columns via the FIXED* transport type ids.
@@ -544,23 +512,28 @@ pub fn safe_hana_connect(url: String) -> Result<HanaConnection, Box<dyn Error>> 
 
 pub struct HanaScanVTab;
 
-impl VTab for HanaScanVTab {
-    type InitData = HanaScanInitData;
-    type BindData = HanaScanBindData;
-    fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
-        let query = bind.get_parameter(0).to_string();
+impl HanaScanVTab {
+    pub fn signature() -> SignatureBuilder {
+        SignatureBuilder::new()
+            .param(positional::<String>(0)) // query
+            .param(positional::<String>(1)) // url
+            // Optional pgwire session id; when supplied, bind and init borrow the
+            // session's pooled HANA connection so session-local `#temp` tables survive.
+            .param(
+                FunctionParameter::new::<Any>("session_id")
+                    .default_value(String::new())
+                    .kind(FunctionParameterKind::Named),
+            )
+    }
+
+    fn bind_inner(context: &Context, arguments: &[BindArgument]) -> std::result::Result<HanaScanBindData, Box<dyn Error>> {
+        let query = arg_string(arguments, 0)?;
         // Strip trailing semicolons/whitespace. A trailing ';' breaks the
         // schema-detection wrap `SELECT * FROM (<query>) AS subquery LIMIT 1`,
         // which would silently collapse the result to one varchar column.
         let query = query.trim_end().trim_end_matches(';').trim_end().to_string();
-        let url = bind.get_parameter(1).to_string();
-        // Optional named parameter carrying the pgwire session id. DuckDB table
-        // functions cannot be overloaded by arity, so the session id is threaded
-        // as an optional named parameter rather than a third positional argument.
-        let session_id = bind
-            .get_named_parameter("session_id")
-            .map(|p| crate::hana_session_pool::parse_session_id(&p.to_string()))
-            .unwrap_or(0);
+        let url = arg_string(arguments, 1)?;
+        let session_id = crate::hana_session_pool::parse_session_id(&arg_varchar(context, arguments, 2)?);
         validate_hana_connection(&url)?;
         let (user, password, host, port, database) = parse_hana_url(&url)?;
         let batch_size = std::env::var("HANA_BATCH_SIZE")
@@ -574,96 +547,60 @@ impl VTab for HanaScanVTab {
         if batch_size == 0 || batch_size > 10000 {
             return Err(HanaError::new("Batch size must be between 1 and 10000"));
         }
+        let fallback = || {
+            (
+                vec!["result".to_string()],
+                vec![LogicalTypeId::Varchar],
+                vec![false],
+            )
+        };
         let (column_names, column_types, temporal_cols) = match crate::hana_session_pool::get_or_create(session_id, &url) {
-            Ok(connection) => {
-                let schema_result = match connection.prepare(&query) {
-                    Ok(_prepared) => {
-                        match connection.query(&format!("SELECT * FROM ({}) AS subquery LIMIT 1", query)) {
-                            Ok(result_set) => {
-                                // metadata() clones an Arc, so the probe ResultSet
-                                // can be dropped immediately. Releasing its cursor
-                                // here is required because init reuses this same
-                                // pooled connection for the real query.
-                                let metadata = result_set.metadata();
-                                drop(result_set);
-                                let mut names = Vec::new();
-                                let mut types = Vec::new();
-                                let mut temporal = Vec::new();
-                                for field_metadata in metadata.iter() {
-                                    let column_name = if field_metadata.displayname().is_empty() {
-                                        field_metadata.columnname().to_string()
-                                    } else {
-                                        field_metadata.displayname().to_string()
-                                    };
-                                    let hana_type = field_metadata.type_id();
-                                    names.push(column_name);
-                                    types.push(map_hana_type(hana_type));
-                                    temporal.push(is_temporal_type(hana_type));
-                                }
-                                if names.is_empty() {
-                                    (
-                                        vec!["result".to_string()],
-                                        vec![LogicalTypeId::Varchar],
-                                        vec![false],
-                                    )
+            Ok(connection) => match connection.prepare(&query) {
+                Ok(_prepared) => {
+                    match connection.query(&format!("SELECT * FROM ({}) AS subquery LIMIT 1", query)) {
+                        Ok(result_set) => {
+                            // metadata() clones an Arc, so the probe ResultSet
+                            // can be dropped immediately. Releasing its cursor
+                            // here is required because init reuses this same
+                            // pooled connection for the real query.
+                            let metadata = result_set.metadata();
+                            drop(result_set);
+                            let mut names = Vec::new();
+                            let mut types = Vec::new();
+                            let mut temporal = Vec::new();
+                            for field_metadata in metadata.iter() {
+                                let column_name = if field_metadata.displayname().is_empty() {
+                                    field_metadata.columnname().to_string()
                                 } else {
-                                    (names, types, temporal)
-                                }
+                                    field_metadata.displayname().to_string()
+                                };
+                                let hana_type = field_metadata.type_id();
+                                names.push(column_name);
+                                types.push(map_hana_type(hana_type));
+                                temporal.push(is_temporal_type(hana_type));
                             }
-                            Err(e) => {
-                                hana_warn!("SCHEMA", "Schema detection failed: {:?}", e);
-                                (
-                                    vec!["result".to_string()],
-                                    vec![LogicalTypeId::Varchar],
-                                    vec![false],
-                                )
+                            if names.is_empty() {
+                                fallback()
+                            } else {
+                                (names, types, temporal)
                             }
                         }
+                        Err(e) => {
+                            hana_warn!("SCHEMA", "Schema detection failed: {:?}", e);
+                            fallback()
+                        }
                     }
-                    Err(e) => {
-                        hana_warn!("SCHEMA", "Query prepare failed: {:?}", e);
-                        (
-                            vec!["result".to_string()],
-                            vec![LogicalTypeId::Varchar],
-                            vec![false],
-                        )
-                    }
-                };
-                schema_result
-            }
+                }
+                Err(e) => {
+                    hana_warn!("SCHEMA", "Query prepare failed: {:?}", e);
+                    fallback()
+                }
+            },
             Err(e) => {
                 hana_warn!("SCHEMA", "Connection failed, using fallback: {}", e);
-                (
-                    vec!["result".to_string()],
-                    vec![LogicalTypeId::Varchar],
-                    vec![false],
-                )
+                fallback()
             }
         };
-        // Track emitted names so we can de-duplicate: duckdb's binder rejects
-        // duplicate result column names, which would otherwise hard-fail any
-        // query (e.g. a join) that projects two same-named columns.
-        let mut name_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-        for (name, type_id) in column_names.iter().zip(column_types.iter()) {
-            let logical_type = match type_id {
-                LogicalTypeId::Tinyint => LogicalTypeId::Tinyint,
-                LogicalTypeId::Smallint => LogicalTypeId::Smallint,
-                LogicalTypeId::Integer => LogicalTypeId::Integer,
-                LogicalTypeId::Bigint => LogicalTypeId::Bigint,
-                LogicalTypeId::Float => LogicalTypeId::Float,
-                LogicalTypeId::Double => LogicalTypeId::Double,
-                LogicalTypeId::Varchar => LogicalTypeId::Varchar,
-                LogicalTypeId::Boolean => LogicalTypeId::Boolean,
-                LogicalTypeId::Decimal => LogicalTypeId::Decimal,
-                LogicalTypeId::Blob => LogicalTypeId::Blob,
-                _ => LogicalTypeId::Varchar,
-            };
-            let type_handle = duckdb::core::LogicalTypeHandle::from(logical_type);
-            let count = name_counts.entry(name.clone()).or_insert(0);
-            let unique_name = if *count == 0 { name.clone() } else { format!("{}_{}", name, count) };
-            *count += 1;
-            bind.add_result_column(&unique_name, type_handle);
-        }
         Ok(HanaScanBindData {
             url,
             user,
@@ -680,18 +617,17 @@ impl VTab for HanaScanVTab {
             session_id,
         })
     }
-    fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
-        let bind_data = init.get_bind_data::<Self::BindData>();
-        let bind_data_ref = unsafe { &*bind_data };
-            let mut connection_result = None;
-            let mut last_error = None;
-            for attempt in 0..=bind_data_ref.max_retries {
-                match crate::hana_session_pool::get_or_create(bind_data_ref.session_id, &bind_data_ref.url) {
-                    Ok(connection) => {
-                        connection_result = Some(connection);
-                        break;
-                    }
-                    Err(e) => {
+
+    fn init_inner(bind_data_ref: &HanaScanBindData) -> std::result::Result<HanaScanInitData, Box<dyn Error>> {
+        let mut connection_result = None;
+        let mut last_error = None;
+        for attempt in 0..=bind_data_ref.max_retries {
+            match crate::hana_session_pool::get_or_create(bind_data_ref.session_id, &bind_data_ref.url) {
+                Ok(connection) => {
+                    connection_result = Some(connection);
+                    break;
+                }
+                Err(e) => {
                     last_error = Some(e);
                     if attempt < bind_data_ref.max_retries {
                         hana_debug!("CONN", "Attempt {} failed, retrying ({}/{})",
@@ -707,8 +643,7 @@ impl VTab for HanaScanVTab {
                     .ok()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(10_000_000);
-                let query_result = connection.query(&bind_data_ref.query);
-                match query_result {
+                match connection.query(&bind_data_ref.query) {
                     Ok(result_set) => {
                         let mut result_rows = Vec::new();
                         for row_result in result_set {
@@ -726,18 +661,12 @@ impl VTab for HanaScanVTab {
                                 Err(e) => return Err(HanaError::new(&format!("Row read failed: {}", e))),
                             }
                         }
-                        let total_rows = result_rows.len();
                         Ok(HanaScanInitData {
-                            bind_data: bind_data_ref.clone(),
                             result_rows,
-                            current_row: RwLock::new(0),
-                            total_rows,
-                            done: RwLock::new(false),
+                            current_row: Mutex::new(0),
                         })
                     }
-                    Err(e) => {
-                        Err(HanaError::new(&format!("Query execution failed: {:?}", e)))
-                    }
+                    Err(e) => Err(HanaError::new(&format!("Query execution failed: {:?}", e))),
                 }
             }
             None => {
@@ -751,177 +680,149 @@ impl VTab for HanaScanVTab {
             }
         }
     }
-    fn func(
-        info: &TableFunctionInfo<Self>,
-        output: &mut DataChunkHandle,
-    ) -> Result<(), Box<dyn Error>> {
-        let init_data = &*(info.get_init_data());
-        let current_row = match init_data.current_row.read() {
-            Ok(guard) => *guard,
-            Err(_) => return Err(HanaError::new("Lock error: current_row")),
-        };
-        let done = match init_data.done.read() {
-            Ok(guard) => *guard,
-            Err(_) => return Err(HanaError::new("Lock error: done")),
-        };
-        if done || current_row >= init_data.total_rows {
-            output.set_len(0);
-            return Ok(());
-        }
-        let remaining_rows = init_data.total_rows - current_row;
-        let batch_size = std::cmp::min(remaining_rows, init_data.bind_data.batch_size);
-        if batch_size == 0 {
-            output.set_len(0);
-            return Ok(());
-        }
-        output.set_len(batch_size);
-        for (col_idx, column_type) in init_data.bind_data.column_types.iter().enumerate() {
-            let mut flat_vector = output.flat_vector(col_idx);
-            for row_idx in 0..batch_size {
-                let global_row_idx = current_row + row_idx;
-                if global_row_idx >= init_data.result_rows.len() {
-                    break;
-                }
-                let row = match init_data.result_rows.get(global_row_idx) {
-                    Some(r) => r,
-                    None => {
-                        break;
-                    }
+}
+
+/// Output type for a mapped column; anything unexpected is emitted as VARCHAR.
+fn output_type(type_id: LogicalTypeId) -> LogicalTypeId {
+    match type_id {
+        LogicalTypeId::Boolean
+        | LogicalTypeId::SmallInt
+        | LogicalTypeId::Integer
+        | LogicalTypeId::BigInt
+        | LogicalTypeId::Float
+        | LogicalTypeId::Double
+        | LogicalTypeId::Blob => type_id,
+        _ => LogicalTypeId::Varchar,
+    }
+}
+
+fn cell(row: &Row, col_idx: usize) -> Option<&hdbconnect::HdbValue<'static>> {
+    (col_idx < row.len()).then(|| &row[col_idx]).filter(|v| !v.is_null())
+}
+
+fn write_column(
+    output: &mut DataChunkRef<'_>,
+    col_idx: usize,
+    column_type: LogicalTypeId,
+    is_temporal: bool,
+    rows: &[Row],
+) -> duckdb_neo::Result<()> {
+    macro_rules! primitive {
+        ($t:ty) => {{
+            let mut vector = output.get_vector_at_mut::<$t>(col_idx)?;
+            vector.set_size(rows.len())?;
+            let mut writer = vector.writer()?;
+            for (row_idx, row) in rows.iter().enumerate() {
+                let value = cell(row, col_idx).and_then(|v| v.clone().try_into::<Option<$t>>().ok().flatten());
+                writer.set(row_idx, value)?;
+            }
+        }};
+    }
+    match output_type(column_type) {
+        // map_hana_type maps HANA TINYINT to SmallInt, so this vector is always i16
+        LogicalTypeId::SmallInt => primitive!(i16),
+        LogicalTypeId::Integer => primitive!(i32),
+        LogicalTypeId::BigInt => primitive!(i64),
+        LogicalTypeId::Float => primitive!(f32),
+        LogicalTypeId::Double => primitive!(f64),
+        LogicalTypeId::Boolean => primitive!(bool),
+        LogicalTypeId::Blob => {
+            let mut vector = output.get_vector_at_mut::<BlobValue>(col_idx)?;
+            vector.set_size(rows.len())?;
+            let mut writer = vector.writer()?;
+            for (row_idx, row) in rows.iter().enumerate() {
+                // HdbValue::try_into uses serde, which deserialises Vec<u8>
+                // as a sequence (not a byte buffer) and fails for binary.
+                // Match the in-memory byte variants directly instead.
+                let bytes = match cell(row, col_idx) {
+                    Some(hdbconnect::HdbValue::BINARY(bytes))
+                    | Some(hdbconnect::HdbValue::GEOMETRY(bytes))
+                    | Some(hdbconnect::HdbValue::POINT(bytes))
+                    | Some(hdbconnect::HdbValue::DBSTRING(bytes)) => Some(bytes.as_slice()),
+                    _ => None,
                 };
-                if col_idx < row.len() {
-                    let hdb_value = &row[col_idx];
-                    if hdb_value.is_null() {
-                        flat_vector.set_null(row_idx);
-                    } else {
-                        match column_type {
-                            LogicalTypeId::Varchar | LogicalTypeId::Decimal => {
-                                if let Ok(Some(s)) = hdb_value.clone().try_into::<Option<String>>() {
-                                    let is_temporal = init_data
-                                        .bind_data
-                                        .temporal_cols
-                                        .get(col_idx)
-                                        .copied()
-                                        .unwrap_or(false);
-                                    if is_temporal {
-                                        flat_vector.insert(row_idx, normalize_hana_timestamp(&s).as_str());
-                                    } else {
-                                        flat_vector.insert(row_idx, s.as_str());
-                                    }
-                                } else {
-                                    flat_vector.set_null(row_idx);
-                                }
-                            }
-                            LogicalTypeId::Tinyint | LogicalTypeId::Smallint => {
-                                // SAFETY: map_hana_type maps HANA TINYINT to Smallint, so this vector is always i16
-                                let slice = unsafe { flat_vector.as_mut_slice::<i16>() };
-                                if let Ok(Some(i)) = hdb_value.clone().try_into::<Option<i16>>() {
-                                    slice[row_idx] = i;
-                                } else {
-                                    flat_vector.set_null(row_idx);
-                                }
-                            }
-                            LogicalTypeId::Integer => {
-                                // SAFETY: output vector for this arm is declared as i32
-                                let slice = unsafe { flat_vector.as_mut_slice::<i32>() };
-                                if let Ok(Some(i)) = hdb_value.clone().try_into::<Option<i32>>() {
-                                    slice[row_idx] = i;
-                                } else {
-                                    flat_vector.set_null(row_idx);
-                                }
-                            }
-                            LogicalTypeId::Bigint => {
-                                // SAFETY: output vector for this arm is declared as i64
-                                let slice = unsafe { flat_vector.as_mut_slice::<i64>() };
-                                if let Ok(Some(i)) = hdb_value.clone().try_into::<Option<i64>>() {
-                                    slice[row_idx] = i;
-                                } else {
-                                    flat_vector.set_null(row_idx);
-                                }
-                            }
-                            LogicalTypeId::Float => {
-                                // SAFETY: output vector for this arm is declared as f32
-                                let slice = unsafe { flat_vector.as_mut_slice::<f32>() };
-                                if let Ok(Some(f)) = hdb_value.clone().try_into::<Option<f32>>() {
-                                    slice[row_idx] = f;
-                                } else {
-                                    flat_vector.set_null(row_idx);
-                                }
-                            }
-                            LogicalTypeId::Double => {
-                                // SAFETY: output vector for this arm is declared as f64
-                                let slice = unsafe { flat_vector.as_mut_slice::<f64>() };
-                                if let Ok(Some(d)) = hdb_value.clone().try_into::<Option<f64>>() {
-                                    slice[row_idx] = d;
-                                } else {
-                                    flat_vector.set_null(row_idx);
-                                }
-                            }
-                            LogicalTypeId::Boolean => {
-                                // SAFETY: output vector for this arm is declared as bool
-                                let slice = unsafe { flat_vector.as_mut_slice::<bool>() };
-                                if let Ok(Some(b)) = hdb_value.clone().try_into::<Option<bool>>() {
-                                    slice[row_idx] = b;
-                                } else {
-                                    flat_vector.set_null(row_idx);
-                                }
-                            }
-                            LogicalTypeId::Blob => {
-                                // HdbValue::try_into uses serde, which deserialises Vec<u8>
-                                // as a sequence (not a byte buffer) and fails for binary.
-                                // Match the in-memory byte variants directly instead.
-                                match hdb_value {
-                                    hdbconnect::HdbValue::BINARY(bytes)
-                                    | hdbconnect::HdbValue::GEOMETRY(bytes)
-                                    | hdbconnect::HdbValue::POINT(bytes)
-                                    | hdbconnect::HdbValue::DBSTRING(bytes) => {
-                                        flat_vector.insert(row_idx, bytes.as_slice());
-                                    }
-                                    _ => flat_vector.set_null(row_idx),
-                                }
-                            }
-                            _ => {
-                                if let Ok(Some(s)) = hdb_value.clone().try_into::<Option<String>>() {
-                                    flat_vector.insert(row_idx, s.as_str());
-                                } else {
-                                    flat_vector.set_null(row_idx);
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    flat_vector.set_null(row_idx);
-                }
+                writer.set(row_idx, bytes)?;
             }
         }
-        match init_data.current_row.write() {
-            Ok(mut guard) => *guard += batch_size,
-            Err(_) => return Err(HanaError::new("Lock error: write current_row")),
-        };
-        let current_row_after_update = match init_data.current_row.read() {
-            Ok(guard) => *guard,
-            Err(_) => return Err(HanaError::new("Lock error: read current_row")),
-        };
-        if current_row_after_update >= init_data.total_rows {
-            match init_data.done.write() {
-                Ok(mut guard) => *guard = true,
-                Err(_) => return Err(HanaError::new("Lock error: write done")),
-            };
+        _ => {
+            let mut vector = output.get_vector_at_mut::<String>(col_idx)?;
+            vector.set_size(rows.len())?;
+            let mut writer = vector.writer()?;
+            for (row_idx, row) in rows.iter().enumerate() {
+                let value = cell(row, col_idx)
+                    .and_then(|v| v.clone().try_into::<Option<String>>().ok().flatten())
+                    .map(|s| if is_temporal { normalize_hana_timestamp(&s) } else { s });
+                writer.set(row_idx, value.as_deref())?;
+            }
         }
+    }
+    Ok(())
+}
+
+impl TableFunctionCallbacks for HanaScanVTab {
+    type BindData = HanaScanBindData;
+    type GlobalState = HanaScanInitData;
+    type LocalState = ();
+
+    fn bind(
+        &self,
+        context: &Context,
+        arguments: Vec<BindArgument>,
+        bind_handle: BindFunctionHandle<'_>,
+    ) -> duckdb_neo::Result<Self::BindData> {
+        let bind_data = Self::bind_inner(context, &arguments).map_err(bind_error)?;
+        // Track emitted names so we can de-duplicate: duckdb's binder rejects
+        // duplicate result column names, which would otherwise hard-fail any
+        // query (e.g. a join) that projects two same-named columns.
+        let mut name_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        for (name, type_id) in bind_data.column_names.iter().zip(bind_data.column_types.iter()) {
+            let logical_type = context.logical_type_create_from_id(output_type(*type_id), Parameters::None)?;
+            let count = name_counts.entry(name.clone()).or_insert(0);
+            let unique_name = if *count == 0 { name.clone() } else { format!("{}_{}", name, count) };
+            *count += 1;
+            bind_handle.add_result_column(&unique_name, &logical_type)?;
+        }
+        Ok(bind_data)
+    }
+
+    fn init_global_state(
+        &self,
+        bind_data: &Self::BindData,
+        _context: &Context,
+        _column_data: InitColumnData<'_>,
+    ) -> duckdb_neo::Result<(Option<Self::GlobalState>, Option<usize>)> {
+        let init_data = Self::init_inner(bind_data).map_err(exec_error)?;
+        Ok((Some(init_data), Some(1)))
+    }
+
+    fn exec(
+        &self,
+        bind_data: &Self::BindData,
+        global_state: Option<&Self::GlobalState>,
+        _local_state: Option<&mut Self::LocalState>,
+        _context: &Context,
+        mut output: DataChunkRef<'_>,
+        _column_info: ExecColumnInfo<'_>,
+    ) -> duckdb_neo::Result<()> {
+        let init_data = global_state.ok_or_else(|| exec_error(HanaError::new("Scan state not initialized")))?;
+        let mut current_row = init_data
+            .current_row
+            .lock()
+            .map_err(|_| exec_error(HanaError::new("Lock error: current_row")))?;
+        let total_rows = init_data.result_rows.len();
+        if *current_row >= total_rows {
+            return Ok(());
+        }
+        let batch_size = (total_rows - *current_row)
+            .min(bind_data.batch_size)
+            .min(output.capacity()?);
+        let rows = &init_data.result_rows[*current_row..*current_row + batch_size];
+        for (col_idx, column_type) in bind_data.column_types.iter().enumerate() {
+            let is_temporal = bind_data.temporal_cols.get(col_idx).copied().unwrap_or(false);
+            write_column(&mut output, col_idx, *column_type, is_temporal, rows)?;
+        }
+        *current_row += batch_size;
         Ok(())
-    }
-    fn parameters() -> Option<Vec<duckdb::core::LogicalTypeHandle>> {
-        Some(vec![
-            duckdb::core::LogicalTypeHandle::from(LogicalTypeId::Varchar),
-            duckdb::core::LogicalTypeHandle::from(LogicalTypeId::Varchar),
-        ])
-    }
-    fn named_parameters() -> Option<Vec<(String, duckdb::core::LogicalTypeHandle)>> {
-        // Optional pgwire session id; when supplied, bind and init borrow the
-        // session's pooled HANA connection so session-local `#temp` tables survive.
-        Some(vec![(
-            "session_id".to_string(),
-            duckdb::core::LogicalTypeHandle::from(LogicalTypeId::Varchar),
-        )])
     }
 }
 
@@ -1034,9 +935,9 @@ mod tests {
     #[test]
     fn test_map_hana_type_integers() {
         assert_eq!(map_hana_type(hdbconnect::TypeId::INT), LogicalTypeId::Integer);
-        assert_eq!(map_hana_type(hdbconnect::TypeId::BIGINT), LogicalTypeId::Bigint);
-        assert_eq!(map_hana_type(hdbconnect::TypeId::SMALLINT), LogicalTypeId::Smallint);
-        assert_eq!(map_hana_type(hdbconnect::TypeId::TINYINT), LogicalTypeId::Smallint);
+        assert_eq!(map_hana_type(hdbconnect::TypeId::BIGINT), LogicalTypeId::BigInt);
+        assert_eq!(map_hana_type(hdbconnect::TypeId::SMALLINT), LogicalTypeId::SmallInt);
+        assert_eq!(map_hana_type(hdbconnect::TypeId::TINYINT), LogicalTypeId::SmallInt);
     }
     #[test]
     fn test_map_hana_type_floats() {

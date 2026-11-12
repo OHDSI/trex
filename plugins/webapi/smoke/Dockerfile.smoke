@@ -17,7 +17,7 @@ RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 ENV PATH=/root/.cargo/bin:$PATH
 ARG TARGETARCH
 RUN case "${TARGETARCH:-$(dpkg --print-architecture)}" in amd64) A=amd64 ;; arm64) A=arm64 ;; esac \
-    && curl -fsSL -o /tmp/t.zip "https://github.com/p-hoffmann/trexsql-rs/releases/download/v2.0.0-trex.1/libtrexsql-linux-${A}.zip" \
+    && curl -fsSL -o /tmp/t.zip "https://github.com/p-hoffmann/trexsql-rs/releases/download/v2.0.0-trex.2/libtrexsql-linux-${A}.zip" \
     && mkdir -p /opt/trexsql && unzip -o /tmp/t.zip -d /opt/trexsql
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./

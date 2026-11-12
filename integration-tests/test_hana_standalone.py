@@ -377,138 +377,57 @@ def _ensure_test_schema(node):
     )
 
 
-def test_hana_tables_empty(node_factory):
-    """trex_hana_tables() returns empty result when nothing is attached."""
-    node = node_factory(load_hana=True, load_db=False)
-    result = node.execute("SELECT * FROM trex_hana_tables()")
-    assert result == []
+def _require_attach_type_hana(node):
+    """Skip unless the engine has the storage extension API: upstream DuckDB wheels do not."""
+    try:
+        node.execute("ATTACH 'hdbsql://probe:probe@127.0.0.1:1/HDB' AS hana_probe (TYPE hana)")
+    except RuntimeError as e:
+        if "HANA" not in str(e):
+            pytest.skip("engine has no storage extension API (ATTACH ... TYPE hana)")
+        return
+    node.execute("DETACH hana_probe")
 
 
-def test_trex_hana_attach(node_factory):
-    """trex_hana_attach() discovers tables and registers them."""
+def test_attach_type_hana(node_factory):
+    """ATTACH ... (TYPE hana) exposes HANA schemas and tables as a catalog."""
     node = node_factory(load_hana=True, load_db=False)
+    _require_attach_type_hana(node)
     _ensure_test_schema(node)
-    result = node.execute(
-        f"SELECT * FROM trex_hana_attach('{HANA_TEST_URL}', 'test', '{ATTACH_SCHEMA}')"
+    node.execute(f"ATTACH '{HANA_TEST_URL}' AS h (TYPE hana)")
+    result = node.execute(f'SELECT ID, NAME FROM h.{ATTACH_SCHEMA}."T1"')
+    assert result == [(42, "hello")]
+    # Projection and filters run over the bound columns.
+    assert node.execute(f"SELECT count(*) FROM h.{ATTACH_SCHEMA}.t1 WHERE id = 42") == [(1,)]
+    tables = node.execute(
+        "SELECT table_name FROM duckdb_tables() "
+        f"WHERE database_name = 'h' AND schema_name = '{ATTACH_SCHEMA}'"
     )
-    assert len(result) >= 1
-    table_names = [row[0] for row in result]
-    full_names = [row[1] for row in result]
-    assert "T1" in table_names
-    assert f"HANA__test_{ATTACH_SCHEMA}_T1" in full_names
+    assert ("T1",) in tables
+    node.execute("DETACH h")
 
 
-def test_hana_attach_replacement_scan(node_factory):
-    """After attach, HANA__<dbname>_<schema>_<table> resolves via replacement scan."""
+def test_attach_type_hana_default_schema(node_factory):
+    """The SCHEMA option makes h.<table> and USE h resolve into that schema."""
     node = node_factory(load_hana=True, load_db=False)
+    _require_attach_type_hana(node)
     _ensure_test_schema(node)
-    node.execute(
-        f"SELECT * FROM trex_hana_attach('{HANA_TEST_URL}', 'test', '{ATTACH_SCHEMA}')"
-    )
-    result = node.execute(f"SELECT * FROM HANA__test_{ATTACH_SCHEMA}_T1")
-    assert len(result) >= 1
-    assert result[0][0] == 42
+    node.execute(f"ATTACH '{HANA_TEST_URL}' AS h (TYPE hana, SCHEMA '{ATTACH_SCHEMA}')")
+    assert node.execute('SELECT ID FROM h."T1"') == [(42,)]
+    node.execute("DETACH h")
 
 
-def test_hana_attach_schema_view(node_factory):
-    """After attach, <dbname>_<schema>.<table> resolves via trexsql view."""
+def test_attach_type_hana_is_read_only(node_factory):
     node = node_factory(load_hana=True, load_db=False)
+    _require_attach_type_hana(node)
     _ensure_test_schema(node)
-    node.execute(
-        f"SELECT * FROM trex_hana_attach('{HANA_TEST_URL}', 'test', '{ATTACH_SCHEMA}')"
-    )
-    result = node.execute(f'SELECT * FROM test_{ATTACH_SCHEMA}."T1"')
-    assert len(result) >= 1
-    assert result[0][0] == 42
+    node.execute(f"ATTACH '{HANA_TEST_URL}' AS h (TYPE hana)")
+    with pytest.raises(RuntimeError, match="read-only"):
+        node.execute(f"CREATE TABLE h.{ATTACH_SCHEMA}.NEW_T (i INTEGER)")
+    node.execute("DETACH h")
 
 
-def test_hana_tables_after_attach(node_factory):
-    """trex_hana_tables() lists attached tables after trex_hana_attach()."""
+def test_attach_type_hana_rejects_unknown_option(node_factory):
     node = node_factory(load_hana=True, load_db=False)
-    _ensure_test_schema(node)
-    node.execute(
-        f"SELECT * FROM trex_hana_attach('{HANA_TEST_URL}', 'test', '{ATTACH_SCHEMA}')"
-    )
-    result = node.execute("SELECT * FROM trex_hana_tables()")
-    assert len(result) >= 1
-    table_names = [row[0] for row in result]
-    assert "T1" in table_names
-
-
-def test_trex_hana_detach(node_factory):
-    """trex_hana_detach() removes tables from registry and drops schema."""
-    node = node_factory(load_hana=True, load_db=False)
-    _ensure_test_schema(node)
-    node.execute(
-        f"SELECT * FROM trex_hana_attach('{HANA_TEST_URL}', 'test', '{ATTACH_SCHEMA}')"
-    )
-    result = node.execute("SELECT * FROM trex_hana_tables()")
-    assert len(result) >= 1
-
-    result = node.execute(f"SELECT trex_hana_detach('test', '{ATTACH_SCHEMA}')")
-    assert "Detached" in result[0][0]
-
-    result = node.execute("SELECT * FROM trex_hana_tables()")
-    assert result == []
-
-
-def test_hana_attach_replacement_scan_case_insensitive(node_factory):
-    """Replacement scan lookup is case-insensitive."""
-    node = node_factory(load_hana=True, load_db=False)
-    _ensure_test_schema(node)
-    node.execute(
-        f"SELECT * FROM trex_hana_attach('{HANA_TEST_URL}', 'test', '{ATTACH_SCHEMA}')"
-    )
-    # trexsql uppercases unquoted identifiers, so lowercase should resolve
-    result = node.execute(f"SELECT * FROM hana__test_{ATTACH_SCHEMA.lower()}_t1")
-    assert len(result) >= 1
-
-
-def test_hana_attach_reattach_same_key(node_factory):
-    """Re-attaching the same dbname+schema replaces the previous attachment."""
-    node = node_factory(load_hana=True, load_db=False)
-    _ensure_test_schema(node)
-    # Attach once
-    node.execute(
-        f"SELECT * FROM trex_hana_attach('{HANA_TEST_URL}', 'test', '{ATTACH_SCHEMA}')"
-    )
-    result1 = node.execute("SELECT * FROM trex_hana_tables()")
-    count1 = len(result1)
-    assert count1 >= 1
-
-    # Re-attach same key — should replace, not duplicate
-    node.execute(
-        f"SELECT * FROM trex_hana_attach('{HANA_TEST_URL}', 'test', '{ATTACH_SCHEMA}')"
-    )
-    result2 = node.execute("SELECT * FROM trex_hana_tables()")
-    assert len(result2) == count1
-
-    # Replacement scan still works after re-attach
-    result = node.execute(f"SELECT * FROM HANA__test_{ATTACH_SCHEMA}_T1")
-    assert len(result) >= 1
-    assert result[0][0] == 42
-
-
-def test_hana_attach_empty_dbname(node_factory):
-    """trex_hana_attach() rejects empty dbname."""
-    node = node_factory(load_hana=True, load_db=False)
-    with pytest.raises(RuntimeError, match="dbname"):
-        node.execute(
-            f"SELECT * FROM trex_hana_attach('{HANA_TEST_URL}', '', '{ATTACH_SCHEMA}')"
-        )
-
-
-def test_hana_attach_empty_schema(node_factory):
-    """trex_hana_attach() rejects empty schema."""
-    node = node_factory(load_hana=True, load_db=False)
-    with pytest.raises(RuntimeError, match="schema"):
-        node.execute(
-            f"SELECT * FROM trex_hana_attach('{HANA_TEST_URL}', 'test', '')"
-        )
-
-
-def test_hana_detach_nonexistent(node_factory):
-    """trex_hana_detach() on a non-existent attachment returns 0 tables detached."""
-    node = node_factory(load_hana=True, load_db=False)
-    result = node.execute("SELECT trex_hana_detach('nonexistent', 'NOPE')")
-    assert "Detached 0 tables" in result[0][0]
+    _require_attach_type_hana(node)
+    with pytest.raises(RuntimeError, match="Unrecognized option"):
+        node.execute(f"ATTACH '{HANA_TEST_URL}' AS h (TYPE hana, FOO 1)")

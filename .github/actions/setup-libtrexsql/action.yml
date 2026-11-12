@@ -2,7 +2,7 @@ name: "Setup libtrexsql"
 description: "Download and unpack libtrexsql to /tmp/trexsql, cached by version."
 inputs:
   version:
-    description: "Release tag (e.g. v2.0.0-trex.1)"
+    description: "Release tag (e.g. v2.0.0-trex.2)"
     required: true
 runs:
   using: "composite"
