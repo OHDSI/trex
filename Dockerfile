@@ -16,7 +16,7 @@ ARG DUCKDB_OPTIONAL_EXTENSIONS=""
 # Stage 1: Build the trex binary
 FROM debian:trixie-slim AS builder
 
-ARG TREXSQL_VERSION=v2.0.0-trex.1
+ARG TREXSQL_VERSION=v2.0.0-trex.2
 ARG CHDB_VERSION=v3.6.0
 ARG TARGETARCH
 

@@ -15,7 +15,7 @@ permissions:
   contents: write
 
 env:
-  TREXSQL_VERSION: v2.0.0-trex.1
+  TREXSQL_VERSION: v2.0.0-trex.2
 
 jobs:
   build:

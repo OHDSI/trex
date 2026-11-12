@@ -652,7 +652,7 @@ jobs:
       - uses: ./.github/actions/setup-libtrexsql
         if: matrix.PKGPATH == './plugins/bao'
         with:
-          version: v2.0.0-trex.1
+          version: v2.0.0-trex.2
       - name: Build bao native library
         if: matrix.PKGPATH == './plugins/bao'
         run: |
@@ -908,7 +908,7 @@ jobs:
           - PKGPATH: ./plugins/runtime
             SWAP: true
             CARGO_BUILD_JOBS: 4
-            PREBUILD: "sudo apt-get update && sudo apt-get install -y curl unzip clang libclang-dev libopenblas-dev libglib2.0-dev && curl -L -O https://github.com/p-hoffmann/trexsql-rs/releases/download/v2.0.0-trex.1/libtrexsql-linux-arm64.zip && unzip -o libtrexsql-linux-arm64.zip && sudo cp duckdb.h /usr/local/include/ && sudo cp libtrexsql.so /usr/local/lib/ && sudo ldconfig"
+            PREBUILD: "sudo apt-get update && sudo apt-get install -y curl unzip clang libclang-dev libopenblas-dev libglib2.0-dev && curl -L -O https://github.com/p-hoffmann/trexsql-rs/releases/download/v2.0.0-trex.2/libtrexsql-linux-arm64.zip && unzip -o libtrexsql-linux-arm64.zip && sudo cp duckdb.h /usr/local/include/ && sudo cp libtrexsql.so /usr/local/lib/ && sudo ldconfig"
 
     runs-on: ubuntu-24.04-arm
 
