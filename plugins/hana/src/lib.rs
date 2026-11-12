@@ -1,7 +1,6 @@
 use duckdb_neo::{
     duckdb_entrypoint_c_api_v2,
     extension::Extension,
-    replacement_scan::ReplacementScanBuilder,
     scalar::ScalarFunctionBuilder,
     table_function::TableFunctionBuilder,
 };
@@ -10,9 +9,6 @@ use std::error::Error;
 mod hana_scan;
 mod hana_execute;
 mod hana_materialize;
-mod hana_attach;
-mod hana_state;
-mod hana_replacement;
 mod hana_catalog;
 mod v2_util;
 pub mod hana_session_pool;
@@ -25,7 +21,6 @@ pub use hana_scan::{
 pub use hana_execute::{execute_hana_statement, HanaExecuteScalar};
 pub use hana_session_pool::HanaEvictSessionScalar;
 pub use hana_materialize::{run_materialize, HanaMaterializeCohortScalar};
-pub use hana_attach::{HanaAttachVTab, HanaDetachScalar, HanaTablesVTab};
 pub use hdbconnect::Connection as HanaConnection;
 
 #[duckdb_entrypoint_c_api_v2(extension_name = "hana_scan", api_version = "v2.0.0")]
@@ -49,11 +44,6 @@ pub fn hana_scan_entrypoint(extension: &Extension) -> Result<(), Box<dyn Error>>
         HanaMaterializeCohortScalar,
     )
     .register(extension)?;
-    TableFunctionBuilder::new("trex_hana_attach", HanaAttachVTab::signature(), HanaAttachVTab).register(extension)?;
-    ScalarFunctionBuilder::new("trex_hana_detach", HanaDetachScalar::signature(extension)?, HanaDetachScalar)
-        .register(extension)?;
-    TableFunctionBuilder::new("trex_hana_tables", HanaTablesVTab::signature(), HanaTablesVTab).register(extension)?;
-    ReplacementScanBuilder::new(hana_replacement::HanaReplacementScan).register(extension)?;
     hana_catalog::register(extension)?;
     Ok(())
 }

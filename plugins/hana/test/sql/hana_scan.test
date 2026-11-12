@@ -12,14 +12,13 @@ SELECT 1 as test_placeholder;
 ----
 1
 
-# Verify trex_hana_attach is registered (will fail with connection error, not "unknown function")
+# ATTACH ... (TYPE hana) is registered: it fails on the connection, not on an unknown storage type
 statement error
-SELECT * FROM trex_hana_attach('hdbsql://user:pass@localhost:30015/HDB', 'dev', 'SYS');
+ATTACH 'hdbsql://user:pass@localhost:30015/HDB' AS h (TYPE hana);
 ----
 Connection
 
-# Verify trex_hana_tables is registered and returns empty when nothing attached
-query IIII
-SELECT * FROM trex_hana_tables();
+statement error
+ATTACH 'hdbsql://user:pass@localhost:30015/HDB' AS h (TYPE hana, FOO 1);
 ----
-
+Unrecognized option
