@@ -721,7 +721,9 @@ app.all(
 // Bypasses pluginAuthz because Supabase Storage handles its own JWT auth
 // (required for public bucket access without a Bearer token).
 // Use express.raw() to capture the raw body before any middleware consumes it.
-app.all(`${BASE_PATH}/storage/v1/*`, express.raw({ type: "*/*", limit: "50mb" }), async (req, res) => {
+// The body cap follows the worker's FILE_SIZE_LIMIT so uploads up to that size reach it.
+const STORAGE_BODY_LIMIT = Number(Deno.env.get("STORAGE_FILE_SIZE_LIMIT")) || 50 * 1024 * 1024;
+app.all(`${BASE_PATH}/storage/v1/*`, express.raw({ type: "*/*", limit: STORAGE_BODY_LIMIT }), async (req, res) => {
   const handler = fnmap["@trex/storage/supabase-storage/functions"];
   if (!handler) {
     res.status(503).json({ error: "Storage plugin not loaded" });
@@ -772,8 +774,8 @@ app.all(`${BASE_PATH}/storage/v1/*`, express.raw({ type: "*/*", limit: "50mb" })
       if (lower === "content-encoding" || lower === "content-length" || lower === "transfer-encoding") return;
       res.setHeader(key, value);
     });
-    const responseBody = await workerResponse.text();
-    res.send(responseBody);
+    // Objects are arbitrary bytes; decoding them as text corrupts binary content.
+    res.end(Buffer.from(await workerResponse.arrayBuffer()));
   } catch (err) {
     console.error("[storage-proxy] Error:", err);
     res.status(500).json({ error: "Internal server error" });
