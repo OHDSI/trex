@@ -884,7 +884,12 @@ function startTurn(
           callModel: (req) =>
             withModelRetry(async () => {
               const model = deps.model ?? await resolveModelForTurn(deps.agent.config, hookCtx);
-              const { text } = await generateText({ model, system: req.system, messages: req.messages as any });
+              const { text } = await generateText({
+                model,
+                system: req.system,
+                messages: req.messages as any,
+                maxOutputTokens: deps.agent.config.maxOutputTokens,
+              });
               return text;
             }, {
               // Turn-agnostic: compaction runs before addTurn, so there is no
@@ -2106,6 +2111,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
             messages: modelMessages,
             tools,
             stopWhen: stepCountIs(agent.config.maxSteps ?? 25),
+            maxOutputTokens: agent.config.maxOutputTokens,
             // Same openai prompt-cache routing as runner.ts, keyed by agent dir.
             providerOptions: cacheProviderOptions(model, agent.dir),
             onFinish: async ({ text, totalUsage }) => {

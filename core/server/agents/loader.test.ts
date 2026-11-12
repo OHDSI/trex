@@ -32,13 +32,14 @@ Deno.test("loadAgent parses SKILL.md dir layout and first-line fallback descript
 Deno.test("loadAgent accepts EDN alternatives, with eve-native files winning", async () => {
   const tmp = await Deno.makeTempDir();
   await Deno.writeTextFile(`${tmp}/instructions.edn`, `{:instructions "from edn"}`);
-  await Deno.writeTextFile(`${tmp}/agent.edn`, `{:model "bedrock/us.anthropic.claude-sonnet-4-6" :max-steps 7}`);
+  await Deno.writeTextFile(`${tmp}/agent.edn`, `{:model "bedrock/us.anthropic.claude-sonnet-4-6" :max-steps 7 :max-output-tokens 8000}`);
   await Deno.mkdir(`${tmp}/skills`);
   await Deno.writeTextFile(`${tmp}/skills/tips.edn`, `{:description "EDN tips" :content "Do the thing."}`);
   const a = await loadAgent(tmp);
   assertEquals(a.instructions, "from edn");
   assertEquals(a.config.model, "bedrock/us.anthropic.claude-sonnet-4-6");
   assertEquals(a.config.maxSteps, 7);
+  assertEquals(a.config.maxOutputTokens, 8000);
   assertEquals(a.skills[0].content, "Do the thing.");
   assertEquals(a.skills[0].description, "EDN tips");
   // eve-native files win over their EDN twins

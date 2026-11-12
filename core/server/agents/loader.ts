@@ -280,6 +280,9 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
     if (edn && typeof edn === "object") {
       config = {
         maxSteps: typeof edn["max-steps"] === "number" ? edn["max-steps"] : 25,
+        ...(typeof edn["max-output-tokens"] === "number" && edn["max-output-tokens"] > 0
+          ? { maxOutputTokens: edn["max-output-tokens"] }
+          : {}),
         ...(typeof edn.model === "string" ? { model: edn.model } : {}),
         context: resolveContextConfig(edn.context),
         // Task 14: :reasoning-effort / :skills, via the same allowlist +
