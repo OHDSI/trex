@@ -512,3 +512,44 @@ def test_hana_detach_nonexistent(node_factory):
     node = node_factory(load_hana=True, load_db=False)
     result = node.execute("SELECT trex_hana_detach('nonexistent', 'NOPE')")
     assert "Detached 0 tables" in result[0][0]
+
+
+def test_attach_type_hana(node_factory):
+    """ATTACH ... (TYPE hana) exposes HANA schemas and tables as a catalog."""
+    node = node_factory(load_hana=True, load_db=False)
+    _ensure_test_schema(node)
+    node.execute(f"ATTACH '{HANA_TEST_URL}' AS h (TYPE hana)")
+    result = node.execute(f'SELECT ID, NAME FROM h.{ATTACH_SCHEMA}."T1"')
+    assert result == [(42, "hello")]
+    # Projection and filters run over the bound columns.
+    assert node.execute(f"SELECT count(*) FROM h.{ATTACH_SCHEMA}.t1 WHERE id = 42") == [(1,)]
+    tables = node.execute(
+        "SELECT table_name FROM duckdb_tables() "
+        f"WHERE database_name = 'h' AND schema_name = '{ATTACH_SCHEMA}'"
+    )
+    assert ("T1",) in tables
+    node.execute("DETACH h")
+
+
+def test_attach_type_hana_default_schema(node_factory):
+    """The SCHEMA option makes h.<table> and USE h resolve into that schema."""
+    node = node_factory(load_hana=True, load_db=False)
+    _ensure_test_schema(node)
+    node.execute(f"ATTACH '{HANA_TEST_URL}' AS h (TYPE hana, SCHEMA '{ATTACH_SCHEMA}')")
+    assert node.execute('SELECT ID FROM h."T1"') == [(42,)]
+    node.execute("DETACH h")
+
+
+def test_attach_type_hana_is_read_only(node_factory):
+    node = node_factory(load_hana=True, load_db=False)
+    _ensure_test_schema(node)
+    node.execute(f"ATTACH '{HANA_TEST_URL}' AS h (TYPE hana)")
+    with pytest.raises(RuntimeError, match="read-only"):
+        node.execute(f"CREATE TABLE h.{ATTACH_SCHEMA}.NEW_T (i INTEGER)")
+    node.execute("DETACH h")
+
+
+def test_attach_type_hana_rejects_unknown_option(node_factory):
+    node = node_factory(load_hana=True, load_db=False)
+    with pytest.raises(RuntimeError, match="Unrecognized option"):
+        node.execute(f"ATTACH '{HANA_TEST_URL}' AS h (TYPE hana, FOO 1)")
