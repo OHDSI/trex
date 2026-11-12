@@ -377,9 +377,21 @@ def _ensure_test_schema(node):
     )
 
 
+def _require_attach_type_hana(node):
+    """Skip unless the engine has the storage extension API: upstream DuckDB wheels do not."""
+    try:
+        node.execute("ATTACH 'hdbsql://probe:probe@127.0.0.1:1/HDB' AS hana_probe (TYPE hana)")
+    except RuntimeError as e:
+        if "HANA" not in str(e):
+            pytest.skip("engine has no storage extension API (ATTACH ... TYPE hana)")
+        return
+    node.execute("DETACH hana_probe")
+
+
 def test_attach_type_hana(node_factory):
     """ATTACH ... (TYPE hana) exposes HANA schemas and tables as a catalog."""
     node = node_factory(load_hana=True, load_db=False)
+    _require_attach_type_hana(node)
     _ensure_test_schema(node)
     node.execute(f"ATTACH '{HANA_TEST_URL}' AS h (TYPE hana)")
     result = node.execute(f'SELECT ID, NAME FROM h.{ATTACH_SCHEMA}."T1"')
@@ -397,6 +409,7 @@ def test_attach_type_hana(node_factory):
 def test_attach_type_hana_default_schema(node_factory):
     """The SCHEMA option makes h.<table> and USE h resolve into that schema."""
     node = node_factory(load_hana=True, load_db=False)
+    _require_attach_type_hana(node)
     _ensure_test_schema(node)
     node.execute(f"ATTACH '{HANA_TEST_URL}' AS h (TYPE hana, SCHEMA '{ATTACH_SCHEMA}')")
     assert node.execute('SELECT ID FROM h."T1"') == [(42,)]
@@ -405,6 +418,7 @@ def test_attach_type_hana_default_schema(node_factory):
 
 def test_attach_type_hana_is_read_only(node_factory):
     node = node_factory(load_hana=True, load_db=False)
+    _require_attach_type_hana(node)
     _ensure_test_schema(node)
     node.execute(f"ATTACH '{HANA_TEST_URL}' AS h (TYPE hana)")
     with pytest.raises(RuntimeError, match="read-only"):
@@ -414,5 +428,6 @@ def test_attach_type_hana_is_read_only(node_factory):
 
 def test_attach_type_hana_rejects_unknown_option(node_factory):
     node = node_factory(load_hana=True, load_db=False)
+    _require_attach_type_hana(node)
     with pytest.raises(RuntimeError, match="Unrecognized option"):
         node.execute(f"ATTACH '{HANA_TEST_URL}' AS h (TYPE hana, FOO 1)")

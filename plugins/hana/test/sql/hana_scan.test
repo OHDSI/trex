@@ -11,14 +11,3 @@ query I
 SELECT 1 as test_placeholder;
 ----
 1
-
-# ATTACH ... (TYPE hana) is registered: it fails on the connection, not on an unknown storage type
-statement error
-ATTACH 'hdbsql://user:pass@localhost:30015/HDB' AS h (TYPE hana);
-----
-Connection
-
-statement error
-ATTACH 'hdbsql://user:pass@localhost:30015/HDB' AS h (TYPE hana, FOO 1);
-----
-Unrecognized option

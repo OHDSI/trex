@@ -111,8 +111,49 @@ impl StorageExtensionCallbacks for HanaStorage {
 }
 
 pub fn register(ext: &Extension) -> std::result::Result<(), Box<dyn Error>> {
+    // An engine without the storage extension API (e.g. upstream DuckDB) hands over a shorter function table, so
+    // calling into it would jump through garbage: leave ATTACH out instead.
+    if !engine_has_storage_extension_api() {
+        return Ok(());
+    }
     StorageExtensionBuilder::new(HanaStorage).register(ext, "hana")?;
     Ok(())
+}
+
+/// Whether the engine binary exports the storage extension API, found through the shared object holding the static
+/// library version string. Uses only functions every v2 engine has.
+#[cfg(unix)]
+fn engine_has_storage_extension_api() -> bool {
+    use duckdb_neo::ffi;
+    use std::ptr::null_mut;
+
+    let mut version = ffi::duckdb_v2_str { ptr: std::ptr::null(), len: 0 };
+    let rc = unsafe { ffi::duckdb_v2_library_version(&mut version, null_mut()) };
+    if rc != ffi::DUCKDB_V2_ERROR::DUCKDB_V2_ERROR_NONE || version.ptr.is_null() {
+        return false;
+    }
+    unsafe {
+        let mut info: libc::Dl_info = std::mem::zeroed();
+        if libc::dladdr(version.ptr as *const libc::c_void, &mut info) == 0 || info.dli_fname.is_null() {
+            return false;
+        }
+        let mut handle = libc::dlopen(info.dli_fname, libc::RTLD_LAZY | libc::RTLD_NOLOAD);
+        if handle.is_null() {
+            // The main executable is not addressable by path on every platform.
+            handle = libc::dlopen(std::ptr::null(), libc::RTLD_LAZY);
+        }
+        if handle.is_null() {
+            return false;
+        }
+        let symbol = libc::dlsym(handle, c"duckdb_v2_storage_extension_create".as_ptr());
+        libc::dlclose(handle);
+        !symbol.is_null()
+    }
+}
+
+#[cfg(not(unix))]
+fn engine_has_storage_extension_api() -> bool {
+    false
 }
 
 #[cfg(test)]
