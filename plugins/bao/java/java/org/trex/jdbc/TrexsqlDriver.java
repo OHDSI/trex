@@ -19,9 +19,11 @@ import java.util.logging.Logger;
  * JDBC driver for trexsql.
  *
  * <pre>
- *   jdbc:trexsql://host[:port][?disable_ssl=true]   a remote trex server, over Quack
- *   jdbc:trexsql::memory:                           a private in-process engine
+ *   jdbc:trexdb://host[:port][?disable_ssl=true]   a remote trex server, over Quack
+ *   jdbc:trexdb::memory:                           a private in-process engine
  * </pre>
+ *
+ * {@code jdbc:trexsql:} is accepted as an alias for sources stored before the rename.
  *
  * The access token is the {@code password} property (or a {@code token} URL
  * parameter). A remote connection opens a local engine and routes its whole
@@ -30,7 +32,8 @@ import java.util.logging.Logger;
  */
 public final class TrexsqlDriver implements Driver {
 
-    public static final String PREFIX = "jdbc:trexsql:";
+    public static final String PREFIX = "jdbc:trexdb:";
+    static final String LEGACY_PREFIX = "jdbc:trexsql:";
     static final String MEMORY = ":memory:";
     static final int MAJOR = 1;
     static final int MINOR = 0;
@@ -49,7 +52,7 @@ public final class TrexsqlDriver implements Driver {
 
     @Override
     public boolean acceptsURL(String url) {
-        return url != null && url.startsWith(PREFIX);
+        return url != null && (url.startsWith(PREFIX) || url.startsWith(LEGACY_PREFIX));
     }
 
     @Override
@@ -109,12 +112,12 @@ public final class TrexsqlDriver implements Driver {
         }
 
         static Target parse(String url, Properties info) throws SQLException {
-            String rest = url.substring(PREFIX.length());
+            String rest = url.substring((url.startsWith(PREFIX) ? PREFIX : LEGACY_PREFIX).length());
             if (rest.equals(MEMORY)) {
                 return new Target(null, -1, null, false);
             }
             if (!rest.startsWith("//")) {
-                throw new SQLException("trexsql: expected jdbc:trexsql://host[:port] or jdbc:trexsql::memory:, got " + url);
+                throw new SQLException("trexsql: expected jdbc:trexdb://host[:port] or jdbc:trexdb::memory:, got " + url);
             }
             URI uri;
             try {

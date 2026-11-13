@@ -15,7 +15,7 @@ import org.graalvm.nativeimage.c.function.CEntryPoint;
 import org.graalvm.nativeimage.c.type.CCharPointer;
 import org.graalvm.nativeimage.c.type.CTypeConversion;
 import org.ohdsi.webapi.WebApi;
-import org.ohdsi.webapi.source.TrexsqlDialect;
+import org.ohdsi.webapi.source.TrexdbDialect;
 import org.springframework.boot.SpringApplication;
 import org.springframework.context.ConfigurableApplicationContext;
 
@@ -52,10 +52,10 @@ public final class WebApiNativeLibrary {
             app.setMainApplicationClass(WebApi.class);
             app.setRegisterShutdownHook(false);
             ConfigurableApplicationContext ctx = app.run();
-            // WebAPI sets spring.main.lazy-initialization and nothing injects TrexsqlDialect,
+            // WebAPI sets spring.main.lazy-initialization and nothing injects TrexdbDialect,
             // so Spring AOT freezes it as a lazy bean whose @PostConstruct never runs.
             try {
-                TrexsqlDialect.register();
+                TrexdbDialect.register();
             } catch (RuntimeException e) {
                 ctx.close();
                 throw e;
