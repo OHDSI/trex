@@ -158,16 +158,16 @@ for path in \
   echo "  $code  $path"
 done
 
-echo "=== trexsql SqlRender dialect ==="
+echo "=== trexdb SqlRender dialect ==="
 translate_code=$(curl -s -m 12 -X POST "$BASE/sqlrender/translate" -H 'Content-Type: application/json' \
-  -d '{"SQL":"SELECT TOP 5 x FROM t;","targetdialect":"trexsql"}' \
+  -d '{"SQL":"SELECT TOP 5 x FROM t;","targetdialect":"trexdb"}' \
   -o /tmp/smoke-translate.json -w "%{http_code}" 2>/dev/null || echo ERR)
 if [ "$translate_code" = 200 ] && grep -q '"targetSQL":"[^"]*LIMIT 5' /tmp/smoke-translate.json; then
   echo "SMOKE_TRANSLATE=ok"
 else
   echo "SMOKE_TRANSLATE=failed ($translate_code)"
   head -c 400 /tmp/smoke-translate.json 2>/dev/null; echo
-  echo "FAIL: trexsql SqlRender dialect not registered in the native image"
+  echo "FAIL: trexdb SqlRender dialect not registered in the native image"
 fi
 grep -E "Registered SqlRender dialect" /tmp/harness.log | head -3
 
