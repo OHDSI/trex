@@ -1,5 +1,5 @@
 (ns trexsql.jdbc-driver-test
-  "jdbc:trexsql driver against a private in-process engine (jdbc:trexsql::memory:)."
+  "jdbc:trexdb driver against a private in-process engine (jdbc:trexdb::memory:)."
   (:require [clojure.test :refer [deftest is testing]])
   (:import [java.sql BatchUpdateException Connection DriverManager SQLException
             SQLFeatureNotSupportedException Timestamp Types]
@@ -10,7 +10,7 @@
 (TrexsqlDriver/register)
 
 (defn- connect ^Connection []
-  (DriverManager/getConnection "jdbc:trexsql::memory:"))
+  (DriverManager/getConnection "jdbc:trexdb::memory:"))
 
 (defn- rows [^java.sql.ResultSet rs]
   (let [n (.getColumnCount (.getMetaData rs))]
@@ -21,11 +21,14 @@
 
 (deftest url-handling-test
   (let [d (TrexsqlDriver.)]
-    (is (.acceptsURL d "jdbc:trexsql://trex:9494"))
-    (is (.acceptsURL d "jdbc:trexsql::memory:"))
+    (is (.acceptsURL d "jdbc:trexdb://trex:9494"))
+    (is (.acceptsURL d "jdbc:trexdb::memory:"))
+    (testing "jdbc:trexsql: stays accepted for sources stored before the rename"
+      (is (.acceptsURL d "jdbc:trexsql://trex:9494"))
+      (is (.acceptsURL d "jdbc:trexsql::memory:")))
     (is (not (.acceptsURL d "jdbc:postgresql://h/db")))
     (is (nil? (.connect d "jdbc:postgresql://h/db" (Properties.))))
-    (is (thrown? SQLException (.connect d "jdbc:trexsql:trex:9494" (Properties.))))))
+    (is (thrown? SQLException (.connect d "jdbc:trexdb:trex:9494" (Properties.))))))
 
 (deftest connect-sql-test
   (let [target (fn [url props]
@@ -40,10 +43,13 @@
         props (doto (Properties.) (.setProperty "password" "s3cr'et"))]
     (testing "token from the password property, quoted"
       (is (= "CONNECT 'quack:trex:9494' (TOKEN 's3cr''et')"
+             (connect-sql (target "jdbc:trexdb://trex:9494" props)))))
+    (testing "the legacy jdbc:trexsql: prefix parses the same"
+      (is (= "CONNECT 'quack:trex:9494' (TOKEN 's3cr''et')"
              (connect-sql (target "jdbc:trexsql://trex:9494" props)))))
     (testing "token and disable_ssl from the URL"
       (is (= "CONNECT 'quack:localhost' (TOKEN 'abc', DISABLE_SSL true)"
-             (connect-sql (target "jdbc:trexsql://localhost?token=abc&disable_ssl=true" (Properties.))))))))
+             (connect-sql (target "jdbc:trexdb://localhost?token=abc&disable_ssl=true" (Properties.))))))))
 
 (deftest query-and-types-test
   (with-open [c (connect)
@@ -179,7 +185,7 @@
 
 ;; Against a live Quack server, e.g. a 2.0 CLI running
 ;;   CALL quack_serve('quack:localhost:9494', token = 'secret');
-;; Run with TREX_IT_QUACK_URL=jdbc:trexsql://localhost:9494 TREX_IT_QUACK_TOKEN=secret.
+;; Run with TREX_IT_QUACK_URL=jdbc:trexdb://localhost:9494 TREX_IT_QUACK_TOKEN=secret.
 (deftest ^:integration remote-session-test
   (when-let [url (System/getenv "TREX_IT_QUACK_URL")]
     (let [props (doto (Properties.) (.setProperty "password" (System/getenv "TREX_IT_QUACK_TOKEN")))]

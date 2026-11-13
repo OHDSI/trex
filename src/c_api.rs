@@ -55,7 +55,7 @@ pub unsafe extern "C" fn trexsql_open(
 
 /// Open a private in-memory database whose statements run unprepared, so it can
 /// be routed to a remote trex server with `CONNECT 'quack:host:port' (TOKEN …)`.
-/// Used by the jdbc:trexsql:// driver. Returns NULL on error.
+/// Used by the jdbc:trexdb:// driver. Returns NULL on error.
 #[no_mangle]
 pub extern "C" fn trexsql_open_session() -> *mut TrexDatabase {
     error::clear_last_error();

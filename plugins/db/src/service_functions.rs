@@ -132,7 +132,7 @@ pub fn get_start_service_sql(extension: &str, config_json: &str) -> Result<Optio
                 batch_size, batch_timeout_ms, retry_delay_ms, retry_max_attempts
             )))
         }
-        // Quack client-server protocol; jdbc:trexsql:// clients (e.g. WebAPI) connect here.
+        // Quack client-server protocol; jdbc:trexdb:// clients (e.g. WebAPI) connect here.
         "quack" => {
             let token = config["token"]
                 .as_str()
