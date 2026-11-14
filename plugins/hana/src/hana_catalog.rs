@@ -34,6 +34,13 @@ pub(crate) fn scan_query(schema: &str, table: &str) -> String {
     format!("SELECT * FROM {}.{}", quote_identifier(schema), quote_identifier(table))
 }
 
+/// The schemas the catalog lists. HANA's own schemas (owned by SYS or a `_SYS_*` user) are left out: they hold
+/// thousands of monitoring views, many of which cannot be read without predicates or hold unsupported types, so a
+/// catalog-wide listing (information_schema, duckdb_tables(), a JDBC getTables) would probe every one of them.
+const LIST_SCHEMAS_QUERY: &str = "SELECT SCHEMA_NAME FROM SYS.SCHEMAS \
+     WHERE HAS_PRIVILEGES = 'TRUE' \
+     AND SCHEMA_OWNER <> 'SYS' AND SCHEMA_OWNER NOT LIKE '\\_SYS\\_%' ESCAPE '\\'";
+
 /// Runs a one-column query and reports every non-NULL string it returns.
 fn list_names(url: &str, query: &str, names: &NameList<'_>) -> Result<()> {
     let connection = safe_hana_connect(url.to_owned()).map_err(neo_error)?;
@@ -77,11 +84,7 @@ impl StorageExtensionCallbacks for HanaStorage {
     }
 
     fn list_schemas(&self, _context: &Context, catalog: &HanaCatalog, names: &NameList<'_>) -> Result<()> {
-        list_names(
-            &catalog.url,
-            "SELECT SCHEMA_NAME FROM SYS.SCHEMAS WHERE HAS_PRIVILEGES = 'TRUE'",
-            names,
-        )
+        list_names(&catalog.url, LIST_SCHEMAS_QUERY, names)
     }
 
     fn list_tables(&self, _context: &Context, catalog: &HanaCatalog, schema: &str, names: &NameList<'_>) -> Result<()> {
@@ -164,6 +167,14 @@ mod tests {
     fn scan_query_quotes_identifiers() {
         assert_eq!(scan_query("CDM", "PERSON"), r#"SELECT * FROM "CDM"."PERSON""#);
         assert_eq!(scan_query("a\"b", "t"), r#"SELECT * FROM "a""b"."t""#);
+    }
+
+    #[test]
+    fn list_schemas_query_leaves_out_system_schemas() {
+        assert_eq!(
+            LIST_SCHEMAS_QUERY,
+            r"SELECT SCHEMA_NAME FROM SYS.SCHEMAS WHERE HAS_PRIVILEGES = 'TRUE' AND SCHEMA_OWNER <> 'SYS' AND SCHEMA_OWNER NOT LIKE '\_SYS\_%' ESCAPE '\'"
+        );
     }
 
     #[test]
