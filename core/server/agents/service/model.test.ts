@@ -164,6 +164,32 @@ Deno.test("reasoningEffortProviderOptions is a no-op when effort is unset", () =
   assertEquals(reasoningEffortProviderOptions({ provider: "openai.responses" }, undefined), {});
 });
 
+Deno.test("reasoningEffortProviderOptions sends reasoning.effort for OpenAI models on bedrock-runtime", () => {
+  const gpt = { provider: "amazon-bedrock", modelId: "global.openai.gpt-6-luna" };
+  assertEquals(reasoningEffortProviderOptions(gpt, "high"), {
+    bedrock: { additionalModelRequestFields: { reasoning: { effort: "high" } } },
+  });
+  assertEquals(reasoningEffortProviderOptions({ ...gpt, modelId: "openai.gpt-6-luna" }, "low"), {
+    bedrock: { additionalModelRequestFields: { reasoning: { effort: "low" } } },
+  });
+  assertEquals(reasoningEffortProviderOptions({ ...gpt, modelId: "us.openai.gpt-oss-120b-1:0" }, "high"), {
+    bedrock: { additionalModelRequestFields: { reasoning_effort: "high" } },
+  });
+});
+
+Deno.test("reasoningEffortProviderOptions defaults OpenAI models on bedrock-runtime to medium", () => {
+  assertEquals(
+    reasoningEffortProviderOptions({ provider: "amazon-bedrock", modelId: "global.openai.gpt-6-luna" }, undefined),
+    { bedrock: { additionalModelRequestFields: { reasoning: { effort: "medium" } } } },
+  );
+});
+
+Deno.test("reasoningEffortProviderOptions leaves other bedrock models alone", () => {
+  for (const modelId of ["us.anthropic.claude-sonnet-4-6", "minimax.minimax-m2.5", "zai.glm-5"]) {
+    assertEquals(reasoningEffortProviderOptions({ provider: "amazon-bedrock", modelId }, undefined), {});
+  }
+});
+
 // Fix round 1 (Important finding 2): silently doing nothing off-openai is
 // exactly the trap an agent author falls into — `:reasoning-effort "high"`
 // parses, loads, and then vanishes with nothing in the logs on

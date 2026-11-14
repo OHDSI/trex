@@ -100,9 +100,9 @@ export interface AgentConfig {
   // service/toolset.ts's restrictChildSkills. `reasoningEffort` is NOT
   // capped against anything; it is just the child's own declared value,
   // applied to the RESOLVED MODEL's providerOptions (model.ts's
-  // reasoningEffortProviderOptions, openai only today — see that function's
-  // own comment for the one-time warning it logs off-openai) when the
-  // child's own turn runs.
+  // reasoningEffortProviderOptions: openai and OpenAI models on bedrock-runtime
+  // — see that function's own comment for the one-time warning it logs
+  // elsewhere) when the child's own turn runs.
   //
   // What `skills` reduction actually affects TODAY: only the child's
   // advertised system-prompt text (buildSystemPrompt's "## Skills" section)

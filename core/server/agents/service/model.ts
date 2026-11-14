@@ -290,10 +290,11 @@ export function cacheProviderOptions(model: any, cacheKey: string): Record<strin
 // providerOption (see model.test.ts's withToolCachePoint fixtures); anthropic
 // reasoning is a token-budget object, not a "low"/"high"/"medium" string, and
 // bolting an incorrect shape onto a live request with no test to catch it is
-// worse than leaving it a no-op there until a real caller needs it. Empty
-// ({}) whenever effort is unset or the model isn't openai — same "no-op for
-// everything this doesn't explicitly support" posture as cacheProviderOptions
-// above.
+// worse than leaving it a no-op there until a real caller needs it. OpenAI
+// models on bedrock-runtime get the effort too, with a default when unset (see
+// isBedrockOpenAIModel below). Empty ({}) otherwise whenever effort is unset or
+// the model isn't openai — same "no-op for everything this doesn't explicitly
+// support" posture as cacheProviderOptions above.
 //
 // Fix round 1: silently doing nothing off-openai is exactly the trap an
 // agent author falls into — `:reasoning-effort "high"` parses, loads, and
@@ -313,11 +314,40 @@ function warnReasoningEffortOnce(agentLabel: string, provider: string, effort: s
   );
 }
 
+// OpenAI models served by bedrock-runtime (Converse), e.g.
+// global.openai.gpt-6-luna, as opposed to the bedrock-openai/ Responses route.
+// deno-lint-ignore no-explicit-any
+export function isBedrockOpenAIModel(model: any): boolean {
+  return isBedrockModel(model) && /(^|\.)openai\./i.test(model?.modelId ?? "");
+}
+
+// Converse runs OpenAI models without reasoning unless a request asks for it,
+// and without it an agent stops after every tool call ("Next I'll ...") instead
+// of finishing a multi-step task. "medium" is OpenAI's own API default.
+const BEDROCK_OPENAI_DEFAULT_EFFORT = "medium";
+
+// The field is set directly rather than through providerOptions.bedrock
+// .reasoningConfig: @ai-sdk/amazon-bedrock 4.0.136 (the version in the trexsql
+// image) only recognises ids that start with "openai." (so not the
+// region-prefixed global./us. inference profiles) and maps every OpenAI model to
+// `reasoning_effort`, which GPT-6 rejects ("Unknown parameter"). Only gpt-oss
+// takes `reasoning_effort`; the GPT models take `reasoning.effort`.
+function bedrockOpenAIReasoningFields(modelId: string, effort: string): Record<string, unknown> {
+  return /(^|\.)openai\.gpt-oss-/i.test(modelId) ? { reasoning_effort: effort } : { reasoning: { effort } };
+}
+
 // `agentLabel` (e.g. a LoadedAgent's `dir`) identifies the agent in the
 // warning above; optional only so a caller with no meaningful label (a bare
 // unit test) can omit it, at the cost of a less actionable message.
 // deno-lint-ignore no-explicit-any
 export function reasoningEffortProviderOptions(model: any, effort: string | undefined, agentLabel?: string): Record<string, any> {
+  if (isBedrockOpenAIModel(model)) {
+    return {
+      bedrock: {
+        additionalModelRequestFields: bedrockOpenAIReasoningFields(model.modelId, effort || BEDROCK_OPENAI_DEFAULT_EFFORT),
+      },
+    };
+  }
   if (!effort) return {};
   if (isOpenAIModel(model)) return { openai: { reasoningEffort: effort } };
   warnReasoningEffortOnce(agentLabel ?? "an agent", String(model?.provider ?? "unknown"), effort);
