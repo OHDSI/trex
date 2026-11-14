@@ -134,6 +134,9 @@ export interface SourceCredential {
   privateKey?: string;
   privateKeyPassphrase?: string;
   googleCredentials?: Record<string, unknown>;
+  // HANA TLS settings from `extra`.
+  hanaTls?: boolean;
+  hanaValidateCertificate?: boolean;
 }
 
 // The portal saves extra as {Internal: {...}}; rows written straight through
@@ -164,6 +167,38 @@ export function snowflakeExtrasFromRow(dbExtra: unknown): Pick<
     privateKey: extra.privateKey,
     privateKeyPassphrase: extra.privateKeyPassphrase,
   };
+}
+
+function flag(v: unknown): boolean | undefined {
+  if (typeof v === "boolean") return v;
+  if (typeof v === "string" && v.trim() !== "") return v.trim().toLowerCase() === "true";
+  return undefined;
+}
+
+export function hanaExtrasFromRow(dbExtra: unknown): Pick<
+  SourceCredential,
+  "hanaTls" | "hanaValidateCertificate"
+> {
+  const extra = extraFields(dbExtra);
+  return {
+    hanaTls: flag(extra.useTLS) ?? flag(extra.encrypt) ?? false,
+    hanaValidateCertificate: flag(extra.validateCertificate) ?? flag(extra.sslValidateCertificate) ?? true,
+  };
+}
+
+/**
+ * The hdbsql(s) URL the hana extension connects with. Credentials stay raw: the
+ * extension takes the userinfo literally and never percent-decodes it. The tenant
+ * database is selected only by the `db=` parameter; the path segment is required
+ * by the URL validator.
+ */
+export function hanaConnectionUrl(c: SourceCredential): string {
+  const params = [`db=${c.name}`];
+  if (c.hanaTls && c.hanaValidateCertificate === false) {
+    params.push("insecure_omit_server_certificate_check");
+  }
+  const scheme = c.hanaTls ? "hdbsqls" : "hdbsql";
+  return `${scheme}://${c.adminUsername}:${c.adminPassword}@${c.host}:${c.port}/${c.name}?${params.join("&")}`;
 }
 
 export function bigqueryCredentialsFromRow(dbExtra: unknown): Record<string, unknown> | undefined {
@@ -205,8 +240,8 @@ export async function removeGoogleCredentials(): Promise<void> {
 
 /**
  * Attach a source database as `<id>__srcdb`. Returns true when an ATTACH was
- * issued, false when the dialect has no source-attach mapping (HANA is queried
- * directly, so it has none) — callers must not report a skip as a success.
+ * issued, false when the dialect has no source-attach mapping — callers must
+ * not report a skip as a success.
  */
 export async function ensureSourceAttached(
   c: SourceCredential,
@@ -290,8 +325,16 @@ export async function ensureSourceAttached(
     );
     return true;
   }
-  // No source-attach mapping for this dialect (e.g. HANA, which is queried
-  // directly). Report the skip so callers don't claim it was attached.
+  if (dialect === "hana") {
+    // Read-only catalog: every HANA schema the user can see is
+    // `<id>__srcdb.<schema>`, read through trex_hana_scan.
+    await opts.exec(
+      `ATTACH IF NOT EXISTS '${sqlQuote(hanaConnectionUrl(c))}' AS ${alias} (TYPE hana)`,
+    );
+    return true;
+  }
+  // No source-attach mapping for this dialect. Report the skip so callers
+  // don't claim it was attached.
   return false;
 }
 
