@@ -1,5 +1,6 @@
 // HTTP surface per spec §6: eve session API (compat) + AI SDK chat endpoint.
 // deno-lint-ignore-file no-explicit-any
+import { redactAttachments } from "./redact-attachments.ts";
 import { convertToModelMessages, generateText, streamText, stepCountIs, createUIMessageStream, createUIMessageStreamResponse } from "ai";
 import type { LoadedAgent } from "../loader.ts";
 import { packOfSkillName } from "../loader.ts";
@@ -1959,7 +1960,9 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       const unattended = body.unattended === true;
       const approverReachable = body.approverReachable === true;
       const sessionId = await store.createSession(deps.plugin, deps.agentName, createdBy, unattended, approverReachable);
-      const turn = await store.addTurn(sessionId, body.messages.at(-1), body.metadata);
+      // Attachments (images, extracted document text) reach the model but are
+      // not stored: the turn keeps the message with their content removed.
+      const turn = await store.addTurn(sessionId, redactAttachments(body.messages.at(-1)), body.metadata);
       // Same hooks as the session path: built fresh per request, never
       // cached — resolveModelForTurn/resolveInstructions apply
       // config.resolveModel/buildInstructions when configured.
