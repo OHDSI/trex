@@ -47,6 +47,7 @@ import {
   CACHE_DIR,
   ensureAttached,
   ensureCacheAttached,
+  hanaExtrasFromRow,
   normalizeDialect,
   redactSecrets,
   snowflakeExtrasFromRow,
@@ -286,6 +287,7 @@ export async function d2eBoot(): Promise<void> {
         adminUsername: row.cred_username,
         adminPassword,
         ...(row.dialect === "snowflake" ? snowflakeExtrasFromRow(row.extra) : {}),
+        ...(normalizeDialect(row.dialect) === "hana" ? hanaExtrasFromRow(row.extra) : {}),
       });
     }
 

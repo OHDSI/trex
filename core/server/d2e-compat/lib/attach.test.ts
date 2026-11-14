@@ -5,6 +5,7 @@ import {
   ensureCacheAttached,
   ensureSourceAttached,
   extraFields,
+  hanaExtrasFromRow,
   MAX_ATTACH_IDS,
   normalizeCacheDir,
   normalizeDialect,
@@ -284,9 +285,37 @@ Deno.test("ensureSourceAttached reports whether it attached anything", async () 
     adminPassword: "p",
   };
   assertEquals(await ensureSourceAttached(pg, { exec: () => {} }), true);
-  // HANA is queried directly — there is no source attach, and the caller must
-  // not report the skip as "attached".
-  assertEquals(await ensureSourceAttached({ ...pg, dialect: "hana" }, { exec: () => {} }), false);
+  assertEquals(await ensureSourceAttached({ ...pg, dialect: "oracle" }, { exec: () => {} }), false);
+});
+
+Deno.test("ensureSourceAttached attaches HANA as a read-only hana catalog", async () => {
+  const hana: SourceCredential = {
+    id: "hanadb",
+    dialect: "hana",
+    host: "hana.example",
+    port: 39041,
+    name: "HXE",
+    adminUsername: "ADMIN",
+    adminPassword: "p'w",
+  };
+  assertEquals(await captureSql(hana), [
+    "ATTACH IF NOT EXISTS 'hdbsql://ADMIN:p''w@hana.example:39041/HXE?db=HXE' AS hanadb__srcdb (TYPE hana)",
+  ]);
+  assertEquals(
+    await captureSql({ ...hana, ...hanaExtrasFromRow({ Internal: { encrypt: "true", validateCertificate: false } }) }),
+    [
+      "ATTACH IF NOT EXISTS 'hdbsqls://ADMIN:p''w@hana.example:39041/HXE?db=HXE&insecure_omit_server_certificate_check' AS hanadb__srcdb (TYPE hana)",
+    ],
+  );
+  assertEquals(
+    await captureSql({ ...hana, ...hanaExtrasFromRow({ useTLS: true }) }),
+    ["ATTACH IF NOT EXISTS 'hdbsqls://ADMIN:p''w@hana.example:39041/HXE?db=HXE' AS hanadb__srcdb (TYPE hana)"],
+  );
+});
+
+Deno.test("redactSecrets strips the HANA password from an ATTACH url", () => {
+  const out = redactSecrets("Connection failed for 'hdbsqls://ADMIN:s3cret@hana:39041/HXE?db=HXE'");
+  assertEquals(out.includes("s3cret"), false, out);
 });
 
 Deno.test("redactSecrets strips the password DuckDB echoes back from a failed ATTACH", () => {

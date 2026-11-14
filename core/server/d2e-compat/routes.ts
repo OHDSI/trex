@@ -55,6 +55,7 @@ import {
   CACHE_DIR,
   ensureCacheAttached,
   ensureSourceAttached,
+  hanaExtrasFromRow,
   normalizeDialect,
   parseAttachBody,
   redactSecrets,
@@ -603,7 +604,7 @@ export function mountD2eRoutes(app: Express): void {
   // repeated requests idempotent.
   //
   // Per-id `status`: "attached" (an ATTACH ran), "skipped" (the dialect has no
-  // source-attach mapping — HANA is queried directly) or "failed". A caller
+  // source-attach mapping) or "failed". A caller
   // must not read "skipped" as "the catalog now exists". HTTP: 200 all fine,
   // 207 partial, 500 everything failed (207 is inside `res.ok`, so an
   // all-failed 207 would read as success to a plain fetch client).
@@ -667,6 +668,7 @@ export function mountD2eRoutes(app: Express): void {
             adminPassword: isBigQuery ? "" : await decryptSecret(row.password_encrypted!),
             ...(normalizeDialect(row.dialect) === "snowflake" ? snowflakeExtrasFromRow(row.extra) : {}),
             ...(isBigQuery ? { googleCredentials: bigqueryCredentialsFromRow(row.extra) } : {}),
+            ...(normalizeDialect(row.dialect) === "hana" ? hanaExtrasFromRow(row.extra) : {}),
           };
           const attached = await ensureSourceAttached(connection, { exec: attachExec });
           results.push({
