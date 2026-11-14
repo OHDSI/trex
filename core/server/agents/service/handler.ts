@@ -20,7 +20,7 @@ import { publish, subscribe, ndjsonEncode } from "./stream.ts";
 // the consumer immediately (see the stream route for why that matters).
 const PRIMING_CHUNK = new TextEncoder().encode("\n");
 import { buildSdkTools, buildSystemPrompt, resolveInstructions, restrictChildSkills, restrictChildTools } from "./toolset.ts";
-import { cacheProviderOptions, parseModelString, resolveModelForTurn, withSystemCachePoint } from "./model.ts";
+import { cacheProviderOptions, mergeProviderOptions, parseModelString, reasoningEffortProviderOptions, resolveModelForTurn, withSystemCachePoint } from "./model.ts";
 import type { AgentEvent } from "./events.ts";
 import type { HookCtx, QueryFn } from "../eve-shim/types.ts";
 import { createChannelHandler, type ChannelSessionStarted } from "../channels/layer.ts";
@@ -2112,8 +2112,11 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
             tools,
             stopWhen: stepCountIs(agent.config.maxSteps ?? 25),
             maxOutputTokens: agent.config.maxOutputTokens,
-            // Same openai prompt-cache routing as runner.ts, keyed by agent dir.
-            providerOptions: cacheProviderOptions(model, agent.dir),
+            // Same openai prompt-cache routing and reasoning effort as runner.ts.
+            providerOptions: mergeProviderOptions(
+              cacheProviderOptions(model, agent.dir),
+              reasoningEffortProviderOptions(model, agent.config.reasoningEffort, agent.dir),
+            ),
             onFinish: async ({ text, totalUsage }) => {
               await store.addStep(turn.id, 1, "text", null, { text }, totalUsage)
                 .catch((e) => console.error("agents: chat persist failed:", e));
