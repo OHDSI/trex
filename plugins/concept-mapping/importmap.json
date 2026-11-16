@@ -1,0 +1,15 @@
+{
+  "imports": {
+    "ai": "npm:ai@^6",
+    "eve": "../../core/server/agents/eve-shim/mod.ts",
+    "eve/tools": "../../core/server/agents/eve-shim/tools.ts",
+    "eve/evals": "../../core/server/agents/eve-shim/evals.ts",
+    "pg": "npm:pg@^8",
+    "edn-data": "npm:edn-data@^1",
+    "eve/core/": "../../core/server/agents/",
+    "@ai-sdk/openai": "npm:@ai-sdk/openai@^3",
+    "@ai-sdk/google": "npm:@ai-sdk/google@^3",
+    "@ai-sdk/amazon-bedrock": "npm:@ai-sdk/amazon-bedrock@^4.0.115",
+    "@ai-sdk/azure": "npm:@ai-sdk/azure@^3.0.142"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "@trex/concept-mapping",
+  "version": "0.1.0",
+  "description": "Agent that maps source procedure terms to OMOP standard concepts with hybrid retrieval and judge voting",
+  "trex": {
+    "agents": [
+      {
+        "name": "concept-mapper",
+        "dir": "agent",
+        "env": {
+          "CONCEPT_MAPPING_MODEL": "${CONCEPT_MAPPING_MODEL:-}",
+          "CONCEPT_MAPPING_JUDGE_MODEL": "${CONCEPT_MAPPING_JUDGE_MODEL:-}",
+          "CONCEPT_MAPPING_VOCAB_DATABASE_URL": "${CONCEPT_MAPPING_VOCAB_DATABASE_URL:-}",
+          "CONCEPT_MAPPING_VOCAB_SCHEMA": "${CONCEPT_MAPPING_VOCAB_SCHEMA:-vocab}",
+          "CONCEPT_MAPPING_SEMANTIC_SEARCH": "${CONCEPT_MAPPING_SEMANTIC_SEARCH:-local}",
+          "CONCEPT_MAPPING_INDEX_SCHEMA": "${CONCEPT_MAPPING_INDEX_SCHEMA:-concept_mapping_search}",
+          "CONCEPT_MAPPING_EMBEDDING_MODEL": "${CONCEPT_MAPPING_EMBEDDING_MODEL:-}",
+          "HECATE_URL": "${HECATE_URL:-}",
+          "CONCEPT_MAPPING_WEB_SEARCH": "${CONCEPT_MAPPING_WEB_SEARCH:-off}",
+          "CONCEPT_MAPPING_EXAMPLES_FILE": "${CONCEPT_MAPPING_EXAMPLES_FILE:-}",
+          "BRAVE_SEARCH_API_KEY": "${BRAVE_SEARCH_API_KEY:-}"
+        }
+      }
+    ],
+    "migrations": { "schema": "concept_mapping", "database": "_config" }
+  }
+}

@@ -322,6 +322,10 @@ jobs:
       # env-set and env-unset paths, and CI has no real devx user to loop back to.
       - name: d2esupport plugin tests
         run: deno test --no-check --allow-all --import-map plugins/d2esupport/importmap.json --node-modules-dir=auto plugins/d2esupport/
+      # concept-mapping: same authoring/test-only import map pattern. Tests use
+      # an in-process PGlite database, so no Postgres service is needed.
+      - name: concept-mapping plugin tests
+        run: deno test --no-check --allow-all --import-map plugins/concept-mapping/importmap.json --node-modules-dir=auto plugins/concept-mapping/
       # devx authors its agent dir against the "eve"/"eve/tools" bare
       # specifiers that core/server/agents/eve-shim provides; the test-only
       # import map resolves them without vendoring. Paths inside the map are
@@ -568,6 +572,7 @@ jobs:
             EXCLUDE_FROM_IMAGE: true
           - PKGPATH: ./plugins/claw
           - PKGPATH: ./plugins/d2esupport
+          - PKGPATH: ./plugins/concept-mapping
 
     runs-on: ${{ matrix.RUNNER || needs.pick_runner.outputs.random_runner }}
 
@@ -795,7 +800,7 @@ jobs:
           # artifact. Web/docs/notebook/cli/runtime/bao publish other shapes;
           # everything else is a DuckDB extension and must ship a .trex.
           case "${{ matrix.PKGPATH }}" in
-            ./plugins/web|./plugins/docs|./plugins/notebook|./plugins/cli|./plugins/runtime|./plugins/bao|./plugins/pg-meta|./plugins/studio|./plugins/devx|./plugins/claw|./plugins/d2esupport)
+            ./plugins/web|./plugins/docs|./plugins/notebook|./plugins/cli|./plugins/runtime|./plugins/bao|./plugins/pg-meta|./plugins/studio|./plugins/devx|./plugins/claw|./plugins/d2esupport|./plugins/concept-mapping)
               echo "skip — non-extension plugin"
               ;;
             *)
