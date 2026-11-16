@@ -38,6 +38,9 @@ CREATE INDEX ON vocab.concept_ancestor (ancestor_concept_id, min_levels_of_separ
 | `CONCEPT_MAPPING_SEMANTIC_SEARCH` | `local` | `local` (the index below), `hecate` (Hecate API at `HECATE_URL`) or `off` (exact matching only). |
 | `CONCEPT_MAPPING_INDEX_SCHEMA` | `concept_mapping_search` | Schema of the local search index, in the vocabulary database. |
 | `CONCEPT_MAPPING_EMBEDDING_MODEL` | (none) | Embedding model (`provider/model-id`, providers `openai`, `azure`, `google`, `bedrock`) for dense search. Must be the model the index was built with; without it, local search is full-text only. |
+| `CONCEPT_MAPPING_EMBEDDING_DIMENSIONS_PARAM` | `on` | Set to `off` for embedding models with a fixed size (such as SapBERT behind a local server) that reject a `dimensions` parameter. |
+| `CONCEPT_MAPPING_ANCESTOR_CANDIDATES` | `on` | Add broader concepts above the top candidates as pickable candidates (for broadMatch). |
+| `CONCEPT_MAPPING_ANCESTOR_MAX_LEVELS`, `_MIN_SUPPORT`, `_CAP`, `_MIN_DEPTH` | `2`, `0.3`, `5`, `3` | Levels searched above the top 5 candidates, minimum rank-weighted share of them below an ancestor, maximum ancestors added, and minimum depth below a hierarchy root. |
 | `HECATE_URL` | (none) | Hecate base URL for `hecate` mode: the public `https://hecate.pantheon-hds.com` or a self-hosted instance. |
 | `CONCEPT_MAPPING_WEB_SEARCH` | `off` | Set to `on` to enable web search. |
 | `CONCEPT_MAPPING_EXAMPLES_FILE` | (none) | Path to a CSV of calibration examples for the judges (see below). |
@@ -62,7 +65,7 @@ deno run -A --no-config --import-map plugins/concept-mapping/importmap.json \
   plugins/concept-mapping/scripts/build-index.ts --dims 1024
 ```
 
-The index holds every standard concept name in the retrieval vocabularies, their English synonyms, and the names of non-standard concepts that map to them (several million terms for a full Athena download). Re-running is safe and resumes an interrupted embedding run; adding `--lexical-only` first gives working full-text search while embeddings are computed later. Embedding a full vocabulary takes hours and, with a hosted provider, costs a few dollars of API usage. To keep everything on-premises, point `OPENAI_BASE_URL` at a local OpenAI-compatible embedding server (Ollama, vLLM, Text Embeddings Inference) and use `openai/<model>`. Changing the model or dimensions requires dropping the index schema and rebuilding.
+The index holds every standard concept name in the retrieval vocabularies, their English synonyms, and the names of non-standard concepts that map to them (several million terms for a full Athena download). Re-running is safe and resumes an interrupted embedding run; adding `--lexical-only` first gives working full-text search while embeddings are computed later. Embedding a full vocabulary takes hours and, with a hosted provider, costs a few dollars of API usage. To keep everything on-premises, point `OPENAI_BASE_URL` at a local OpenAI-compatible embedding server (Ollama, vLLM, Text Embeddings Inference) and use `openai/<model>`. Changing the model or dimensions requires dropping the index schema and rebuilding. A good fully local choice is SapBERT (`cambridgeltl/SapBERT-from-PubMedBERT-fulltext`, 768 dimensions), a biomedical model trained to match concept names, served by Text Embeddings Inference: `CONCEPT_MAPPING_EMBEDDING_MODEL=openai/cambridgeltl/SapBERT-from-PubMedBERT-fulltext`, `OPENAI_BASE_URL=<TEI URL>/v1`, `CONCEPT_MAPPING_EMBEDDING_DIMENSIONS_PARAM=off`, `--dims 768`.
 
 ### Calibration examples
 
@@ -94,6 +97,17 @@ deno test --no-check --allow-all --import-map plugins/concept-mapping/importmap.
 ```
 
 Unit tests run against an in-process PGlite database with a small vocabulary fixture and stubbed model and HTTP calls. The evals under `agent/evals/` run the real agent against a live stack.
+
+### Retrieval evaluation
+
+`scripts/eval-retrieval.ts` measures retrieval alone (no model calls) on a gold CSV in the submission format or with `source_term`/`target_concept_id_b` columns: Recall@1/3/5/10/30 split by exactMatch and broadMatch, and how often the gold concept is an ancestor of a retrieved candidate. Use it to compare retrieval settings before running the full agent:
+
+```bash
+CONCEPT_MAPPING_VOCAB_DATABASE_URL=... deno run -A --no-config --import-map plugins/concept-mapping/importmap.json \
+  plugins/concept-mapping/scripts/eval-retrieval.ts gold.csv --limit 10 --queries english
+```
+
+It refuses to run when the gold overlaps the configured calibration examples.
 
 ### Evals
 
