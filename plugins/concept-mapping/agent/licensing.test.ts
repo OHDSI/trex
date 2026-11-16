@@ -17,3 +17,10 @@ Deno.test("no bundled example or vocabulary data files", async () => {
   for await (const e of Deno.readDir(AGENT)) if (e.name === "data") found.push(e.name);
   assertEquals(found, []);
 });
+
+Deno.test("the judge prompt carries the default-state, laterality and source-of-truth rules", async () => {
+  const judge = await Deno.readTextFile(new URL("prompts/judge.md", AGENT));
+  for (const marker of ["### 6c. Default states", "no lateralized concept exists", "original-language name is the source of truth"]) {
+    assert(judge.includes(marker), marker);
+  }
+});

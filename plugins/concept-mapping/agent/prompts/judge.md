@@ -168,9 +168,19 @@ LLM judges systematically over-qualify and under-qualify. Both are wrong.
 - **"Plain" before X-ray** is the standard qualifier (not extra info).
   Train gold confirms this across multiple rows.
 
+### 6c. Default states and things that are not qualifiers
+
+- **Default states are not qualifiers.** Imaging without contrast is the default: "without contrast" (or "w/o contrast") adds nothing and maps exactMatch to the plain imaging concept. "With contrast" is a real qualifier and must be preserved.
+- **Disease status is not a qualifier of the procedure.** Phrases such as "with heart failure", "without malignancy" or "in cancer patients" describe the patient, not the act.
+- **Excluded concomitant procedures are not qualifiers.** "Without removal of lymph nodes" or "without tonsillectomy" says what was not done; map the procedure that was done, as exactMatch if it is otherwise equal.
+
 ### 7. Laterality is meaningful
 
-`left`, `right`, `bilateral` are meaningful. Mismatch forces broadMatch or rejection.
+`left`, `right`, `bilateral` are meaningful. Mismatch forces broadMatch or rejection. If the source is lateralized but no lateralized concept exists among the candidates, take the unlateralized concept as broadMatch rather than rejecting it.
+
+### 7b. Translations
+
+Both the original-language name and the English name are given. When they disagree (a poor or ambiguous translation), the original-language name is the source of truth.
 
 ### 8. Drug-administration procedures
 
