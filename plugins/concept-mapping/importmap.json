@@ -1,0 +1,11 @@
+{
+  "imports": {
+    "ai": "npm:ai@^6",
+    "eve": "../../core/server/agents/eve-shim/mod.ts",
+    "eve/tools": "../../core/server/agents/eve-shim/tools.ts",
+    "eve/evals": "../../core/server/agents/eve-shim/evals.ts",
+    "pg": "npm:pg@^8",
+    "edn-data": "npm:edn-data@^1",
+    "eve/core/": "../../core/server/agents/"
+  }
+}

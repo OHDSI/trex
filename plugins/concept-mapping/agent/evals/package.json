@@ -1,0 +1,11 @@
+{
+  "name": "@trex/concept-mapper-evals",
+  "private": true,
+  "description": "eve eval suite for the concept-mapper agent; runs against a live trex stack with a loaded OMOP vocabulary",
+  "scripts": {
+    "eval": "eve eval --url \"${EVE_TARGET_URL:-http://localhost:9001/plugins/trex/concept-mapper}\""
+  },
+  "dependencies": {
+    "eve": "^0.19.0"
+  }
+}

@@ -314,6 +314,9 @@ COPY plugins/claw/ ./plugins-dev/claw/
 # pattern as claw — no build step, dormant unless its SLACK_*/D2ESUPPORT_*
 # env is configured at runtime.
 COPY plugins/d2esupport/ ./plugins-dev/d2esupport/
+# concept-mapping agent plugin (OMOP concept mapping): same pattern, no build
+# step. Needs a model and an OMOP vocabulary schema at runtime (see its README).
+COPY plugins/concept-mapping/ ./plugins-dev/concept-mapping/
 # aithon (FHIR analytics UI + its functions/functions-mri workers): whole
 # plugin dir + the freshly-built dist overlaid from the builder stage. The
 # plugin scanner picks up its trex.ui.routes/functions from package.json, and
