@@ -57,7 +57,7 @@ Deno.test("the institution's examples go in the shared system prompt with vocabu
   assert(!prompt.includes("Test scope of joint"), "examples must not repeat in the per-row prompt");
 });
 
-Deno.test("concept references in the judge rules are rendered from the vocabulary", async () => {
+Deno.test("the judge rules are sent without unrendered references or an empty examples section", async () => {
   let system = "";
   await judgeCandidates({ row, candidates, judges: 1 }, {
     generate: (sys) => {
@@ -67,7 +67,7 @@ Deno.test("concept references in the judge rules are rendered from the vocabular
     details,
     examples: [],
   });
-  assert(system.includes("Name 4088889 (4088889)"));
+  assert(system.startsWith("# Judge"));
   assert(!system.includes("{{concept:"));
   assert(!system.includes("## Gold examples"), "no examples section without examples");
 });

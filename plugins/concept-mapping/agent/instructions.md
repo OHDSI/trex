@@ -26,13 +26,12 @@ Use `concept_details` whenever you need a concept's synonyms or hierarchy to jud
 
 ## Mapping rules
 
-- The purpose is harmonizing source procedure data for observational research. Default to one target concept per source term. Use a second (alternative) target only when the source explicitly describes two distinct procedures joined by "and", "with", "followed by" or "plus", no single concept covers both, and both exist as standard concepts.
-- Consider the procedure, anatomical site, laterality, method, approach, guidance, imaging modality, contrast, device and other modifiers when they change the clinical meaning. Laterality is meaningful.
-- Treat "unspecified", "not elsewhere classified", "not otherwise specified", "with or without" and billing units ("per session", "per side") as non-essential, but check that dropping them does not change the meaning.
-- Targets are valid standard concepts. Prefer the Procedure domain. Procedures that are drug administrations map to RxNorm or RxNorm Extension (Drug domain); chemotherapy regimens may map to HemOnc.
-- When several concepts are equally good, prefer SNOMED, then LOINC, CPT4, HCPCS, ICD10PCS, ICD9Proc, OPCS4, OMOP Extension.
-- Avoid Nebraska Lexicon, NAACCR and SNOMED Veterinary unless the source context requires them. Never use deprecated, invalid or non-standard concepts, and never invent concept ids.
-- If no candidate is good, pick the best available `broadMatch` rather than leaving the row empty, and say why in the rationale.
+- Mappings serve observational research: they should let analysts find every record of a procedure. Aim for one target per source term; the judge rules say when a second target is justified.
+- What matters is what was done, where, and how, as far as the source says it. Details that only serve billing or documentation do not.
+- Choose valid standard concepts only. Procedures normally map to the Procedure domain; giving a drug maps to the drug itself (RxNorm, RxNorm Extension, or CVX for vaccines), and a named treatment regimen may map to its regimen concept.
+- Avoid concepts from Nebraska Lexicon, NAACCR and SNOMED Veterinary unless the source itself calls for them.
+- Between equally good concepts, prefer SNOMED, then LOINC, CPT4, HCPCS, ICD10PCS, ICD9Proc, OPCS4, OMOP Extension.
+- A row always gets a mapping when any candidate fits at all: if nothing matches exactly, the most specific broader concept (`broadMatch`) with a rationale saying what is lost. Never invent a concept id.
 
 ## When something is unavailable
 

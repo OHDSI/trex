@@ -22,7 +22,7 @@ function embeddingModelOf(provider: any, modelId: string): any {
 
 /**
  * Provider options asking for `dims` dimensions. Models with a fixed size
- * (e.g. SapBERT behind a local OpenAI-compatible server) may reject the
+ * (some local OpenAI-compatible servers) may reject the
  * parameter: CONCEPT_MAPPING_EMBEDDING_DIMENSIONS_PARAM=off omits it. The
  * returned vectors are still checked against `dims`.
  */
