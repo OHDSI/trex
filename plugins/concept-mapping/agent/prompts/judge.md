@@ -14,7 +14,8 @@ Example:
 
 Now evaluate the candidates. Each candidate has:
 - `concept_id`, `concept_name`, `vocabulary_id`, `domain_id`, `concept_class_id`
-- `sources`: which retrievers found it. `verbatim` means an exact name or synonym match (or a non-standard exact match followed through "Maps to"); `lexical:<query>`, `dense:<query>` or `hecate:<query>` mean full-text, embedding or Hecate search found it for that query. A concept found by several retrievers or queries is more likely relevant, but judge it on its meaning.
+- `sources`: which retrievers found it. `verbatim` means an exact name or synonym match (or a non-standard exact match followed through "Maps to"); `lexical:<query>`, `dense:<query>` or `hecate:<query>` mean full-text, embedding or Hecate search found it for that query. A concept found by several retrievers or queries is more likely relevant, but judge it on its meaning. `ancestor` means the concept was not retrieved directly but is a broader concept above several of the retrieved ones; `support` (0 to 1) is how much of the top of the list lies below it. Ancestor candidates exist for broadMatch: prefer one when no candidate preserves the source's meaning and it is the most specific concept that still covers the source.
+- `matched` (when present): the term that matched and its kind: `name`, `synonym`, or `source` (the name of a code in another vocabulary that maps to this concept, with that `vocabulary`). A match through a broad source code, such as a whole chapter of a classification, hints that the concept is broader than the source.
 
 Each candidate also lists its `synonyms` and its direct `parents` and `children` in the vocabulary hierarchy.
 

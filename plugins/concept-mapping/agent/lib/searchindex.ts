@@ -5,7 +5,7 @@
 // lexical search and an optional pgvector embedding for dense search. Built
 // and embedded by scripts/build-index.ts; queried by retrieve_candidates.
 import type { QueryFn } from "./runs.ts";
-import { type Concept, type Env, RETRIEVAL_VOCABULARIES, type VerbatimHit } from "./vocab.ts";
+import { type Concept, type Env, type Matched, RETRIEVAL_VOCABULARIES, type VerbatimHit } from "./vocab.ts";
 
 // One normalization for vocabulary terms and queries alike: lowercase, drop
 // possessive 's, drop parenthesized billing/semantic-tag suffixes, collapse
@@ -64,6 +64,7 @@ export async function buildIndex(q: QueryFn, o: BuildOptions): Promise<number> {
   await q(`CREATE INDEX IF NOT EXISTS terms_tsv_idx ON ${x}.terms USING gin (tsv)`);
   await q(NORM_FUNCTION(x));
   await q(`ALTER TABLE ${x}.terms ADD COLUMN IF NOT EXISTS norm TEXT`);
+  await q(`ALTER TABLE ${x}.terms ADD COLUMN IF NOT EXISTS src_vocabulary TEXT`);
   await q(`CREATE INDEX IF NOT EXISTS terms_pending_idx ON ${x}.terms (id) WHERE embedding IS NULL`);
   await q(
     `INSERT INTO ${x}.meta (key, value) VALUES ('dims', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
@@ -93,8 +94,8 @@ export async function buildIndex(q: QueryFn, o: BuildOptions): Promise<number> {
     RETRIEVAL_VOCABULARIES,
   );
   await q(
-    `INSERT INTO ${x}.terms (concept_id, term, kind)
-     SELECT DISTINCT c.concept_id, src.concept_name, 'source'
+    `INSERT INTO ${x}.terms (concept_id, term, kind, src_vocabulary)
+     SELECT DISTINCT ON (c.concept_id, src.concept_name) c.concept_id, src.concept_name, 'source', src.vocabulary_id
        FROM ${v}.concept src
        JOIN ${v}.concept_relationship r
          ON r.concept_id_1 = src.concept_id AND r.relationship_id = 'Maps to' AND r.invalid_reason IS NULL
@@ -104,6 +105,17 @@ export async function buildIndex(q: QueryFn, o: BuildOptions): Promise<number> {
     RETRIEVAL_VOCABULARIES,
   );
   await q(`UPDATE ${x}.terms SET norm = ${x}.norm(term) WHERE norm IS NULL`);
+  // Indexes built before src_vocabulary existed: recover it from the mapping.
+  await q(
+    `UPDATE ${x}.terms t SET src_vocabulary = s.vocabulary_id
+       FROM (SELECT DISTINCT ON (r.concept_id_2, src.concept_name) r.concept_id_2, src.concept_name, src.vocabulary_id
+               FROM ${v}.concept src
+               JOIN ${v}.concept_relationship r
+                 ON r.concept_id_1 = src.concept_id AND r.relationship_id = 'Maps to' AND r.invalid_reason IS NULL
+              WHERE src.standard_concept IS DISTINCT FROM 'S') s
+      WHERE t.kind = 'source' AND t.src_vocabulary IS NULL
+        AND s.concept_id_2 = t.concept_id AND s.concept_name = t.term`,
+  );
   await q(`CREATE INDEX IF NOT EXISTS terms_norm_idx ON ${x}.terms (norm)`);
   return (await indexStatus(q, x)).terms;
 }
@@ -125,25 +137,38 @@ export async function normalizedMatch(
   const { rows } = await q(
     `WITH qn AS (SELECT DISTINCT n FROM (VALUES ${qvalues}) AS s(n) WHERE n <> ''),
      hits AS (
-       SELECT t.concept_id,
-              min(CASE t.kind WHEN 'name' THEN 0 WHEN 'synonym' THEN 1 ELSE 2 END) AS via_rank,
-              min(t.term) AS term
+       SELECT DISTINCT ON (t.concept_id) t.concept_id, t.term, t.kind, t.src_vocabulary,
+              CASE t.kind WHEN 'name' THEN 0 WHEN 'synonym' THEN 1 ELSE 2 END AS via_rank
          FROM ${x}.terms t JOIN qn ON t.norm = qn.n
-        GROUP BY t.concept_id
+        ORDER BY t.concept_id, via_rank, t.term
      )
-     SELECT ${CONCEPT_COLUMNS}, h.via_rank, h.term FROM hits h JOIN ${v}.concept c ON c.concept_id = h.concept_id
+     SELECT ${CONCEPT_COLUMNS}, h.via_rank, h.term, h.kind, h.src_vocabulary
+       FROM hits h JOIN ${v}.concept c ON c.concept_id = h.concept_id
       WHERE c.standard_concept = 'S' AND c.invalid_reason IS NULL
       ORDER BY h.via_rank, c.concept_id
       LIMIT $${cleaned.length + 1}`,
     [...cleaned, limit],
   );
   const via = ["name", "synonym", "maps_to"] as const;
-  return (rows as Array<Row & { via_rank: number; term: string }>).map((r) => ({
+  return (rows as Array<Row & MatchRow & { via_rank: number }>).map((r) => ({
     ...toConcept(r),
+    matched: toMatched(r),
     matchedVia: via[Number(r.via_rank)],
     matchedTerm: r.term,
   }));
 }
+
+interface MatchRow {
+  term: string;
+  kind: Matched["kind"];
+  src_vocabulary: string | null;
+}
+
+const toMatched = (r: MatchRow): Matched => ({
+  term: r.term,
+  kind: r.kind,
+  ...(r.src_vocabulary ? { vocabulary: r.src_vocabulary } : {}),
+});
 
 /** Creates the vector index once embeddings exist (much faster than maintaining it while loading). */
 export async function createVectorIndex(q: QueryFn, x: string): Promise<void> {
@@ -243,37 +268,39 @@ export async function lexicalSearch(q: QueryFn, v: string, x: string, query: str
        SELECT CASE WHEN numnode(plainto_tsquery('english', $1)) = 0 THEN NULL
                    ELSE replace(plainto_tsquery('english', $1)::text, ' & ', ' | ')::tsquery END AS q
      ),
-     hits AS (
-       SELECT t.concept_id, max(ts_rank_cd(t.tsv, tq.q)) AS rank, min(length(t.term)) AS len
+     best AS (
+       SELECT DISTINCT ON (t.concept_id) t.concept_id, t.term, t.kind, t.src_vocabulary,
+              ts_rank_cd(t.tsv, tq.q) AS rank, length(t.term) AS len
          FROM ${x}.terms t, tq
         WHERE tq.q IS NOT NULL AND t.tsv @@ tq.q
-        GROUP BY t.concept_id
-        ORDER BY rank DESC, len, t.concept_id
-        LIMIT $2
-     )
-     SELECT ${CONCEPT_COLUMNS} FROM hits h JOIN ${v}.concept c ON c.concept_id = h.concept_id
+        ORDER BY t.concept_id, rank DESC, len
+     ),
+     hits AS (SELECT * FROM best ORDER BY rank DESC, len, concept_id LIMIT $2)
+     SELECT ${CONCEPT_COLUMNS}, h.term, h.kind, h.src_vocabulary
+       FROM hits h JOIN ${v}.concept c ON c.concept_id = h.concept_id
       WHERE c.standard_concept = 'S' AND c.invalid_reason IS NULL
       ORDER BY h.rank DESC, h.len, c.concept_id`,
     [query, limit],
   );
-  return (rows as Row[]).map(toConcept);
+  return (rows as Array<Row & MatchRow>).map((r) => ({ ...toConcept(r), matched: toMatched(r) }));
 }
 
 /** Nearest terms by cosine distance (HNSW), best term per concept. */
 export async function denseSearch(q: QueryFn, v: string, x: string, vec: number[], limit: number): Promise<Concept[]> {
   const { rows } = await q(
     `WITH nn AS (
-       SELECT concept_id, embedding <=> $1::halfvec AS d
+       SELECT concept_id, term, kind, src_vocabulary, embedding <=> $1::halfvec AS d
          FROM ${x}.terms WHERE embedding IS NOT NULL
         ORDER BY embedding <=> $1::halfvec
         LIMIT $2
      ),
-     best AS (SELECT concept_id, min(d) AS d FROM nn GROUP BY concept_id)
-     SELECT ${CONCEPT_COLUMNS} FROM best b JOIN ${v}.concept c ON c.concept_id = b.concept_id
+     best AS (SELECT DISTINCT ON (concept_id) * FROM nn ORDER BY concept_id, d)
+     SELECT ${CONCEPT_COLUMNS}, b.term, b.kind, b.src_vocabulary
+       FROM best b JOIN ${v}.concept c ON c.concept_id = b.concept_id
       WHERE c.standard_concept = 'S' AND c.invalid_reason IS NULL
       ORDER BY b.d, c.concept_id
       LIMIT $3`,
     [vecLiteral(vec), limit * 3, limit],
   );
-  return (rows as Row[]).map(toConcept);
+  return (rows as Array<Row & MatchRow>).map((r) => ({ ...toConcept(r), matched: toMatched(r) }));
 }

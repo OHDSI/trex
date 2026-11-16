@@ -15,6 +15,14 @@ export interface Concept {
   conceptClassId: string;
   standardConcept: string | null;
   invalidReason: string | null;
+  /** How a search hit matched: the term, its kind, and for mapped source names their vocabulary. */
+  matched?: Matched;
+}
+
+export interface Matched {
+  term: string;
+  kind: "name" | "synonym" | "source";
+  vocabulary?: string;
 }
 
 export type VerbatimHit = Concept & { matchedVia: "name" | "synonym" | "maps_to"; matchedTerm: string };

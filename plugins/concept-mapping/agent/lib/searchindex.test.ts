@@ -111,3 +111,20 @@ Deno.test("rebuilding an index from before normalization adds it without losing 
   assertEquals([s.terms, s.embedded], [5, 5]);
   assertEquals((await normalizedMatch(sql, "vocab", IDX, ["Keyhole-removal of test organ"], 10)).length, 1);
 });
+
+Deno.test("search hits report which term matched and, for mapped source names, its vocabulary", async () => {
+  const sql = await built();
+  const [hit] = await lexicalSearch(sql, "vocab", IDX, "keyhole removal test organ nos", 1);
+  assertEquals(hit.conceptId, 9000101);
+  assertEquals(hit.matched, { term: "Keyhole removal of test organ NOS", kind: "source", vocabulary: "ICD9Proc" });
+  const [syn] = await normalizedMatch(sql, "vocab", IDX, ["talk therapy solo"], 1);
+  assertEquals(syn.matched, { term: "Talk therapy, solo", kind: "synonym" });
+});
+
+Deno.test("rebuilding an index without source vocabularies backfills them", async () => {
+  const sql = await built();
+  await sql(`ALTER TABLE ${IDX}.terms DROP COLUMN src_vocabulary`);
+  await buildIndex(sql, { vocabSchema: "vocab", indexSchema: IDX, dims: 4, model: "test/fake" });
+  const { rows } = await sql(`SELECT src_vocabulary FROM ${IDX}.terms WHERE kind = 'source'`);
+  assertEquals(rows, [{ src_vocabulary: "ICD9Proc" }]);
+});

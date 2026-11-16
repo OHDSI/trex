@@ -4,7 +4,7 @@ import { type Embedder, resolveEmbedder } from "../lib/embeddings.ts";
 import { hecateSearch } from "../lib/hecate.ts";
 import { denseSearch, indexSchema, indexStatus, type IndexStatus, lexicalSearch, normalizedMatch } from "../lib/searchindex.ts";
 import { type Fused, type RankedList, retrievalConfidence, rrf } from "../lib/rrf.ts";
-import { type Concept, conceptsByIds, type Env, verbatimMatch, vocabQuery, vocabSchema } from "../lib/vocab.ts";
+import { type Concept, conceptsByIds, type Env, type Matched, verbatimMatch, vocabQuery, vocabSchema } from "../lib/vocab.ts";
 import type { QueryFn } from "../lib/runs.ts";
 import { type Ctx, envGet, guarded, requireSql } from "../lib/ctx.ts";
 
@@ -33,6 +33,8 @@ export interface RetrieveOutput {
     sources: string[];
     /** For `ancestor` candidates: rank-weighted share of the top candidates below it. */
     support?: number;
+    /** How the best search hit matched (term, kind, source vocabulary for mapped source names). */
+    matched?: Matched;
   }>;
   retrieval_confidence: "high" | "medium" | "low";
   semantic_error?: string;
@@ -49,7 +51,10 @@ export async function retrieveCandidates(input: RetrieveInput, deps: RetrieveDep
   const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
 
   // Exact matching; with a local index also after normalization (formatting-tolerant).
-  const exact: Concept[] = await verbatimMatch(q, schema, queries, limit);
+  const exact: Concept[] = (await verbatimMatch(q, schema, queries, limit)).map((h) => ({
+    ...h,
+    matched: { term: h.matchedTerm, kind: h.matchedVia === "maps_to" ? "source" as const : h.matchedVia },
+  }));
   const idx = indexSchema(deps.env);
   if ((await cachedStatus(q, idx)).exists) {
     const seen = new Set(exact.map((c) => c.conceptId));
@@ -84,6 +89,7 @@ export async function retrieveCandidates(input: RetrieveInput, deps: RetrieveDep
     domain_id: f.domainId,
     concept_class_id: f.conceptClassId,
     sources: f.sources,
+    ...(f.matched ? { matched: f.matched } : {}),
   }));
   if ((deps.env("CONCEPT_MAPPING_ANCESTOR_CANDIDATES")?.trim().toLowerCase() || "on") !== "off" && fused.length) {
     const num = (k: string, d: number) => {

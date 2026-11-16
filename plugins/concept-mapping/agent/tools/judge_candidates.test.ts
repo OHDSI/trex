@@ -139,3 +139,21 @@ Deno.test("a judge call that never answers times out as an abstention", async ()
   assertEquals(out.votes[0].concept_id, null);
   assertMatch(out.votes[0].error ?? "", /timed out/);
 });
+
+Deno.test("judges see how each candidate matched and the support of ancestor candidates", async () => {
+  let prompt = "";
+  const cands = [
+    { concept_id: 101, concept_name: "Concept 1", sources: ["lexical:x"], matched: { term: "src term", kind: "source", vocabulary: "ICD9Proc" } },
+    { concept_id: 102, concept_name: "Concept 2", sources: ["ancestor"], support: 0.8 },
+  ];
+  await judgeCandidates({ row, candidates: cands, judges: 1 }, {
+    generate: (_s, p) => {
+      prompt = p;
+      return Promise.resolve(reply(101, "exactMatch"));
+    },
+    details,
+    examples: [],
+  });
+  assert(prompt.includes('"matched":{"term":"src term","kind":"source","vocabulary":"ICD9Proc"}'));
+  assert(prompt.includes('"support":0.8'));
+});

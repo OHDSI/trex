@@ -167,3 +167,13 @@ Deno.test("with a local index, exact matching tolerates formatting differences",
   assert(out.candidates[0].sources.includes("verbatim"));
   assertEquals(out.retrieval_confidence, "high");
 });
+
+Deno.test("candidates carry how they matched", async () => {
+  const sql = await vocabSql();
+  await buildIndex(sql, { vocabSchema: "vocab", indexSchema: "concept_mapping_search", dims: 4, model: "" });
+  const out = await retrieveCandidates(
+    { queries: ["keyhole removal test organ nos"] },
+    { sql, env: env({ CONCEPT_MAPPING_ANCESTOR_CANDIDATES: "off" }), sleep: noSleep },
+  );
+  assertEquals(out.candidates[0].matched, { term: "Keyhole removal of test organ NOS", kind: "source", vocabulary: "ICD9Proc" });
+});
