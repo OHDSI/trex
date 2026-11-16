@@ -5,7 +5,18 @@
 // lexical search and an optional pgvector embedding for dense search. Built
 // and embedded by scripts/build-index.ts; queried by retrieve_candidates.
 import type { QueryFn } from "./runs.ts";
-import { type Concept, type Env, RETRIEVAL_VOCABULARIES } from "./vocab.ts";
+import { type Concept, type Env, RETRIEVAL_VOCABULARIES, type VerbatimHit } from "./vocab.ts";
+
+// One normalization for vocabulary terms and queries alike: lowercase, drop
+// possessive 's, drop parenthesized billing/semantic-tag suffixes, collapse
+// everything that is not a letter or digit into single spaces.
+const NORM_FUNCTION = (x: string) => `CREATE OR REPLACE FUNCTION ${x}.norm(t TEXT) RETURNS TEXT LANGUAGE sql IMMUTABLE AS $f$
+  SELECT btrim(regexp_replace(regexp_replace(regexp_replace(
+    lower(t),
+    $r$'s\\M$r$, '', 'g'),
+    $r$\\((procedure|per session|per side|regime/therapy)\\)$r$, ' ', 'g'),
+    '[^a-z0-9]+', ' ', 'g'))
+$f$`;
 
 const ENGLISH = 4180186; // language_concept_id of English synonyms
 
@@ -51,6 +62,8 @@ export async function buildIndex(q: QueryFn, o: BuildOptions): Promise<number> {
     UNIQUE (concept_id, term)
   )`);
   await q(`CREATE INDEX IF NOT EXISTS terms_tsv_idx ON ${x}.terms USING gin (tsv)`);
+  await q(NORM_FUNCTION(x));
+  await q(`ALTER TABLE ${x}.terms ADD COLUMN IF NOT EXISTS norm TEXT`);
   await q(`CREATE INDEX IF NOT EXISTS terms_pending_idx ON ${x}.terms (id) WHERE embedding IS NULL`);
   await q(
     `INSERT INTO ${x}.meta (key, value) VALUES ('dims', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
@@ -90,7 +103,46 @@ export async function buildIndex(q: QueryFn, o: BuildOptions): Promise<number> {
      ON CONFLICT (concept_id, term) DO NOTHING`,
     RETRIEVAL_VOCABULARIES,
   );
+  await q(`UPDATE ${x}.terms SET norm = ${x}.norm(term) WHERE norm IS NULL`);
+  await q(`CREATE INDEX IF NOT EXISTS terms_norm_idx ON ${x}.terms (norm)`);
   return (await indexStatus(q, x)).terms;
+}
+
+/**
+ * Exact matching after normalization (case, punctuation, possessives, billing
+ * suffixes) over names, English synonyms and mapped source names in the index.
+ */
+export async function normalizedMatch(
+  q: QueryFn,
+  v: string,
+  x: string,
+  terms: string[],
+  limit: number,
+): Promise<VerbatimHit[]> {
+  const cleaned = [...new Set(terms.map((t) => t.trim()).filter(Boolean))];
+  if (cleaned.length === 0) return [];
+  const qvalues = cleaned.map((_, i) => `(${x}.norm($${i + 1}))`).join(", ");
+  const { rows } = await q(
+    `WITH qn AS (SELECT DISTINCT n FROM (VALUES ${qvalues}) AS s(n) WHERE n <> ''),
+     hits AS (
+       SELECT t.concept_id,
+              min(CASE t.kind WHEN 'name' THEN 0 WHEN 'synonym' THEN 1 ELSE 2 END) AS via_rank,
+              min(t.term) AS term
+         FROM ${x}.terms t JOIN qn ON t.norm = qn.n
+        GROUP BY t.concept_id
+     )
+     SELECT ${CONCEPT_COLUMNS}, h.via_rank, h.term FROM hits h JOIN ${v}.concept c ON c.concept_id = h.concept_id
+      WHERE c.standard_concept = 'S' AND c.invalid_reason IS NULL
+      ORDER BY h.via_rank, c.concept_id
+      LIMIT $${cleaned.length + 1}`,
+    [...cleaned, limit],
+  );
+  const via = ["name", "synonym", "maps_to"] as const;
+  return (rows as Array<Row & { via_rank: number; term: string }>).map((r) => ({
+    ...toConcept(r),
+    matchedVia: via[Number(r.via_rank)],
+    matchedTerm: r.term,
+  }));
 }
 
 /** Creates the vector index once embeddings exist (much faster than maintaining it while loading). */

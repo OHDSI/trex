@@ -2,6 +2,7 @@ import { assert, assertEquals, assertThrows } from "jsr:@std/assert";
 import { fakeEmbed, vocabSql } from "./testing.ts";
 import {
   buildIndex,
+  normalizedMatch,
   denseSearch,
   embedPending,
   indexSchema,
@@ -81,4 +82,32 @@ Deno.test("lexical search breaks rank ties in favour of the shorter, more genera
   const general = hits.findIndex((h) => h.conceptId === 9000102);
   const specific = hits.findIndex((h) => h.conceptId === 9000099);
   assertEquals(general < specific, true);
+});
+
+Deno.test("normalized matching tolerates punctuation, case and billing suffixes", async () => {
+  const sql = await built();
+  for (const q of ["KEYHOLE-REMOVAL of test organ", "keyhole removal of test organ (per session)", "  Keyhole removal, of test organ "]) {
+    const hits = await normalizedMatch(sql, "vocab", IDX, [q], 10);
+    assertEquals(hits.map((h) => h.conceptId), [9000101], q);
+  }
+});
+
+Deno.test("normalized matching reports synonyms and mapped source names like exact matching", async () => {
+  const sql = await built();
+  assertEquals((await normalizedMatch(sql, "vocab", IDX, ["talk-therapy, solo"], 10)).map((h) => [h.conceptId, h.matchedVia]), [[9000201, "synonym"]]);
+  assertEquals((await normalizedMatch(sql, "vocab", IDX, ["keyhole removal of test organ nos"], 10)).map((h) => [h.conceptId, h.matchedVia]), [[9000101, "maps_to"]]);
+});
+
+Deno.test("a query that normalizes to nothing matches nothing", async () => {
+  const sql = await built();
+  assertEquals(await normalizedMatch(sql, "vocab", IDX, ["ΔΟΚΙΜΗ", "(per session)"], 10), []);
+});
+
+Deno.test("rebuilding an index from before normalization adds it without losing embeddings", async () => {
+  const sql = await built(true);
+  await sql(`ALTER TABLE ${IDX}.terms DROP COLUMN norm`);
+  await buildIndex(sql, { vocabSchema: "vocab", indexSchema: IDX, dims: 4, model: "test/fake" });
+  const s = await indexStatus(sql, IDX);
+  assertEquals([s.terms, s.embedded], [5, 5]);
+  assertEquals((await normalizedMatch(sql, "vocab", IDX, ["Keyhole-removal of test organ"], 10)).length, 1);
 });

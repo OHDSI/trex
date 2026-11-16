@@ -2,7 +2,7 @@ import { defineTool } from "eve/tools";
 import { ancestorCandidates } from "../lib/ancestors.ts";
 import { type Embedder, resolveEmbedder } from "../lib/embeddings.ts";
 import { hecateSearch } from "../lib/hecate.ts";
-import { denseSearch, indexSchema, indexStatus, type IndexStatus, lexicalSearch } from "../lib/searchindex.ts";
+import { denseSearch, indexSchema, indexStatus, type IndexStatus, lexicalSearch, normalizedMatch } from "../lib/searchindex.ts";
 import { type Fused, type RankedList, retrievalConfidence, rrf } from "../lib/rrf.ts";
 import { type Concept, conceptsByIds, type Env, verbatimMatch, vocabQuery, vocabSchema } from "../lib/vocab.ts";
 import type { QueryFn } from "../lib/runs.ts";
@@ -48,7 +48,16 @@ export async function retrieveCandidates(input: RetrieveInput, deps: RetrieveDep
   const schema = vocabSchema(deps.env);
   const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
 
-  const lists: RankedList[] = [{ source: "verbatim", concepts: await verbatimMatch(q, schema, queries, limit) }];
+  // Exact matching; with a local index also after normalization (formatting-tolerant).
+  const exact: Concept[] = await verbatimMatch(q, schema, queries, limit);
+  const idx = indexSchema(deps.env);
+  if ((await cachedStatus(q, idx)).exists) {
+    const seen = new Set(exact.map((c) => c.conceptId));
+    for (const c of await normalizedMatch(q, schema, idx, queries, limit)) {
+      if (!seen.has(c.conceptId)) exact.push(c);
+    }
+  }
+  const lists: RankedList[] = [{ source: "verbatim", concepts: exact.slice(0, limit) }];
 
   let semanticError: string | undefined;
   const mode = (deps.env("CONCEPT_MAPPING_SEMANTIC_SEARCH")?.trim().toLowerCase() || "local");

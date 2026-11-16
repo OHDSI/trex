@@ -155,3 +155,15 @@ Deno.test("ancestor candidates can be switched off", async () => {
   );
   assertEquals(out.candidates.some((c) => c.sources.includes("ancestor")), false);
 });
+
+Deno.test("with a local index, exact matching tolerates formatting differences", async () => {
+  const sql = await vocabSql();
+  await buildIndex(sql, { vocabSchema: "vocab", indexSchema: "concept_mapping_search", dims: 4, model: "" });
+  const out = await retrieveCandidates(
+    { queries: ["KEYHOLE-REMOVAL of test organ (per session)"] },
+    { sql, env: env({ CONCEPT_MAPPING_SEMANTIC_SEARCH: "off", CONCEPT_MAPPING_ANCESTOR_CANDIDATES: "off" }), sleep: noSleep },
+  );
+  assertEquals(out.candidates[0].concept_id, 9000101);
+  assert(out.candidates[0].sources.includes("verbatim"));
+  assertEquals(out.retrieval_confidence, "high");
+});
