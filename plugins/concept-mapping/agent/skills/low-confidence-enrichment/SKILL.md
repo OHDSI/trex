@@ -1,15 +1,15 @@
 ---
-description: Re-examine a row whose judge agreement was 3/5 or lower, whose vote tied, or whose retrieval confidence was low, using wider retrieval and web context (phase 5).
+description: Take a second, closer look at a row whose judges agreed weakly (3 of 5 or fewer, a tie, or no winner) or whose retrieval was weak, using wider retrieval and outside context.
 ---
 
-# Low-confidence enrichment (phase 5)
+# Low-confidence enrichment
 
-Use this for a row when `judge_candidates` returned `agreement <= 3`, `tie: true`, or no winner, **or** `retrieve_candidates` returned `retrieval_confidence: "low"` (even if the vote was unanimous: unanimous agreement on weak candidates is the signature of all judges settling on the least-bad option because the right concept was not retrieved).
+Use this when `judge_candidates` returned `agreement` of 3 or less, a `tie`, or no winner, or when `retrieve_candidates` reported `retrieval_confidence: "low"`. Weak retrieval counts even if the judges agreed: five judges agreeing on the least bad of several poor candidates is not a good mapping.
 
-1. **Wider retrieval**: call `retrieve_candidates` with `limit: 30` and all query variants (source name, english_name, reformulated, synonyms, the `core_procedure` query, plus any new phrasing the judges' definitions suggest). The core query surfaces the general concepts a broadMatch needs. In testing this surfaced better candidates in most low-confidence rows.
-2. **Web context**: 1 or 2 `web_search` calls for the specific source code and name, unless phase 1 already saved an official description for this code.
-3. Write a 1 or 2 sentence `enrichment_summary` of what the procedure is.
-4. **One careful re-evaluation by you** over the merged pool (the original candidates plus the 30 new ones). Apply the same rules the judges use: define the procedure, list the qualifiers stated in the source, eliminate candidates one by one, keep the most specific concept that adds no qualifier the source lacks, and use `broadMatch` when the best concept loses a stated qualifier. Use `concept_details` to compare the hierarchy of your top contenders.
-5. Save with `phase: 5`, `vote_agreement` from the original vote, and a `rationale` that cites the enrichment.
+1. **Retrieve wider**: `retrieve_candidates` with `limit: 30` and every query variant, including the `core_procedure` query and any new phrasing the judges' definitions suggest. Broader concepts appear here, which is what a broadMatch usually needs.
+2. **Get context**: one or two `web_search` calls (when enabled) for the specific code and name, unless the coding-system briefing already has its official description.
+3. **Summarize** in one or two sentences what the procedure actually is.
+4. **Decide yourself**, once, over the original and the new candidates, by the same rules the judges use: what does the source state, which candidate keeps all of it, and if none does, which is the most specific one that still covers it (`broadMatch`). Compare the hierarchy of the top contenders with `concept_details`.
+5. **Save** with `phase: 5`, the original `vote_agreement`, and a `rationale` that says what the extra context changed.
 
-Do **not** re-run `judge_candidates` on the expanded pool. Re-voting adds noise: the judges converge on the same answer from the same prompt. A single careful re-evaluation with the wider pool and web context works better.
+Do not run `judge_candidates` again on the larger pool: repeating the vote with the same instructions mostly repeats the same answer. One careful decision with more context does better.
