@@ -170,7 +170,7 @@ LLM judges systematically over-qualify and under-qualify. Both are wrong.
 
 ### 6c. Default states and things that are not qualifiers
 
-- **Default states are not qualifiers.** Imaging without contrast is the default: "without contrast" (or "w/o contrast") adds nothing and maps exactMatch to the plain imaging concept. "With contrast" is a real qualifier and must be preserved.
+- **Default states are not qualifiers.** Imaging without contrast is the default. If an explicit "without contrast" concept is among the candidates, it is the exactMatch; otherwise "without contrast" (or "w/o contrast") adds nothing and the plain imaging concept is the exactMatch. "With contrast" is a real qualifier and must be preserved.
 - **Disease status is not a qualifier of the procedure.** Phrases such as "with heart failure", "without malignancy" or "in cancer patients" describe the patient, not the act.
 - **Excluded concomitant procedures are not qualifiers.** "Without removal of lymph nodes" or "without tonsillectomy" says what was not done; map the procedure that was done, as exactMatch if it is otherwise equal.
 
