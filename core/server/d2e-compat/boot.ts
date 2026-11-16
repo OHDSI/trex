@@ -324,7 +324,7 @@ export async function d2eBoot(): Promise<void> {
     const attachConn = new Trex.TrexDB("memory");
     const attachExec: ExecFn = (sql) => attachConn.execute(sql, []);
 
-    for (const c of connections) {
+    const attachConnection = async (c: SourceCredential) => {
       try {
         await ensureAttached({ connections: [c] }, { exec: attachExec });
       } catch (e) {
@@ -336,6 +336,21 @@ export async function d2eBoot(): Promise<void> {
           }`,
         );
       }
+    };
+    // A HANA ATTACH walks the whole remote catalog and can take tens of
+    // minutes on a large system, so it must not hold up server.listen.
+    const isHana = (c: SourceCredential) => normalizeDialect(c.dialect) === "hana";
+    for (const c of connections.filter((c) => !isHana(c))) {
+      await attachConnection(c);
+    }
+    const hanaConnections = connections.filter(isHana);
+    if (hanaConnections.length > 0) {
+      (async () => {
+        for (const c of hanaConnections) {
+          await attachConnection(c);
+        }
+        log(`[attach-startup] HANA attach finished for ${hanaConnections.length} connection(s)`);
+      })();
     }
     for (const cid of cacheIds) {
       try {
