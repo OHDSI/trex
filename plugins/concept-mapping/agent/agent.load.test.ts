@@ -15,6 +15,7 @@ Deno.test("concept-mapper exposes exactly its mapping tools", async () => {
     "concept_details",
     "export_run",
     "judge_candidates",
+    "lookup_source_code",
     "next_rows",
     "retrieve_candidates",
     "save_coding_systems",

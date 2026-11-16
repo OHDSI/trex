@@ -23,7 +23,8 @@ Correctly identifying the coding system is the single biggest accuracy lever. In
 5. For each system, find the official publisher and catalog URL and document the **full prefix taxonomy**. Decode every position of compositional codes (e.g. NCSP: letter = chapter, digit = region, letter = action, letter = modality) and enumerate every alphanumeric body-system prefix that appears in the rows (e.g. Austrian MEL BA, BB, BC, BD, BH).
 6. Look for published SNOMED or OHDSI crosswalks for the system. Some national authorities publish them; treat them as top-quality evidence.
 7. For structured-code institutions (e.g. Austrian MEL `BE520`, Norwegian NCSP `PJA23K`, Greek EOPYY, Belgian RIZIV), search once per **distinct code** for its official catalog description, unless the `source_name` is already clinically complete (short, clean English, no billing qualifiers, a well-known procedure). A clean-looking English name often loses the specificity the catalog encodes.
-8. Save the result with `save_coding_systems`, once per institution:
+8. If a system is one Athena already contains (CPT4, HCPCS, ICD10PCS, ICD9Proc, OPCS4, SNOMED, LOINC), record its `vocabulary_id` in the briefing: rows from it can be resolved directly with `lookup_source_code`, which is more reliable than searching by name.
+9. Save the result with `save_coding_systems`, once per institution:
 
 ```json
 {
@@ -37,7 +38,8 @@ Correctly identifying the coding system is the single biggest accuracy lever. In
       "applies_to_rows": ["PJA23K", "PJA33K"],
       "prefix_taxonomy": { "position_1_P": "lymphoid system", "position_2_J": "lymph node" },
       "crosswalks_available": [],
-      "notes": "Compositional 4-character code"
+      "notes": "Compositional 4-character code",
+      "athena_vocabulary_id": null
     }
   ],
   "per_row_enrichment": [

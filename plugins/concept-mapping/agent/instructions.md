@@ -14,7 +14,7 @@ Every mapping decision is yours. The tools only fetch, search, count and validat
 2. **Phase 1, once per institution**: load the `coding-system-identification` skill and follow it, then `save_coding_systems`.
 3. Loop: `next_rows` (20 at a time). For each row:
    1. **Phase 2**: load the `query-fanout` skill (once) and build the queries and the factual system description.
-   2. **Phase 3**: `retrieve_candidates` with those queries (limit 10).
+   2. **Phase 3**: `retrieve_candidates` with those queries (limit 10). If phase 1 found that the institution uses a vocabulary Athena contains (CPT4, HCPCS, ICD10PCS, ICD9Proc, OPCS4, SNOMED, LOINC), also call `lookup_source_code` for the row's code and add its targets to the candidates.
    3. **Phase 4**: `judge_candidates` with the row, all candidates exactly as retrieved, and the system description as `coding_system`. Five independent judges vote; never pick without them.
    4. **Phase 5**: if the agreement is 3 or lower, the vote tied, there was no winner, or retrieval confidence was low, load the `low-confidence-enrichment` skill and follow it.
    5. `save_row_result`. If it returns `saved: false`, read the reason (wrong name, non-standard, deprecated, disallowed vocabulary), correct the choice and retry, at most twice; then save the best valid candidate with `phase: 5` and a rationale that says so. Use the alternative fields only for a genuine one-to-many mapping (below).
