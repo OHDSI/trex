@@ -103,15 +103,25 @@ Deno.test("a query that normalizes to nothing matches nothing", async () => {
   assertEquals(await normalizedMatch(sql, "vocab", IDX, ["ΔΟΚΙΜΗ", "(per session)"], 10), []);
 });
 
-Deno.test("rebuilding an index from before normalization adds it without losing embeddings", async () => {
+Deno.test("an index from before normalization reports it and gains it on rebuild without losing embeddings", async () => {
   const sql = await built(true);
-  await sql(`ALTER TABLE ${IDX}.terms DROP COLUMN norm`);
+  await sql(`DROP INDEX ${IDX}.terms_norm_idx`);
+  await sql(`DROP FUNCTION ${IDX}.norm(text)`);
+  assertEquals((await indexStatus(sql, IDX)).normalized, false);
   await buildIndex(sql, { vocabSchema: "vocab", indexSchema: IDX, dims: 4, model: "test/fake" });
   const s = await indexStatus(sql, IDX);
-  assertEquals([s.terms, s.embedded], [5, 5]);
+  assertEquals([s.terms, s.embedded, s.normalized], [5, 5, true]);
   assertEquals((await normalizedMatch(sql, "vocab", IDX, ["Keyhole-removal of test organ"], 10)).length, 1);
 });
 
+Deno.test("normalization is an expression index, not a stored column", async () => {
+  const sql = await built();
+  const { rows } = await sql(
+    `SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'terms' ORDER BY column_name`,
+    [IDX],
+  );
+  assertEquals(rows.map((r) => (r as { column_name: string }).column_name), ["concept_id", "embedding", "id", "kind", "term", "tsv"]);
+});
 Deno.test("search hits report which term matched and, for mapped source names, its vocabulary", async () => {
   const sql = await built();
   const [hit] = await lexicalSearch(sql, "vocab", IDX, "keyhole removal test organ nos", 1);
@@ -119,12 +129,4 @@ Deno.test("search hits report which term matched and, for mapped source names, i
   assertEquals(hit.matched, { term: "Keyhole removal of test organ NOS", kind: "source", vocabulary: "ICD9Proc" });
   const [syn] = await normalizedMatch(sql, "vocab", IDX, ["talk therapy solo"], 1);
   assertEquals(syn.matched, { term: "Talk therapy, solo", kind: "synonym" });
-});
-
-Deno.test("rebuilding an index without source vocabularies backfills them", async () => {
-  const sql = await built();
-  await sql(`ALTER TABLE ${IDX}.terms DROP COLUMN src_vocabulary`);
-  await buildIndex(sql, { vocabSchema: "vocab", indexSchema: IDX, dims: 4, model: "test/fake" });
-  const { rows } = await sql(`SELECT src_vocabulary FROM ${IDX}.terms WHERE kind = 'source'`);
-  assertEquals(rows, [{ src_vocabulary: "ICD9Proc" }]);
 });

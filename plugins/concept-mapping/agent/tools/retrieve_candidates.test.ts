@@ -177,3 +177,16 @@ Deno.test("candidates carry how they matched", async () => {
   );
   assertEquals(out.candidates[0].matched, { term: "Keyhole removal of test organ NOS", kind: "source", vocabulary: "ICD9Proc" });
 });
+
+Deno.test("an index built before normalization still serves retrieval", async () => {
+  const sql = await vocabSql();
+  await buildIndex(sql, { vocabSchema: "vocab", indexSchema: "concept_mapping_search", dims: 4, model: "" });
+  await sql("DROP INDEX concept_mapping_search.terms_norm_idx");
+  await sql("DROP FUNCTION concept_mapping_search.norm(text)");
+  const out = await retrieveCandidates(
+    { queries: ["keyhole removal test organ"] },
+    { sql, env: env({ CONCEPT_MAPPING_SEMANTIC_SEARCH: "local", CONCEPT_MAPPING_ANCESTOR_CANDIDATES: "off" }), sleep: noSleep },
+  );
+  assertEquals(out.candidates[0].concept_id, 9000101);
+  assertEquals(out.candidates[0].matched?.kind, "name");
+});

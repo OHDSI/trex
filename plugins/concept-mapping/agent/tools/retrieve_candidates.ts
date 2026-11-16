@@ -56,7 +56,7 @@ export async function retrieveCandidates(input: RetrieveInput, deps: RetrieveDep
     matched: { term: h.matchedTerm, kind: h.matchedVia === "maps_to" ? "source" as const : h.matchedVia },
   }));
   const idx = indexSchema(deps.env);
-  if ((await cachedStatus(q, idx)).exists) {
+  if ((await cachedStatus(q, idx)).normalized) {
     const seen = new Set(exact.map((c) => c.conceptId));
     for (const c of await normalizedMatch(q, schema, idx, queries, limit)) {
       if (!seen.has(c.conceptId)) exact.push(c);
