@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertMatch } from "jsr:@std/assert";
-import { fakeEmbed, vocabSql } from "../lib/testing.ts";
+import { execAll, fakeEmbed, HIERARCHY_FIXTURE, vocabSql } from "../lib/testing.ts";
 import { buildIndex, embedPending } from "../lib/searchindex.ts";
 import { retrieveCandidates } from "./retrieve_candidates.ts";
 
@@ -72,7 +72,7 @@ Deno.test("filtering semantic hits does not touch the hierarchy tables", async (
   const fetchFn = () => Promise.resolve(new Response(JSON.stringify([{ score: 1, concepts: [
     { concept_id: 9000201, concept_name: "Solo talk therapy", vocabulary_id: "SNOMED", domain_id: "Procedure" },
   ] }])));
-  await retrieveCandidates({ queries: ["talk therapy"] }, { sql, env: env({ CONCEPT_MAPPING_SEMANTIC_SEARCH: "hecate", HECATE_URL: "https://h.example" }), fetchFn: fetchFn as typeof fetch, sleep: noSleep });
+  await retrieveCandidates({ queries: ["talk therapy"] }, { sql, env: env({ CONCEPT_MAPPING_SEMANTIC_SEARCH: "hecate", HECATE_URL: "https://h.example", CONCEPT_MAPPING_ANCESTOR_CANDIDATES: "off" }), fetchFn: fetchFn as typeof fetch, sleep: noSleep });
   assert(!seen.some((q) => q.includes("concept_ancestor")), "retrieval should not query concept_ancestor");
 });
 
@@ -130,4 +130,28 @@ Deno.test("an embedding model different from the index's is refused, lexical res
   );
   assertMatch(out.semantic_error ?? "", /index was embedded with test\/fake, not other\/model/);
   assert(out.candidates.length > 0);
+});
+
+Deno.test("well-supported ancestors are appended as pickable broader candidates", async () => {
+  const sql = await vocabSql();
+  await execAll(sql, HIERARCHY_FIXTURE);
+  const out = await retrieveCandidates(
+    { queries: ["Keyhole removal of test organ", "Open removal of test organ"] },
+    { sql, env: env({ CONCEPT_MAPPING_SEMANTIC_SEARCH: "off", CONCEPT_MAPPING_ANCESTOR_CANDIDATES: "on", CONCEPT_MAPPING_ANCESTOR_MIN_DEPTH: "1" }), sleep: noSleep },
+  );
+  const anc = out.candidates.filter((c) => c.sources.includes("ancestor"));
+  assertEquals(anc.map((c) => c.concept_id), [9000102, 9000106]);
+  assertEquals(anc[0].support, 1);
+  const firstAncestor = out.candidates.findIndex((c) => c.sources.includes("ancestor"));
+  assertEquals(out.candidates.slice(firstAncestor).every((c) => c.sources.includes("ancestor")), true);
+});
+
+Deno.test("ancestor candidates can be switched off", async () => {
+  const sql = await vocabSql();
+  await execAll(sql, HIERARCHY_FIXTURE);
+  const out = await retrieveCandidates(
+    { queries: ["Keyhole removal of test organ", "Open removal of test organ"] },
+    { sql, env: env({ CONCEPT_MAPPING_SEMANTIC_SEARCH: "off", CONCEPT_MAPPING_ANCESTOR_CANDIDATES: "off" }), sleep: noSleep },
+  );
+  assertEquals(out.candidates.some((c) => c.sources.includes("ancestor")), false);
 });
