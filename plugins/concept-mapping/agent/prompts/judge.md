@@ -14,7 +14,7 @@ Example:
 
 Now evaluate the candidates. Each candidate has:
 - `concept_id`, `concept_name`, `vocabulary_id`, `domain_id`, `concept_class_id`
-- `sources`: which retrievers found it. `verbatim` means an exact name or synonym match (or a non-standard exact match followed through "Maps to"); `semantic:<query>` means semantic search found it for that query.
+- `sources`: which retrievers found it. `verbatim` means an exact name or synonym match (or a non-standard exact match followed through "Maps to"); `lexical:<query>`, `dense:<query>` or `hecate:<query>` mean full-text, embedding or Hecate search found it for that query. A concept found by several retrievers or queries is more likely relevant, but judge it on its meaning.
 
 Each candidate also lists its `synonyms` and its direct `parents` and `children` in the vocabulary hierarchy.
 

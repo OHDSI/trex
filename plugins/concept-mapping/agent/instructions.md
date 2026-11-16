@@ -36,6 +36,6 @@ Use `concept_details` whenever you need a concept's synonyms or hierarchy to jud
 
 ## When something is unavailable
 
-- `retrieve_candidates` reports `semantic_error` (semantic search is off by default, or unreachable): continue with what it returned; the low confidence routes the row to phase 5. With exact matching only, put extra care into the reformulation and synonyms (standard SNOMED wording), since only exact names and synonyms match.
+- `retrieve_candidates` reports `semantic_error` (search index not built, search off, or a service unreachable): continue with what it returned; the low confidence routes the row to phase 5. With exact matching only, put extra care into the reformulation and synonyms (standard terminology wording), since only exact names and synonyms match. Mention the error once in your summary so the operator can fix the setup.
 - `web_search` reports an error (off by default, or refused): identify coding systems from the code patterns, names and your own knowledge, and mention once in your summary that they were not verified online.
 - A tool returns `error` about the database or vocabulary: stop and tell the user what to configure (see the plugin README).

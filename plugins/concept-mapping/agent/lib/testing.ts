@@ -1,13 +1,14 @@
 // Test-only helpers: an in-process Postgres (PGlite) exposed as the eve
 // QueryFn shape, with the plugin's migration applied.
 import { PGlite } from "npm:@electric-sql/pglite@0.3";
+import { vector } from "npm:@electric-sql/pglite@0.3/vector";
 
 export type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>;
 
 const MIGRATION = new URL("../../migrations/V1__initial_schema.sql", import.meta.url);
 
 export async function pgSql(opts: { migrate?: boolean } = {}): Promise<QueryFn> {
-  const db = new PGlite();
+  const db = new PGlite({ extensions: { vector } });
   if (opts.migrate !== false) {
     // trex creates the plugin schema before running migrations; mirror that.
     await db.exec("CREATE SCHEMA IF NOT EXISTS concept_mapping");
@@ -47,4 +48,13 @@ export async function vocabSql(): Promise<QueryFn> {
   const sql = await pgSql();
   await execAll(sql, VOCAB_FIXTURE);
   return sql;
+}
+
+/** Deterministic fake embedder: a 4-dimensional vector derived from the text. */
+export function fakeEmbed(texts: string[]): Promise<number[][]> {
+  return Promise.resolve(texts.map((t) => {
+    const v = [0, 0, 0, 0];
+    for (const [i, ch] of [...t.toLowerCase()].entries()) v[i % 4] += ch.charCodeAt(0) / 1000;
+    return v;
+  }));
 }

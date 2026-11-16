@@ -6,7 +6,7 @@ The pipeline:
 
 1. **Coding-system identification**: web research per institution to identify the source coding system, its prefix taxonomy and official code descriptions.
 2. **Query fan-out**: translation, a cleaned reformulation, synonyms and a factual description per term.
-3. **Hybrid retrieval**: exact name and synonym matching (non-standard matches followed through "Maps to"), plus semantic search via [Hecate](https://github.com/OHDSI/Hecate), merged by reciprocal rank fusion (k = 60).
+3. **Hybrid retrieval**: exact name and synonym matching (non-standard matches followed through "Maps to"), plus a local hybrid index in your own database (full-text and embedding search) or, alternatively, [Hecate](https://github.com/OHDSI/Hecate); all lists merged by reciprocal rank fusion (k = 60).
 4. **Judge voting**: five independent model judges, each seeing the candidates in a different order with the candidates' hierarchy (and the institution's gold examples, if configured), then a majority vote.
 5. **Low-confidence enrichment**: rows with 3/5 agreement or less, or weak retrieval, get wider retrieval (30 candidates) and web context, then one careful re-evaluation.
 6. **Validation**: every saved concept must exist, be standard and valid, and match the vocabulary name.
@@ -35,14 +35,34 @@ CREATE INDEX ON vocab.concept_ancestor (ancestor_concept_id, min_levels_of_separ
 | `CONCEPT_MAPPING_JUDGE_MODEL` | the agent model | Optional separate model for the five judges. |
 | `CONCEPT_MAPPING_VOCAB_DATABASE_URL` | (worker database) | Postgres URL of the database holding the vocabulary. |
 | `CONCEPT_MAPPING_VOCAB_SCHEMA` | `vocab` | Schema holding the vocabulary tables. |
-| `HECATE_URL` | (off) | Semantic search endpoint, e.g. the public `https://hecate.pantheon-hds.com` or a self-hosted Hecate. Unset means semantic search is off. |
+| `CONCEPT_MAPPING_SEMANTIC_SEARCH` | `local` | `local` (the index below), `hecate` (Hecate API at `HECATE_URL`) or `off` (exact matching only). |
+| `CONCEPT_MAPPING_INDEX_SCHEMA` | `concept_mapping_search` | Schema of the local search index, in the vocabulary database. |
+| `CONCEPT_MAPPING_EMBEDDING_MODEL` | (none) | Embedding model (`provider/model-id`, providers `openai`, `azure`, `google`, `bedrock`) for dense search. Must be the model the index was built with; without it, local search is full-text only. |
+| `HECATE_URL` | (none) | Hecate base URL for `hecate` mode: the public `https://hecate.pantheon-hds.com` or a self-hosted instance. |
 | `CONCEPT_MAPPING_WEB_SEARCH` | `off` | Set to `on` to enable web search. |
 | `CONCEPT_MAPPING_EXAMPLES_FILE` | (none) | Path to a CSV of calibration examples for the judges (see below). |
 | `BRAVE_SEARCH_API_KEY` | (none) | Brave Search API key. Recommended: without it the agent uses the keyless DuckDuckGo lite endpoint, which often refuses server-side requests. |
 
 Provider credentials (`ANTHROPIC_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, ...) are passed through by the agents runtime as for any agent.
 
-**External services are off by default.** Semantic search and web search send source terms and codes to third-party services, so a deployment opts in explicitly (`HECATE_URL=...`, `CONCEPT_MAPPING_WEB_SEARCH=on`). Without them the agent maps from exact name matching and the model's own knowledge of coding systems, and accuracy drops: the approach's best results used both (web search drives coding-system identification; semantic search finds most candidates). A self-hosted Hecate keeps semantic search on-premises.
+**External services are off by default.** Web search and Hecate send source terms and codes to third-party services, so a deployment opts in explicitly (`CONCEPT_MAPPING_WEB_SEARCH=on`, `CONCEPT_MAPPING_SEMANTIC_SEARCH=hecate`). The default local search runs in your own database; dense search sends query text only to the embedding provider you configure, which can itself be local (see below). Without web search, coding-system identification relies on the code patterns and the model's own knowledge, and accuracy drops.
+
+### Search index
+
+Local search needs a one-time index build in the vocabulary database (it requires the `vector` extension, which the trex stack's Postgres ships):
+
+```bash
+# full-text only (no embedding provider needed)
+deno run -A --no-config --import-map plugins/concept-mapping/importmap.json \
+  plugins/concept-mapping/scripts/build-index.ts --lexical-only
+
+# full-text + embeddings (same model the agent will use)
+CONCEPT_MAPPING_EMBEDDING_MODEL=openai/text-embedding-3-large \
+deno run -A --no-config --import-map plugins/concept-mapping/importmap.json \
+  plugins/concept-mapping/scripts/build-index.ts --dims 1024
+```
+
+The index holds every standard concept name in the retrieval vocabularies, their English synonyms, and the names of non-standard concepts that map to them (several million terms for a full Athena download). Re-running is safe and resumes an interrupted embedding run; adding `--lexical-only` first gives working full-text search while embeddings are computed later. Embedding a full vocabulary takes hours and, with a hosted provider, costs a few dollars of API usage. To keep everything on-premises, point `OPENAI_BASE_URL` at a local OpenAI-compatible embedding server (Ollama, vLLM, Text Embeddings Inference) and use `openai/<model>`. Changing the model or dimensions requires dropping the index schema and rebuilding.
 
 ### Calibration examples
 

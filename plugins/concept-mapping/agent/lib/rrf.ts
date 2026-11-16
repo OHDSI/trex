@@ -2,7 +2,7 @@
 import { type Concept, VOCABULARY_PREFERENCE } from "./vocab.ts";
 
 export interface RankedList {
-  source: string; // "verbatim" or "semantic:<query>"
+  source: string; // "verbatim", "lexical:<q>", "dense:<q>" or "hecate:<q>"
   concepts: Concept[];
 }
 
@@ -35,6 +35,6 @@ export function retrievalConfidence(fused: Fused[]): "high" | "medium" | "low" {
   const top = fused[0];
   if (!top) return "low";
   if (top.sources.includes("verbatim") || top.sources.length >= 2) return "high";
-  if (top.sources.length === 1 && top.sources[0].startsWith("semantic:")) return "low";
+  if (top.sources.length === 1) return "low"; // a single search list, nothing corroborates it
   return "medium";
 }
