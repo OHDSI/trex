@@ -377,6 +377,9 @@ async function _callWorker(
     allowHostFsAccess: fncfg.allowHostFsAccess !== false,
     ...(fncfg.permissions ? { permissions: fncfg.permissions } : {}),
     context: {
+      // The JS bootstrap gates the Deno fs API blocklist on context, not on the
+      // top-level option, which only unblocks the module loader.
+      allowHostFsAccess: fncfg.allowHostFsAccess !== false,
       useReadSyncFileAPI: true,
       unstableSloppyImports: true,
       sourceMap: true,
@@ -478,6 +481,7 @@ async function _callInit(
     // instantiate. Harmless for non-decorator functions.
     decoratorType: fncfg.decoratorType ?? "typescript_with_metadata",
     context: {
+      allowHostFsAccess: fncfg.allowHostFsAccess !== false,
       useReadSyncFileAPI: true,
       unstableSloppyImports: true,
     },
