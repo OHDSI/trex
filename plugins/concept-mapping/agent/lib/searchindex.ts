@@ -182,7 +182,8 @@ const toConcept = (r: Row): Concept => ({
 
 /**
  * Full-text search: any query word may match (OR), ranked by cover density,
- * best term per concept. Restricted to valid standard concepts.
+ * best term per concept; equal ranks prefer the shorter (more general) name.
+ * Restricted to valid standard concepts.
  */
 export async function lexicalSearch(q: QueryFn, v: string, x: string, query: string, limit: number): Promise<Concept[]> {
   const { rows } = await q(
@@ -191,16 +192,16 @@ export async function lexicalSearch(q: QueryFn, v: string, x: string, query: str
                    ELSE replace(plainto_tsquery('english', $1)::text, ' & ', ' | ')::tsquery END AS q
      ),
      hits AS (
-       SELECT t.concept_id, max(ts_rank_cd(t.tsv, tq.q)) AS rank
+       SELECT t.concept_id, max(ts_rank_cd(t.tsv, tq.q)) AS rank, min(length(t.term)) AS len
          FROM ${x}.terms t, tq
         WHERE tq.q IS NOT NULL AND t.tsv @@ tq.q
         GROUP BY t.concept_id
-        ORDER BY rank DESC, t.concept_id
+        ORDER BY rank DESC, len, t.concept_id
         LIMIT $2
      )
      SELECT ${CONCEPT_COLUMNS} FROM hits h JOIN ${v}.concept c ON c.concept_id = h.concept_id
       WHERE c.standard_concept = 'S' AND c.invalid_reason IS NULL
-      ORDER BY h.rank DESC, c.concept_id`,
+      ORDER BY h.rank DESC, h.len, c.concept_id`,
     [query, limit],
   );
   return (rows as Row[]).map(toConcept);

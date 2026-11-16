@@ -72,3 +72,13 @@ Deno.test("status of a missing index reports exists: false", async () => {
   const sql = await vocabSql();
   assertEquals((await indexStatus(sql, IDX)).exists, false);
 });
+
+Deno.test("lexical search breaks rank ties in favour of the shorter, more general name", async () => {
+  const sql = await built();
+  await sql(`INSERT INTO vocab.concept VALUES (9000099, 'Removal of test organ with additional extended qualifiers', 'Procedure', 'SNOMED', 'Procedure', 'S', 'T-7', NULL)`);
+  await sql(`INSERT INTO ${IDX}.terms (concept_id, term, kind) VALUES (9000099, 'Removal of test organ with additional extended qualifiers', 'name')`);
+  const hits = await lexicalSearch(sql, "vocab", IDX, "removal test organ", 10);
+  const general = hits.findIndex((h) => h.conceptId === 9000102);
+  const specific = hits.findIndex((h) => h.conceptId === 9000099);
+  assertEquals(general < specific, true);
+});
