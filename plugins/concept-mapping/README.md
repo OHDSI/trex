@@ -11,7 +11,7 @@ The pipeline:
 5. **Low-confidence enrichment**: rows with 3/5 agreement or less, or weak retrieval, get wider retrieval (30 candidates) and web context, then one careful re-evaluation.
 6. **Validation**: every saved concept must exist, be standard and valid, and match the vocabulary name.
 
-The model makes every mapping decision; tools only fetch, search, count and validate. Judge agreement is a usable confidence signal: in evaluation, unanimous votes were correct for 73% of terms and votes of 3/5 or lower for 18%, so low-agreement rows can be routed to human review.
+The model makes every mapping decision; tools only fetch, search, count and validate. Judge agreement is the confidence signal: unanimous votes are the most reliable, and rows with 3 of 5 or fewer agreeing judges are the ones to route to human review.
 
 ## Setup
 
