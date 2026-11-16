@@ -1,5 +1,5 @@
 import { assertAlmostEquals, assertEquals, assertThrows } from "jsr:@std/assert";
-import { ancestorHitRate, overlappingCodes, parseGoldCsv, recallAtK } from "./retrievaleval.ts";
+import { ancestorHitRate, overlappingCodes, parseGoldCsv, recallAtK, recallWithExtra } from "./retrievaleval.ts";
 import { vocabSql } from "./testing.ts";
 
 Deno.test("recallAtK counts a row when any accepted id is within the top k, per predicate", () => {
@@ -40,4 +40,13 @@ Deno.test("parseGoldCsv reads the submission columns and the source_term/target_
 Deno.test("refuses gold rows that are also calibration examples", () => {
   assertEquals(overlappingCodes([{ source_data_identifier: "1", source_code: "C1" }], [{ source_data_identifier: "1", source_code: "C1" }]), ["1|C1"]);
   assertThrows(() => parseGoldCsv("a,b\n1,2\n"), Error, "missing column");
+});
+
+Deno.test("recallWithExtra counts a hit in the retrieved list or the appended extras, separately from Recall@k", () => {
+  const rows = [
+    { candidates: [1, 2], extra: [9], accepted: [9], predicate: "broadMatch" },
+    { candidates: [3], extra: [], accepted: [3], predicate: "exactMatch" },
+    { candidates: [4], extra: [5], accepted: [6], predicate: "broadMatch" },
+  ];
+  assertEquals(recallWithExtra(rows), { all: 2 / 3, exactMatch: 1, broadMatch: 0.5 });
 });

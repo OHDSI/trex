@@ -101,6 +101,7 @@ export async function retrieveCandidates(input: RetrieveInput, deps: RetrieveDep
       minSupport: num("CONCEPT_MAPPING_ANCESTOR_MIN_SUPPORT", 0.3),
       cap: num("CONCEPT_MAPPING_ANCESTOR_CAP", 5),
       minDepth: num("CONCEPT_MAPPING_ANCESTOR_MIN_DEPTH", 3),
+      maxDescendants: num("CONCEPT_MAPPING_ANCESTOR_MAX_DESCENDANTS", 2000),
     });
     const seen = new Set(candidates.map((c) => c.concept_id));
     for (const a of ancestors) {

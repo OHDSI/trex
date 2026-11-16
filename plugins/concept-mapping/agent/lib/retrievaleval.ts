@@ -103,3 +103,14 @@ export async function ancestorHitRate(
   }
   return out;
 }
+
+/** Share of rows (per predicate) whose gold is in the retrieved list or the appended extras (e.g. ancestors). */
+export function recallWithExtra(rows: Array<RetrievedRow & { extra: number[] }>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const group of ["all", "exactMatch", "broadMatch"]) {
+    const sel = rows.filter((r) => group === "all" || r.predicate === group);
+    const hits = sel.filter((r) => [...r.candidates, ...r.extra].some((c) => r.accepted.includes(c))).length;
+    out[group] = sel.length ? hits / sel.length : 0;
+  }
+  return out;
+}

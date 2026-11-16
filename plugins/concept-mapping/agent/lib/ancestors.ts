@@ -14,6 +14,8 @@ export interface AncestorOptions {
   cap: number;
   /** Minimum depth below a hierarchy root (0 = roots allowed). */
   minDepth: number;
+  /** Maximum number of descendants: keeps very general concepts out (depth alone admits e.g. whole method branches). */
+  maxDescendants: number;
 }
 
 export type AncestorCandidate = Concept & { support: number; depth: number };
@@ -85,7 +87,21 @@ export async function ancestorCandidates(
     sIds,
   )).rows as Array<{ id: number; depth: number }>;
   const depth = new Map(depthRows.map((r) => [Number(r.id), Number(r.depth)]));
-  const deep = sIds.filter((id) => (depth.get(id) ?? 0) >= o.minDepth);
+  const deepEnough = sIds.filter((id) => (depth.get(id) ?? 0) >= o.minDepth);
+  if (deepEnough.length === 0) return [];
+
+  // Descendant counts, capped at maxDescendants + 1 per concept so very general
+  // concepts cost no more than a bounded index scan.
+  const counts = (await q(
+    `SELECT v.id, (SELECT count(*) FROM (
+         SELECT 1 FROM ${vocab}.concept_ancestor x
+          WHERE x.ancestor_concept_id = v.id AND x.descendant_concept_id <> v.id
+          LIMIT $${deepEnough.length + 1}) z) AS n
+       FROM (VALUES ${deepEnough.map((_, i) => `($${i + 1}::int)`).join(", ")}) AS v(id)`,
+    [...deepEnough, o.maxDescendants + 1],
+  )).rows as Array<{ id: number; n: number }>;
+  const tooGeneral = new Set(counts.filter((r) => Number(r.n) > o.maxDescendants).map((r) => Number(r.id)));
+  const deep = deepEnough.filter((id) => !tooGeneral.has(id));
   if (deep.length === 0) return [];
 
   // Keep only the most specific: drop any kept concept that is an ancestor of another kept one.

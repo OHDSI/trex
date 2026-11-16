@@ -8,7 +8,7 @@ async function setup() {
   return sql;
 }
 
-const opts = { maxLevels: 2, minSupport: 0.3, cap: 5, minDepth: 1 };
+const opts = { maxLevels: 2, minSupport: 0.3, cap: 5, minDepth: 1, maxDescendants: 100 };
 
 Deno.test("an ancestor shared by two top candidates ranks above one shared by a single candidate", async () => {
   const sql = await setup();
@@ -45,4 +45,13 @@ Deno.test("support below the threshold is dropped and the cap is applied", async
   assertEquals(strict, []);
   const capped = await ancestorCandidates(sql, "vocab", top, { ...opts, cap: 1 });
   assertEquals(capped.length, 1);
+});
+
+Deno.test("ancestors with too many descendants (very general concepts) are not offered", async () => {
+  const sql = await setup();
+  const out = await ancestorCandidates(sql, "vocab", [{ conceptId: 9000101, rank: 1 }, { conceptId: 9000104, rank: 2 }], {
+    ...opts,
+    maxDescendants: 1,
+  });
+  assertEquals(out.map((c) => c.conceptId), [9000106]);
 });

@@ -9,7 +9,7 @@
 // gold overlaps the configured calibration examples.
 import pg from "pg";
 import { loadExamples } from "../agent/lib/fewshot.ts";
-import { ancestorHitRate, type GoldRow, overlappingCodes, parseGoldCsv, recallAtK } from "../agent/lib/retrievaleval.ts";
+import { ancestorHitRate, type GoldRow, overlappingCodes, parseGoldCsv, recallAtK, recallWithExtra } from "../agent/lib/retrievaleval.ts";
 import { type Env, vocabSchema } from "../agent/lib/vocab.ts";
 import { retrieveCandidates } from "../agent/tools/retrieve_candidates.ts";
 
@@ -44,7 +44,13 @@ async function main() {
     for (const g of gold) {
       const out = await retrieveCandidates({ queries: queriesFor(g, mode), limit }, { sql, env });
       if (out.semantic_error) errors.add(out.semantic_error.slice(0, 120));
-      rows.push({ candidates: out.candidates.map((c) => c.concept_id), accepted: g.accepted, predicate: g.predicate });
+      const isAncestor = (c: { sources: string[] }) => c.sources.includes("ancestor");
+      rows.push({
+        candidates: out.candidates.filter((c) => !isAncestor(c)).map((c) => c.concept_id),
+        extra: out.candidates.filter(isAncestor).map((c) => c.concept_id),
+        accepted: g.accepted,
+        predicate: g.predicate,
+      });
     }
     const report = {
       gold: file,
@@ -52,7 +58,11 @@ async function main() {
       mode,
       limit,
       semantic_search: env("CONCEPT_MAPPING_SEMANTIC_SEARCH") || "local",
+      // Recall@k over the retrieved candidates only (ancestors excluded).
       recall: recallAtK(rows, [1, 3, 5, 10, 30]),
+      // Whether the gold is among all candidates the judges see: retrieved plus appended ancestors.
+      recall_with_ancestors: recallWithExtra(rows),
+      ancestors_per_row: rows.reduce((n, r) => n + r.extra.length, 0) / Math.max(rows.length, 1),
       gold_is_ancestor_within_2: await ancestorHitRate(sql, vocabSchema(env), rows, 2),
       errors: [...errors],
     };
