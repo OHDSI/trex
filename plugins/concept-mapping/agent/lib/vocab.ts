@@ -21,7 +21,7 @@ export type VerbatimHit = Concept & { matchedVia: "name" | "synonym" | "maps_to"
 
 export type ConceptDetails = Concept & { synonyms: string[]; parents: string[]; children: string[] };
 
-/** Standard vocabularies the retrieval may return (challenge mapping rules). */
+/** Standard vocabularies the retrieval may return (see the mapping rules). */
 export const RETRIEVAL_VOCABULARIES = [
   "SNOMED",
   "LOINC",
