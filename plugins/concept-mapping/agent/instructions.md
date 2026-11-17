@@ -14,7 +14,7 @@ Every mapping decision is yours. The tools only fetch, search, count and validat
 2. **Phase 1, once per institution**: load the `coding-system-identification` skill and follow it, then `save_coding_systems`.
 3. Loop: `next_rows` (20 at a time). For each row:
    1. **Phase 2**: load the `query-fanout` skill (once) and build the queries and the factual system description.
-   2. **Phase 3**: `retrieve_candidates` with those queries (limit 10).
+   2. **Phase 3**: `retrieve_candidates` with those queries (limit 10). If phase 1 found that the institution uses a vocabulary Athena contains (CPT4, HCPCS, ICD10PCS, ICD9Proc, OPCS4, SNOMED, LOINC), also call `lookup_source_code` for the row's code and add its targets to the candidates.
    3. **Phase 4**: `judge_candidates` with the row, all candidates exactly as retrieved, and the system description as `coding_system`. Five independent judges vote; never pick without them.
    4. **Phase 5**: if the agreement is 3 or lower, the vote tied, there was no winner, or retrieval confidence was low, load the `low-confidence-enrichment` skill and follow it.
    5. `save_row_result`. If it returns `saved: false`, read the reason (wrong name, non-standard, deprecated, disallowed vocabulary), correct the choice and retry, at most twice; then save the best valid candidate with `phase: 5` and a rationale that says so. Use the alternative fields only for a genuine one-to-many mapping (below).
@@ -26,13 +26,12 @@ Use `concept_details` whenever you need a concept's synonyms or hierarchy to jud
 
 ## Mapping rules
 
-- The purpose is harmonizing source procedure data for observational research. Default to one target concept per source term. Use a second (alternative) target only when the source explicitly describes two distinct procedures joined by "and", "with", "followed by" or "plus", no single concept covers both, and both exist as standard concepts.
-- Consider the procedure, anatomical site, laterality, method, approach, guidance, imaging modality, contrast, device and other modifiers when they change the clinical meaning. Laterality is meaningful.
-- Treat "unspecified", "not elsewhere classified", "not otherwise specified", "with or without" and billing units ("per session", "per side") as non-essential, but check that dropping them does not change the meaning.
-- Targets are valid standard concepts. Prefer the Procedure domain. Procedures that are drug administrations map to RxNorm or RxNorm Extension (Drug domain); chemotherapy regimens may map to HemOnc.
-- When several concepts are equally good, prefer SNOMED, then LOINC, CPT4, HCPCS, ICD10PCS, ICD9Proc, OPCS4, OMOP Extension.
-- Avoid Nebraska Lexicon, NAACCR and SNOMED Veterinary unless the source context requires them. Never use deprecated, invalid or non-standard concepts, and never invent concept ids.
-- If no candidate is good, pick the best available `broadMatch` rather than leaving the row empty, and say why in the rationale.
+- Mappings serve observational research: they should let analysts find every record of a procedure. Aim for one target per source term; the judge rules say when a second target is justified.
+- What matters is what was done, where, and how, as far as the source says it. Details that only serve billing or documentation do not.
+- Choose valid standard concepts only. Procedures normally map to the Procedure domain; giving a drug maps to the drug itself (RxNorm, RxNorm Extension, or CVX for vaccines), and a named treatment regimen may map to its regimen concept.
+- Avoid concepts from Nebraska Lexicon, NAACCR and SNOMED Veterinary unless the source itself calls for them.
+- Between equally good concepts, prefer SNOMED, then LOINC, CPT4, HCPCS, ICD10PCS, ICD9Proc, OPCS4, OMOP Extension.
+- A row always gets a mapping when any candidate fits at all: if nothing matches exactly, the most specific broader concept (`broadMatch`) with a rationale saying what is lost. Never invent a concept id.
 
 ## When something is unavailable
 

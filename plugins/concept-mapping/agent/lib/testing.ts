@@ -58,3 +58,22 @@ export function fakeEmbed(texts: string[]): Promise<number[][]> {
     return v;
   }));
 }
+
+// Extra test hierarchy (fictional concepts):
+//   9000100 Test procedure root            (depth 0)
+//   └─ 9000102 Removal of test organ       (depth 1)
+//      ├─ 9000101 Keyhole removal ...      (depth 2)
+//      └─ 9000104 Open removal of test organ (depth 2)
+//   9000106 Test organ procedure           (depth 1, parent of 9000101 only)
+//   9000105 non-standard ancestor of 9000101; 9000103 is from a disallowed vocabulary.
+export const HIERARCHY_FIXTURE = `
+INSERT INTO vocab.concept VALUES
+ (9000100, 'Test procedure root', 'Procedure', 'SNOMED', 'Procedure', 'S', 'R', NULL),
+ (9000104, 'Open removal of test organ', 'Procedure', 'SNOMED', 'Procedure', 'S', 'T-4', NULL),
+ (9000105, 'Classification group', 'Procedure', 'SNOMED', 'Procedure', 'C', 'T-5', NULL),
+ (9000106, 'Test organ procedure', 'Procedure', 'SNOMED', 'Procedure', 'S', 'T-6', NULL);
+INSERT INTO vocab.concept_ancestor VALUES
+ (9000100, 9000102, 1, 1), (9000100, 9000101, 2, 2), (9000100, 9000104, 2, 2), (9000100, 9000106, 1, 1),
+ (9000102, 9000104, 1, 1), (9000106, 9000101, 1, 1), (9000105, 9000101, 1, 1), (9000103, 9000101, 1, 1)
+`;
+

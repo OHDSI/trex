@@ -15,13 +15,21 @@ export interface Concept {
   conceptClassId: string;
   standardConcept: string | null;
   invalidReason: string | null;
+  /** How a search hit matched: the term, its kind, and for mapped source names their vocabulary. */
+  matched?: Matched;
+}
+
+export interface Matched {
+  term: string;
+  kind: "name" | "synonym" | "source";
+  vocabulary?: string;
 }
 
 export type VerbatimHit = Concept & { matchedVia: "name" | "synonym" | "maps_to"; matchedTerm: string };
 
 export type ConceptDetails = Concept & { synonyms: string[]; parents: string[]; children: string[] };
 
-/** Standard vocabularies the retrieval may return (challenge mapping rules). */
+/** Standard vocabularies the retrieval may return (see the mapping rules). */
 export const RETRIEVAL_VOCABULARIES = [
   "SNOMED",
   "LOINC",

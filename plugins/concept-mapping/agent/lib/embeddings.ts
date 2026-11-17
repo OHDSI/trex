@@ -20,17 +20,37 @@ function embeddingModelOf(provider: any, modelId: string): any {
   throw new Error("provider has no embedding model factory");
 }
 
+/**
+ * Provider options asking for `dims` dimensions. Models with a fixed size
+ * (some local OpenAI-compatible servers) may reject the
+ * parameter: CONCEPT_MAPPING_EMBEDDING_DIMENSIONS_PARAM=off omits it. The
+ * returned vectors are still checked against `dims`.
+ */
+export function embeddingProviderOptions(provider: string, dims: number, env: Env): Record<string, Record<string, unknown>> {
+  if (env("CONCEPT_MAPPING_EMBEDDING_DIMENSIONS_PARAM")?.trim().toLowerCase() === "off") return {};
+  switch (provider) {
+    case "openai":
+      return { openai: { dimensions: dims } };
+    case "azure":
+      return { openai: { dimensions: dims }, azure: { dimensions: dims } };
+    case "google":
+      return { google: { outputDimensionality: dims } };
+    case "bedrock":
+      return { bedrock: { dimensions: dims } };
+    default:
+      return {};
+  }
+}
+
 export async function resolveEmbedder(modelString: string, env: Env, dims: number): Promise<Embedder> {
   const { provider, modelId } = parseEmbeddingModel(modelString);
   // deno-lint-ignore no-explicit-any
   let model: any;
-  let providerOptions: Record<string, Record<string, unknown>> = {};
   switch (provider) {
     case "openai": {
       const { createOpenAI } = await import("@ai-sdk/openai");
       const baseURL = env("OPENAI_BASE_URL");
       model = embeddingModelOf(createOpenAI({ apiKey: env("OPENAI_API_KEY") ?? "none", ...(baseURL ? { baseURL } : {}) }), modelId);
-      providerOptions = { openai: { dimensions: dims } };
       break;
     }
     case "azure": {
@@ -40,13 +60,11 @@ export async function resolveEmbedder(modelString: string, env: Env, dims: numbe
         createAzure({ apiKey: env("AZURE_API_KEY"), ...(baseURL ? { baseURL } : { resourceName: env("AZURE_RESOURCE_NAME") }) }),
         modelId,
       );
-      providerOptions = { openai: { dimensions: dims }, azure: { dimensions: dims } };
       break;
     }
     case "google": {
       const { createGoogleGenerativeAI } = await import("@ai-sdk/google");
       model = embeddingModelOf(createGoogleGenerativeAI({ apiKey: env("GOOGLE_GENERATIVE_AI_API_KEY") }), modelId);
-      providerOptions = { google: { outputDimensionality: dims } };
       break;
     }
     case "bedrock": {
@@ -56,12 +74,12 @@ export async function resolveEmbedder(modelString: string, env: Env, dims: numbe
         createAmazonBedrock({ region: env("AWS_REGION") || "us-east-1", ...(apiKey ? { apiKey } : {}) }),
         modelId,
       );
-      providerOptions = { bedrock: { dimensions: dims } };
       break;
     }
     default:
       throw new Error(`unsupported embedding provider ${provider} (use openai, azure, google or bedrock)`);
   }
+  const providerOptions = embeddingProviderOptions(provider, dims, env);
   const { embedMany } = await import("ai");
   return async (texts) => {
     const { embeddings } = await embedMany({ model, values: texts, providerOptions, maxRetries: 3 });

@@ -1,9 +1,10 @@
 import { defineTool } from "eve/tools";
+import { ancestorCandidates } from "../lib/ancestors.ts";
 import { type Embedder, resolveEmbedder } from "../lib/embeddings.ts";
 import { hecateSearch } from "../lib/hecate.ts";
-import { denseSearch, indexSchema, indexStatus, type IndexStatus, lexicalSearch } from "../lib/searchindex.ts";
+import { denseSearch, indexSchema, indexStatus, type IndexStatus, lexicalSearch, normalizedMatch } from "../lib/searchindex.ts";
 import { type Fused, type RankedList, retrievalConfidence, rrf } from "../lib/rrf.ts";
-import { type Concept, conceptsByIds, type Env, verbatimMatch, vocabQuery, vocabSchema } from "../lib/vocab.ts";
+import { type Concept, conceptsByIds, type Env, type Matched, verbatimMatch, vocabQuery, vocabSchema } from "../lib/vocab.ts";
 import type { QueryFn } from "../lib/runs.ts";
 import { type Ctx, envGet, guarded, requireSql } from "../lib/ctx.ts";
 
@@ -30,6 +31,10 @@ export interface RetrieveOutput {
     domain_id: string;
     concept_class_id: string;
     sources: string[];
+    /** For `ancestor` candidates: rank-weighted share of the top candidates below it. */
+    support?: number;
+    /** How the best search hit matched (term, kind, source vocabulary for mapped source names). */
+    matched?: Matched;
   }>;
   retrieval_confidence: "high" | "medium" | "low";
   semantic_error?: string;
@@ -45,7 +50,19 @@ export async function retrieveCandidates(input: RetrieveInput, deps: RetrieveDep
   const schema = vocabSchema(deps.env);
   const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
 
-  const lists: RankedList[] = [{ source: "verbatim", concepts: await verbatimMatch(q, schema, queries, limit) }];
+  // Exact matching; with a local index also after normalization (formatting-tolerant).
+  const exact: Concept[] = (await verbatimMatch(q, schema, queries, limit)).map((h) => ({
+    ...h,
+    matched: { term: h.matchedTerm, kind: h.matchedVia === "maps_to" ? "source" as const : h.matchedVia },
+  }));
+  const idx = indexSchema(deps.env);
+  if ((await cachedStatus(q, idx)).normalized) {
+    const seen = new Set(exact.map((c) => c.conceptId));
+    for (const c of await normalizedMatch(q, schema, idx, queries, limit)) {
+      if (!seen.has(c.conceptId)) exact.push(c);
+    }
+  }
+  const lists: RankedList[] = [{ source: "verbatim", concepts: exact.slice(0, limit) }];
 
   let semanticError: string | undefined;
   const mode = (deps.env("CONCEPT_MAPPING_SEMANTIC_SEARCH")?.trim().toLowerCase() || "local");
@@ -64,16 +81,45 @@ export async function retrieveCandidates(input: RetrieveInput, deps: RetrieveDep
   }
 
   const fused: Fused[] = rrf(lists).slice(0, limit);
+  const candidates: RetrieveOutput["candidates"] = fused.map((f, i) => ({
+    rank: i + 1,
+    concept_id: f.conceptId,
+    concept_name: f.conceptName,
+    vocabulary_id: f.vocabularyId,
+    domain_id: f.domainId,
+    concept_class_id: f.conceptClassId,
+    sources: f.sources,
+    ...(f.matched ? { matched: f.matched } : {}),
+  }));
+  if ((deps.env("CONCEPT_MAPPING_ANCESTOR_CANDIDATES")?.trim().toLowerCase() || "on") !== "off" && fused.length) {
+    const num = (k: string, d: number) => {
+      const v = Number(deps.env(k));
+      return Number.isFinite(v) && deps.env(k)?.trim() ? v : d;
+    };
+    const ancestors = await ancestorCandidates(q, schema, fused.slice(0, 5).map((f, i) => ({ conceptId: f.conceptId, rank: i + 1 })), {
+      maxLevels: num("CONCEPT_MAPPING_ANCESTOR_MAX_LEVELS", 2),
+      minSupport: num("CONCEPT_MAPPING_ANCESTOR_MIN_SUPPORT", 0.3),
+      cap: num("CONCEPT_MAPPING_ANCESTOR_CAP", 5),
+      minDepth: num("CONCEPT_MAPPING_ANCESTOR_MIN_DEPTH", 3),
+      maxDescendants: num("CONCEPT_MAPPING_ANCESTOR_MAX_DESCENDANTS", 2000),
+    });
+    const seen = new Set(candidates.map((c) => c.concept_id));
+    for (const a of ancestors) {
+      if (seen.has(a.conceptId)) continue;
+      candidates.push({
+        rank: candidates.length + 1,
+        concept_id: a.conceptId,
+        concept_name: a.conceptName,
+        vocabulary_id: a.vocabularyId,
+        domain_id: a.domainId,
+        concept_class_id: a.conceptClassId,
+        sources: ["ancestor"],
+        support: a.support,
+      });
+    }
+  }
   return {
-    candidates: fused.map((f, i) => ({
-      rank: i + 1,
-      concept_id: f.conceptId,
-      concept_name: f.conceptName,
-      vocabulary_id: f.vocabularyId,
-      domain_id: f.domainId,
-      concept_class_id: f.conceptClassId,
-      sources: f.sources,
-    })),
+    candidates,
     // Without (complete) semantic search only an exact verbatim hit is trustworthy.
     retrieval_confidence: semanticError && !fused[0]?.sources.includes("verbatim") ? "low" : retrievalConfidence(fused),
     ...(semanticError ? { semantic_error: semanticError } : {}),
