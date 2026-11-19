@@ -139,6 +139,7 @@ def fhir(request):
     pool_size, db_mode = request.param
     os.environ["FHIR_POOL_SIZE"] = str(pool_size)
     os.environ["FHIR_USE_HOST_DB"] = "true" if db_mode == "host" else "false"
+    os.environ["FHIR__ALLOW_EXPUNGE"] = "true"
 
     gp, fp, pp, tp = alloc_ports()
     exts = [POOL_EXT, FHIR_EXT]
@@ -972,6 +973,128 @@ def test_read_nonexistent_version(fhir):
 
     status, _, _ = fhir.get(f"/{did}/Patient/{pid}/_history/999")
     assert status == 404
+
+
+def test_read_deleted_version_returns_410(fhir):
+    did = _create_dataset(fhir)
+    _, created, _ = _create_patient(fhir, did, family="GoneVer")
+    pid = created["id"]
+    fhir.delete(f"/{did}/Patient/{pid}")
+
+    status, _, _ = fhir.get(f"/{did}/Patient/{pid}/_history/2")
+    assert status == 410
+    status, body, _ = fhir.get(f"/{did}/Patient/{pid}/_history")
+    assert "resource" not in body["entry"][0]
+
+
+# ===================================================================
+# EXPUNGE
+# ===================================================================
+
+def _create_observation(client, dataset_id, subject_ref):
+    status, body, _ = client.post(f"/{dataset_id}/Observation", {
+        "resourceType": "Observation",
+        "status": "final",
+        "code": {"text": "test"},
+        "subject": {"reference": subject_ref},
+    })
+    assert status == 201, body
+    return body["id"]
+
+
+def _assert_gone_everywhere(client, did, rtype, rid):
+    status, _, _ = client.get(f"/{did}/{rtype}/{rid}")
+    assert status == 404, f"{rtype}/{rid} read returned {status}"
+    _, hist, _ = client.get(f"/{did}/{rtype}/{rid}/_history")
+    assert hist["total"] == 0, f"{rtype}/{rid} history still has {hist['total']} entries"
+    status, _, _ = client.get(f"/{did}/{rtype}/{rid}/_history/1")
+    assert status == 404
+
+
+def test_expunge_patient(fhir):
+    did = _create_dataset(fhir)
+    _, created, _ = _create_patient(fhir, did, family="Expunge")
+    pid = created["id"]
+    fhir.put(f"/{did}/Patient/{pid}", {"resourceType": "Patient", "id": pid, "name": [{"family": "V2"}]})
+
+    status, body, _ = fhir.post(f"/{did}/Patient/{pid}/$expunge", None)
+    assert status == 200, body
+    assert body["parameter"][0] == {"name": "count", "valueInteger": 1}
+    assert body["parameter"][1] == {"name": "historyCount", "valueInteger": 1}
+    _assert_gone_everywhere(fhir, did, "Patient", pid)
+
+    status, _, _ = fhir.post(f"/{did}/Patient/{pid}/$expunge", None)
+    assert status == 404
+
+
+def test_expunge_soft_deleted_patient(fhir):
+    did = _create_dataset(fhir)
+    _, created, _ = _create_patient(fhir, did, family="SoftThenHard")
+    pid = created["id"]
+    fhir.delete(f"/{did}/Patient/{pid}")
+
+    status, _, _ = fhir.post(f"/{did}/Patient/{pid}/$expunge", None)
+    assert status == 200
+    _assert_gone_everywhere(fhir, did, "Patient", pid)
+
+
+def test_expunge_without_cascade_keeps_referencing_resources(fhir):
+    did = _create_dataset(fhir)
+    _, created, _ = _create_patient(fhir, did)
+    pid = created["id"]
+    oid = _create_observation(fhir, did, f"Patient/{pid}")
+
+    fhir.post(f"/{did}/Patient/{pid}/$expunge", None)
+    status, _, _ = fhir.get(f"/{did}/Observation/{oid}")
+    assert status == 200
+
+
+def test_expunge_patient_cascade(fhir):
+    did = _create_dataset(fhir)
+    _, created, _ = _create_patient(fhir, did, family="Cascade")
+    pid = created["id"]
+    _, other, _ = _create_patient(fhir, did, family="Bystander")
+    other_id = other["id"]
+
+    own = [
+        _create_observation(fhir, did, f"Patient/{pid}"),
+        _create_observation(fhir, did, f"http://example.org/fhir/Patient/{pid}"),
+        _create_observation(fhir, did, f"Patient/{pid}/_history/1"),
+    ]
+    theirs = _create_observation(fhir, did, f"Patient/{other_id}")
+    # Old version referenced the patient; current one points elsewhere.
+    moved = _create_observation(fhir, did, f"Patient/{pid}")
+    fhir.put(f"/{did}/Observation/{moved}", {
+        "resourceType": "Observation", "id": moved, "status": "final",
+        "code": {"text": "test"}, "subject": {"reference": f"Patient/{other_id}"},
+    })
+    status, cond, _ = fhir.post(f"/{did}/Condition", {
+        "resourceType": "Condition", "subject": {"reference": f"Patient/{pid}"},
+    })
+    assert status == 201, cond
+
+    status, body, _ = fhir.post(f"/{did}/Patient/{pid}/$expunge?_cascade=delete", None)
+    assert status == 200, body
+    assert body["parameter"][0]["valueInteger"] == 5  # patient + 3 observations + condition
+
+    _assert_gone_everywhere(fhir, did, "Patient", pid)
+    _assert_gone_everywhere(fhir, did, "Condition", cond["id"])
+    for oid in own:
+        _assert_gone_everywhere(fhir, did, "Observation", oid)
+
+    assert fhir.get(f"/{did}/Patient/{other_id}")[0] == 200
+    assert fhir.get(f"/{did}/Observation/{theirs}")[0] == 200
+    assert fhir.get(f"/{did}/Observation/{moved}")[0] == 200
+    _, hist, _ = fhir.get(f"/{did}/Observation/{moved}/_history")
+    assert [e["response"]["etag"] for e in hist["entry"]] == ['W/"2"']
+
+
+def test_expunge_cascade_rejected_for_non_patient(fhir):
+    did = _create_dataset(fhir)
+    _, created, _ = _create_patient(fhir, did)
+    oid = _create_observation(fhir, did, f"Patient/{created['id']}")
+    status, _, _ = fhir.post(f"/{did}/Observation/{oid}/$expunge?_cascade=delete", None)
+    assert status == 400
 
 
 # ===================================================================

@@ -42,19 +42,22 @@ pub fn build_history_entry(
     is_deleted: bool,
 ) -> Option<Value> {
     let resource: Value = serde_json::from_str(raw).ok()?;
-    let method = if is_deleted { "DELETE" } else { "PUT" };
-    Some(json!({
+    let mut entry = json!({
         "fullUrl": format!("/{}/{}/{}", dataset_id, resource_type, resource_id),
-        "resource": resource,
         "request": {
-            "method": method,
+            "method": if is_deleted { "DELETE" } else { "PUT" },
             "url": format!("{}/{}", resource_type, resource_id)
         },
         "response": {
-            "status": "200",
+            "status": if is_deleted { "204" } else { "200" },
             "etag": format!("W/\"{}\"", version)
         }
-    }))
+    });
+    // A delete entry carries no resource body (FHIR R4 history bundle rules).
+    if !is_deleted {
+        entry["resource"] = resource;
+    }
+    Some(entry)
 }
 
 /// Build the final Bundle wrapping a Vec of history entries.
@@ -93,7 +96,7 @@ pub fn build_current_version_by_id_sql(
     version_id: &str,
 ) -> String {
     format!(
-        "SELECT _raw FROM {schema}.\"{table}\" WHERE _id = '{id}' AND _version_id = {version}",
+        "SELECT _raw, _is_deleted::VARCHAR AS _is_deleted FROM {schema}.\"{table}\" WHERE _id = '{id}' AND _version_id = {version}",
         schema = schema_name,
         table = resource_type.to_lowercase(),
         id = resource_id.replace('\'', "''"),
@@ -169,6 +172,12 @@ pub async fn read_resource_version(
                 );
                 match conn.execute(current_sql).await {
                     QueryResult::Select { rows, .. } if !rows.is_empty() => {
+                        if rows[0].get(1).and_then(|v| v.as_str()) == Some("true") {
+                            return Err(AppError::Gone(format!(
+                                "Version {} of {}/{} is a deletion",
+                                version_id, resource_type, resource_id
+                            )));
+                        }
                         let raw = rows[0].first().and_then(|v| v.as_str()).unwrap_or("{}");
                         let resource: Value = serde_json::from_str(raw)
                             .map_err(|e| AppError::Internal(format!("JSON parse: {}", e)))?;
@@ -238,6 +247,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(entry["request"]["method"], "DELETE");
+        assert!(entry.get("resource").is_none());
     }
 
     #[test]

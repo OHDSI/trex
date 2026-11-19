@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 pub enum AppError {
     NotFound(String),
     BadRequest(String),
+    Forbidden(String),
     Conflict(String),
     Gone(String),
     Internal(String),
@@ -18,6 +19,7 @@ impl AppError {
         match self {
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::Forbidden(_) => StatusCode::FORBIDDEN,
             AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::Gone(_) => StatusCode::GONE,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -29,6 +31,7 @@ impl AppError {
         match self {
             AppError::NotFound(_) => "not-found",
             AppError::BadRequest(_) => "invalid",
+            AppError::Forbidden(_) => "forbidden",
             AppError::Conflict(_) => "conflict",
             AppError::Gone(_) => "deleted",
             AppError::Internal(_) => "exception",
@@ -40,6 +43,7 @@ impl AppError {
         match self {
             AppError::NotFound(msg)
             | AppError::BadRequest(msg)
+            | AppError::Forbidden(msg)
             | AppError::Conflict(msg)
             | AppError::Gone(msg)
             | AppError::Internal(msg)
@@ -84,6 +88,7 @@ mod tests {
     fn status_code_mapping() {
         assert_eq!(AppError::NotFound("x".into()).status_code(), StatusCode::NOT_FOUND);
         assert_eq!(AppError::BadRequest("x".into()).status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(AppError::Forbidden("x".into()).status_code(), StatusCode::FORBIDDEN);
         assert_eq!(AppError::Conflict("x".into()).status_code(), StatusCode::CONFLICT);
         assert_eq!(AppError::Gone("x".into()).status_code(), StatusCode::GONE);
         assert_eq!(AppError::Internal("x".into()).status_code(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -94,6 +99,7 @@ mod tests {
     fn issue_code_mapping() {
         assert_eq!(AppError::NotFound("x".into()).issue_code(), "not-found");
         assert_eq!(AppError::BadRequest("x".into()).issue_code(), "invalid");
+        assert_eq!(AppError::Forbidden("x".into()).issue_code(), "forbidden");
         assert_eq!(AppError::Conflict("x".into()).issue_code(), "conflict");
         assert_eq!(AppError::Gone("x".into()).issue_code(), "deleted");
         assert_eq!(AppError::Internal("x".into()).issue_code(), "exception");

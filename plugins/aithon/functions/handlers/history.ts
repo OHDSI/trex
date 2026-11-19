@@ -59,19 +59,20 @@ export function buildHistoryEntry(
   } catch {
     return undefined;
   }
-  const method = isDeleted ? "DELETE" : "PUT";
-  return {
+  const entry: Record<string, unknown> = {
     fullUrl: `/${datasetId}/${resourceType}/${resourceId}`,
-    resource,
     request: {
-      method,
+      method: isDeleted ? "DELETE" : "PUT",
       url: `${resourceType}/${resourceId}`,
     },
     response: {
-      status: "200",
+      status: isDeleted ? "204" : "200",
       etag: `W/"${version}"`,
     },
   };
+  // A delete entry carries no resource body (FHIR R4 history bundle rules).
+  if (!isDeleted) entry.resource = resource;
+  return entry;
 }
 
 /**
@@ -111,7 +112,7 @@ export function buildCurrentVersionByIdSql(
   resourceId: string,
   versionId: string,
 ): string {
-  return `SELECT _raw FROM ${schemaName}."${resourceType.toLowerCase()}" WHERE _id = '${resourceId.replaceAll("'", "''")}' AND _version_id = ${versionId}`;
+  return `SELECT _raw, _is_deleted::VARCHAR AS _is_deleted FROM ${schemaName}."${resourceType.toLowerCase()}" WHERE _id = '${resourceId.replaceAll("'", "''")}' AND _version_id = ${versionId}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -245,6 +246,9 @@ export async function readResourceVersion(
   }
 
   if (currentRows && currentRows.length > 0) {
+    if (currentRows[0]._is_deleted === "true") {
+      throw FhirError.gone(`Version ${versionId} of ${resourceType}/${id} is a deletion`);
+    }
     const raw: string = currentRows[0]._raw ?? "{}";
     let resource: unknown;
     try {

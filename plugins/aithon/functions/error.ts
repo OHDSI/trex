@@ -1,8 +1,8 @@
 // @ts-nocheck - Deno edge function
-type Kind = "not-found" | "invalid" | "conflict" | "deleted" | "exception" | "timeout";
+type Kind = "not-found" | "invalid" | "forbidden" | "conflict" | "deleted" | "exception" | "timeout";
 
 const STATUS: Record<Kind, number> = {
-  "not-found": 404, "invalid": 400, "conflict": 409,
+  "not-found": 404, "invalid": 400, "forbidden": 403, "conflict": 409,
   "deleted": 410, "exception": 500, "timeout": 408,
 };
 
@@ -14,6 +14,7 @@ export class FhirError extends Error {
 
   static notFound(m: string) { return new FhirError("not-found", m); }
   static badRequest(m: string) { return new FhirError("invalid", m); }
+  static forbidden(m: string) { return new FhirError("forbidden", m); }
   static conflict(m: string) { return new FhirError("conflict", m); }
   static gone(m: string) { return new FhirError("deleted", m); }
   static internal(m: string) { return new FhirError("exception", m); }

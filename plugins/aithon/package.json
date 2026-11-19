@@ -19,7 +19,8 @@
     "functions": {
       "env": {
         "_shared": {
-          "FHIR_BASE_PATH": "/trex/fhir"
+          "FHIR_BASE_PATH": "/trex/fhir",
+          "FHIR_ALLOW_EXPUNGE": "${FHIR__ALLOW_EXPUNGE:-false}"
         }
       },
       "api": [
