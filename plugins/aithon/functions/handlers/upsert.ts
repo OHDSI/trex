@@ -68,7 +68,7 @@ export async function upsertResource(
   const tableName = ResourceRegistry.tableName(resourceType);
 
   // --- Check current version (mirrors build_check_version_sql-style SELECT) ---
-  const checkSql = `SELECT _version_id::VARCHAR, _raw FROM ${schemaName}."${resourceType.toLowerCase()}" WHERE _id = $1`;
+  const checkSql = `SELECT _version_id::VARCHAR AS _version_id, _raw FROM ${schemaName}."${resourceType.toLowerCase()}" WHERE _id = $1`;
 
   let currentVersion: number;
   let isNew: boolean;

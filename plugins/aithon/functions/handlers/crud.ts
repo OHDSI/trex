@@ -89,7 +89,7 @@ export function buildReadSql(
   resourceType: string,
   resourceId: string,
 ): string {
-  return `SELECT _raw, _is_deleted::VARCHAR, _version_id::VARCHAR FROM ${schemaName}."${resourceType.toLowerCase()}" WHERE _id = '${resourceId.replaceAll("'", "''")}'`;
+  return `SELECT _raw, _is_deleted::VARCHAR AS _is_deleted, _version_id::VARCHAR AS _version_id FROM ${schemaName}."${resourceType.toLowerCase()}" WHERE _id = '${resourceId.replaceAll("'", "''")}'`;
 }
 
 /**
@@ -101,7 +101,7 @@ export function buildCheckVersionSql(
   resourceType: string,
   resourceId: string,
 ): string {
-  return `SELECT _version_id::VARCHAR, _raw FROM ${schemaName}."${resourceType.toLowerCase()}" WHERE _id = '${resourceId.replaceAll("'", "''")}'`;
+  return `SELECT _version_id::VARCHAR AS _version_id, _raw FROM ${schemaName}."${resourceType.toLowerCase()}" WHERE _id = '${resourceId.replaceAll("'", "''")}'`;
 }
 
 /**
@@ -445,7 +445,7 @@ export async function deleteResource(
   }
 
   // Select only non-deleted rows (AND NOT _is_deleted)
-  const checkSql = `SELECT _version_id::VARCHAR, _raw FROM ${schemaName}."${resourceType.toLowerCase()}" WHERE _id = '${id.replaceAll("'", "''")}' AND NOT _is_deleted`;
+  const checkSql = `SELECT _version_id::VARCHAR AS _version_id, _raw FROM ${schemaName}."${resourceType.toLowerCase()}" WHERE _id = '${id.replaceAll("'", "''")}' AND NOT _is_deleted`;
 
   let currentVersion: number;
   let currentRaw: string;

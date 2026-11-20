@@ -87,7 +87,7 @@ async fn upsert_resource_inner(
     }
 
     let check_sql = format!(
-        "SELECT _version_id::VARCHAR, _raw FROM {schema}.\"{table}\" WHERE _id = $1",
+        "SELECT _version_id::VARCHAR AS _version_id, _raw FROM {schema}.\"{table}\" WHERE _id = $1",
         schema = schema,
         table = table_name,
     );

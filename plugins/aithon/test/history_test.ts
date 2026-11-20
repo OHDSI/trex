@@ -73,7 +73,7 @@ Deno.test("buildHistorySql_escapes_quotes", () => {
   // must escape single-quotes in resource id
   assertEquals(sql.includes("'abc''def'"), true);
   // must order newest-first
-  assertEquals(sql.includes("ORDER BY _version_id DESC"), true);
+  assertEquals(sql.includes("ORDER BY h._version_id DESC"), true);
 });
 
 // ---------------------------------------------------------------------------

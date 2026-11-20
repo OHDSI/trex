@@ -115,7 +115,7 @@ export function buildDeleteCheckSql(
   schemaName: string,
   resourceType: string,
 ): string {
-  return `SELECT _version_id::VARCHAR, _raw FROM ${schemaName}."${resourceType.toLowerCase()}" WHERE _id = $1 AND NOT _is_deleted`;
+  return `SELECT _version_id::VARCHAR AS _version_id, _raw FROM ${schemaName}."${resourceType.toLowerCase()}" WHERE _id = $1 AND NOT _is_deleted`;
 }
 
 /**

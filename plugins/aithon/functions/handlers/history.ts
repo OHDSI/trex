@@ -25,7 +25,7 @@ export function buildHistorySql(
   resourceType: string,
   resourceId: string,
 ): string {
-  return `SELECT _version_id::VARCHAR, _last_updated::VARCHAR, _raw, _is_deleted::VARCHAR FROM ${schemaName}._history WHERE _id = '${resourceId.replaceAll("'", "''")}' AND _resource_type = '${resourceType.replaceAll("'", "''")}' ORDER BY _version_id DESC`;
+  return `SELECT _version_id::VARCHAR AS _version_id, _last_updated::VARCHAR AS _last_updated, _raw, _is_deleted::VARCHAR AS _is_deleted FROM ${schemaName}._history AS h WHERE _id = '${resourceId.replaceAll("'", "''")}' AND _resource_type = '${resourceType.replaceAll("'", "''")}' ORDER BY h._version_id DESC`;
 }
 
 /**
@@ -37,7 +37,7 @@ export function buildCurrentVersionSql(
   resourceType: string,
   resourceId: string,
 ): string {
-  return `SELECT _version_id::VARCHAR, _last_updated::VARCHAR, _raw, _is_deleted::VARCHAR FROM ${schemaName}."${resourceType.toLowerCase()}" WHERE _id = '${resourceId.replaceAll("'", "''")}'`;
+  return `SELECT _version_id::VARCHAR AS _version_id, _last_updated::VARCHAR AS _last_updated, _raw, _is_deleted::VARCHAR AS _is_deleted FROM ${schemaName}."${resourceType.toLowerCase()}" WHERE _id = '${resourceId.replaceAll("'", "''")}'`;
 }
 
 /**

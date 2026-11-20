@@ -12,9 +12,9 @@ use crate::state::AppState;
 /// Build the SELECT that pulls history rows for one resource (newest version first).
 pub fn build_history_sql(schema_name: &str, resource_type: &str, resource_id: &str) -> String {
     format!(
-        "SELECT _version_id::VARCHAR, _last_updated::VARCHAR, _raw, _is_deleted::VARCHAR FROM {schema}._history \
+        "SELECT _version_id::VARCHAR AS _version_id, _last_updated::VARCHAR AS _last_updated, _raw, _is_deleted::VARCHAR AS _is_deleted FROM {schema}._history AS h \
          WHERE _id = '{id}' AND _resource_type = '{rtype}' \
-         ORDER BY _version_id DESC",
+         ORDER BY h._version_id DESC",
         schema = schema_name,
         id = resource_id.replace('\'', "''"),
         rtype = resource_type.replace('\'', "''")
@@ -24,7 +24,7 @@ pub fn build_history_sql(schema_name: &str, resource_type: &str, resource_id: &s
 /// Build the SELECT that pulls the current version of one resource from its table.
 pub fn build_current_version_sql(schema_name: &str, resource_type: &str, resource_id: &str) -> String {
     format!(
-        "SELECT _version_id::VARCHAR, _last_updated::VARCHAR, _raw, _is_deleted::VARCHAR FROM {schema}.\"{table}\" WHERE _id = '{id}'",
+        "SELECT _version_id::VARCHAR AS _version_id, _last_updated::VARCHAR AS _last_updated, _raw, _is_deleted::VARCHAR AS _is_deleted FROM {schema}.\"{table}\" WHERE _id = '{id}'",
         schema = schema_name,
         table = resource_type.to_lowercase(),
         id = resource_id.replace('\'', "''")
@@ -215,7 +215,7 @@ mod tests {
         let sql = build_history_sql("\"db\".\"ds\"", "Patient", "abc'def");
         assert!(sql.contains("\"db\".\"ds\"._history"));
         assert!(sql.contains("'abc''def'"));
-        assert!(sql.contains("ORDER BY _version_id DESC"));
+        assert!(sql.contains("ORDER BY h._version_id DESC"));
     }
 
     #[test]
