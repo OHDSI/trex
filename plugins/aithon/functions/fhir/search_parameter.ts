@@ -203,9 +203,22 @@ export function generateSearchSql(
 // Private helpers
 // ---------------------------------------------------------------------------
 
+/** Picks the `|` alternative for `resourceType`; params shared across types list one per type. */
+export function selectAlternative(expression: string, resourceType: string): string {
+  const alternatives = expression
+    .split("|")
+    .map((a) => a.trim())
+    .map((a) => (a.startsWith("(") && a.endsWith(")") ? a.slice(1, -1).trim() : a));
+  return (
+    alternatives.find((a) => a.startsWith(`${resourceType}.`) || a === resourceType) ??
+    alternatives.find((a) => a.startsWith("Resource.")) ??
+    alternatives[0] ??
+    expression
+  );
+}
+
 function fhirpathToJsonPath(expression: string, resourceType: string): string {
-  // Take the first alternative (before |) and trim
-  const expr = (expression.split("|")[0] ?? expression).trim();
+  const expr = selectAlternative(expression, resourceType);
 
   let path: string;
   if (expr.startsWith(resourceType)) {
