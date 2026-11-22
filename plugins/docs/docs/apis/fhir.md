@@ -69,6 +69,7 @@ Paths are relative to the mount prefix. `{ds}` is a dataset id.
 | DELETE | `/{ds}/{resourceType}/{id}` | Delete (soft). |
 | GET | `/{ds}/{resourceType}/{id}/_history` | Version history. |
 | GET | `/{ds}/{resourceType}/{id}/_history/{versionId}` | Read a version. |
+| POST | `/{ds}/{resourceType}/{id}/$expunge` | Permanently delete a resource and its history (see below). |
 | GET | `/{ds}/StructureDefinition` | List registered resource types. |
 | GET | `/{ds}/StructureDefinition/{type}` | Read a StructureDefinition. |
 
@@ -91,6 +92,26 @@ implemented`. For CQL and measure evaluation, use the
 [`fhir` SQL extension](../sql-reference/fhir), which implements them.
 :::
 
+## Permanent deletion (`$expunge`)
+
+`DELETE` is a soft delete: the row is flagged `_is_deleted` and every earlier
+version stays in `_history`. To erase a resource for good, call
+`POST /{ds}/{resourceType}/{id}/$expunge`. It removes the current row and all
+history versions, then runs `CHECKPOINT` so the rows are flushed out of the WAL.
+The response is a `Parameters` resource with `count` (resources removed) and
+`historyCount` (history versions removed).
+
+On a Patient, `?_cascade=delete` also expunges the resources whose subject is
+that patient (Observation, Condition, Encounter, MedicationRequest, … — the
+patient-owned part of the R4 Patient compartment), including older versions
+that referenced the patient. Resources that only mention the patient as an
+actor or member (Group, Appointment, Patient.link) are left alone.
+
+`$expunge` is disabled unless `FHIR__ALLOW_EXPUNGE=true`; otherwise it returns
+`403`. DuckDB does not zero freed storage blocks, so expunged bytes can remain
+in the database file until they are overwritten. Backups and earlier `$export`
+output are not touched.
+
 ## Backend & data model
 
 The gateway leases an in-process DuckDB connection per request (no proxying to
@@ -106,6 +127,7 @@ name comes from `FHIR_DB_NAME` (default `memory`).
 |----------|---------|-------------|
 | `FHIR_DB_NAME` | `memory` | DuckDB catalog the FHIR schemas live in. |
 | `FHIR_BASE_PATH` | `/trex/fhir` | External mount prefix. |
+| `FHIR__ALLOW_EXPUNGE` | `false` | Enables `$expunge` (mapped to the worker's `FHIR_ALLOW_EXPUNGE`). |
 
 ## Next steps
 

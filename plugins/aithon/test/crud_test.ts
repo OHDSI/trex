@@ -154,7 +154,7 @@ Deno.test("buildReadSql_exact_format", () => {
   const sql = buildReadSql('"memory"."ds1"', "Patient", "p1");
   assertEquals(
     sql,
-    `SELECT _raw, _is_deleted::VARCHAR, _version_id::VARCHAR FROM "memory"."ds1"."patient" WHERE _id = 'p1'`,
+    `SELECT _raw, _is_deleted::VARCHAR AS _is_deleted, _version_id::VARCHAR AS _version_id FROM "memory"."ds1"."patient" WHERE _id = 'p1'`,
   );
 });
 
@@ -172,7 +172,7 @@ Deno.test("buildCheckVersionSql_exact_format", () => {
   const sql = buildCheckVersionSql('"memory"."ds1"', "Patient", "p1");
   assertEquals(
     sql,
-    `SELECT _version_id::VARCHAR, _raw FROM "memory"."ds1"."patient" WHERE _id = 'p1'`,
+    `SELECT _version_id::VARCHAR AS _version_id, _raw FROM "memory"."ds1"."patient" WHERE _id = 'p1'`,
   );
 });
 

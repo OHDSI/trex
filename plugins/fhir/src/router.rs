@@ -50,6 +50,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             delete(handlers::crud::delete_resource),
         )
         .route(
+            "/{dataset_id}/{resource_type}/{resource_id}/$expunge",
+            post(handlers::expunge::expunge_resource),
+        )
+        .route(
             "/{dataset_id}/{resource_type}/{resource_id}/_history",
             get(handlers::history::resource_history),
         )

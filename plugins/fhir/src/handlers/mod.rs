@@ -10,3 +10,4 @@ pub mod cql;
 pub mod measure;
 pub mod import;
 pub mod upsert;
+pub mod expunge;

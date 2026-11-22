@@ -20,6 +20,7 @@ import {
 } from "./handlers/crud.ts";
 import { searchResources } from "./handlers/search.ts";
 import { resourceHistory, readResourceVersion } from "./handlers/history.ts";
+import { expungeResource } from "./handlers/expunge.ts";
 import { processBundle } from "./handlers/bundle.ts";
 import { importNdjson } from "./handlers/import.ts";
 import { systemExport, typeExport, exportStatus } from "./handlers/export.ts";
@@ -44,6 +45,7 @@ export type Route =
   | { kind: "read"; datasetId: string; resourceType: string; id: string }
   | { kind: "update"; datasetId: string; resourceType: string; id: string }
   | { kind: "delete"; datasetId: string; resourceType: string; id: string }
+  | { kind: "expunge"; datasetId: string; resourceType: string; id: string }
   | { kind: "history"; datasetId: string; resourceType: string; id: string }
   | { kind: "vread"; datasetId: string; resourceType: string; id: string; versionId: string }
   | { kind: "bundle"; datasetId: string }
@@ -231,6 +233,11 @@ export function parseRoute(method: string, path: string): Route {
         return { kind: "evaluateMeasure", datasetId, measureId: s2 };
       }
       return { kind: "notFound" };
+    }
+
+    // /{ds}/{resourceType}/{id}/$expunge
+    if (s3 === "$expunge") {
+      return m === "POST" ? { kind: "expunge", datasetId, resourceType: s1, id: s2 } : { kind: "notFound" };
     }
 
     // s3 is a literal operation or reserved segment — fence it
@@ -444,6 +451,11 @@ async function dispatch(
       const u = new URL(req.url);
       const params = Object.fromEntries(u.searchParams.entries());
       return await withConnection((conn) => searchResources(parsed.datasetId, parsed.resourceType, params, conn, state));
+    }
+
+    case "expunge": {
+      const cascade = new URL(req.url).searchParams.get("_cascade");
+      return await withConnection((conn) => expungeResource(parsed.datasetId, parsed.resourceType, parsed.id, cascade, conn, state));
     }
 
     case "history":

@@ -83,7 +83,7 @@ pub fn build_bundle_response(entries: Vec<Value>, bundle_type: &str) -> Value {
 /// Build the SELECT used by the bundle DELETE branch to fetch current version + raw.
 pub fn build_delete_check_sql(schema_name: &str, resource_type: &str) -> String {
     format!(
-        "SELECT _version_id::VARCHAR, _raw FROM {schema}.\"{table}\" WHERE _id = $1 AND NOT _is_deleted",
+        "SELECT _version_id::VARCHAR AS _version_id, _raw FROM {schema}.\"{table}\" WHERE _id = $1 AND NOT _is_deleted",
         schema = schema_name,
         table = resource_type.to_lowercase(),
     )

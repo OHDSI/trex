@@ -49,6 +49,16 @@ HAPI-FHIR / SQL-on-FHIR conventions — see the integration tests
 Bulk import a FHIR Bundle JSON file via the bundle endpoint, or stream
 individual `POST` requests; both append to the underlying tables.
 
+## Deleting resources
+
+`DELETE /{dataset_id}/{type}/{id}` is a soft delete; the resource and its
+earlier versions remain in storage and in `_history`. For permanent removal,
+set `FHIR__ALLOW_EXPUNGE=true` in the engine environment and call
+`POST /{dataset_id}/{type}/{id}/$expunge`; add `?_cascade=delete` on a Patient
+to also remove the resources whose subject is that patient. See
+[FHIR REST API → Permanent deletion](../apis/fhir#permanent-deletion-expunge)
+for the exact semantics.
+
 ## Pairing with quality measures
 
 The FHIR server pairs naturally with the [cql2elm extension](cql2elm) for

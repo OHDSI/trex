@@ -57,7 +57,7 @@ pub fn map_table_or_internal_error(
 /// Build the SELECT used by read_resource to fetch the current version + tombstone.
 pub fn build_read_sql(schema_name: &str, resource_type: &str, resource_id: &str) -> String {
     format!(
-        "SELECT _raw, _is_deleted::VARCHAR, _version_id::VARCHAR FROM {schema}.\"{table}\" WHERE _id = '{id}'",
+        "SELECT _raw, _is_deleted::VARCHAR AS _is_deleted, _version_id::VARCHAR AS _version_id FROM {schema}.\"{table}\" WHERE _id = '{id}'",
         schema = schema_name,
         table = resource_type.to_lowercase(),
         id = resource_id.replace('\'', "''")
@@ -67,7 +67,7 @@ pub fn build_read_sql(schema_name: &str, resource_type: &str, resource_id: &str)
 /// Build the SELECT used by update to check whether a resource exists + current version.
 pub fn build_check_version_sql(schema_name: &str, resource_type: &str, resource_id: &str) -> String {
     format!(
-        "SELECT _version_id::VARCHAR, _raw FROM {schema}.\"{table}\" WHERE _id = '{id}'",
+        "SELECT _version_id::VARCHAR AS _version_id, _raw FROM {schema}.\"{table}\" WHERE _id = '{id}'",
         schema = schema_name,
         table = resource_type.to_lowercase(),
         id = resource_id.replace('\'', "''")
@@ -427,7 +427,7 @@ pub async fn delete_resource(
     }
 
     let check_sql = format!(
-        "SELECT _version_id::VARCHAR, _raw FROM {schema}.\"{table}\" WHERE _id = '{id}' AND NOT _is_deleted",
+        "SELECT _version_id::VARCHAR AS _version_id, _raw FROM {schema}.\"{table}\" WHERE _id = '{id}' AND NOT _is_deleted",
         schema = schema_name,
         table = resource_type.to_lowercase(),
         id = resource_id.replace('\'', "''")

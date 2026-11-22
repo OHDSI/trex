@@ -196,8 +196,29 @@ pub fn generate_search_sql(
     Ok(conditions.join(" AND "))
 }
 
+/// Picks the `|` alternative for `resource_type`; params shared across types list one per type.
+fn select_alternative<'a>(expression: &'a str, resource_type: &str) -> &'a str {
+    let alternatives: Vec<&str> = expression
+        .split('|')
+        .map(|a| {
+            let a = a.trim();
+            match a.strip_prefix('(').and_then(|x| x.strip_suffix(')')) {
+                Some(inner) => inner.trim(),
+                None => a,
+            }
+        })
+        .collect();
+    let prefix = format!("{}.", resource_type);
+    alternatives
+        .iter()
+        .find(|a| a.starts_with(&prefix) || **a == resource_type)
+        .or_else(|| alternatives.iter().find(|a| a.starts_with("Resource.")))
+        .copied()
+        .unwrap_or_else(|| alternatives.first().copied().unwrap_or(expression))
+}
+
 fn fhirpath_to_json_path(expression: &str, resource_type: &str) -> String {
-    let expr = expression.split('|').next().unwrap_or(expression).trim();
+    let expr = select_alternative(expression, resource_type);
 
     let path = if let Some(rest) = expr.strip_prefix(resource_type) {
         rest.trim_start_matches('.')
@@ -529,6 +550,23 @@ mod tests {
         assert_eq!(
             fhirpath_to_json_path("Patient.name | Practitioner.name", "Patient"),
             "$.name"
+        );
+    }
+
+    #[test]
+    fn test_fhirpath_picks_alternative_for_resource_type() {
+        let expr = "AllergyIntolerance.patient | CarePlan.subject.where(resolve() is Patient) | \
+                    Observation.subject.where(resolve() is Patient) | ObservationDefinition.x";
+        assert_eq!(fhirpath_to_json_path(expr, "Observation"), "$.subject");
+        assert_eq!(fhirpath_to_json_path(expr, "AllergyIntolerance"), "$.patient");
+        assert_eq!(fhirpath_to_json_path(expr, "ObservationDefinition"), "$.x");
+        assert_eq!(
+            fhirpath_to_json_path("Patient.name | Practitioner.name", "Practitioner"),
+            "$.name"
+        );
+        assert_eq!(
+            fhirpath_to_json_path("(Condition.onset as dateTime) | Observation.code", "Observation"),
+            "$.code"
         );
     }
 

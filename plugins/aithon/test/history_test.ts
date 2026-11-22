@@ -73,7 +73,7 @@ Deno.test("buildHistorySql_escapes_quotes", () => {
   // must escape single-quotes in resource id
   assertEquals(sql.includes("'abc''def'"), true);
   // must order newest-first
-  assertEquals(sql.includes("ORDER BY _version_id DESC"), true);
+  assertEquals(sql.includes("ORDER BY h._version_id DESC"), true);
 });
 
 // ---------------------------------------------------------------------------
@@ -118,6 +118,7 @@ Deno.test("buildHistoryEntry_marks_delete_when_deleted", () => {
   );
   assertEquals(entry !== undefined, true);
   assertEquals((entry!.request as any).method, "DELETE");
+  assertEquals("resource" in entry!, false);
 });
 
 Deno.test("buildHistoryEntry_returns_undefined_for_invalid_json", () => {
@@ -375,4 +376,18 @@ Deno.test("readResourceVersion_rejects_unknown_resource_type", async () => {
     () => readResourceVersion("ds1", "UnknownType", "p1", "1", conn, state),
     FhirError,
   );
+});
+
+Deno.test("readResourceVersion_returns_410_for_deleted_current_version", async () => {
+  const state = makeState();
+  const responses = new Map<string | RegExp, any[]>([
+    ["_history", []],
+    [/"patient"/, [{ _raw: '{"resourceType":"Patient","id":"p1"}', _is_deleted: "true" }]],
+  ]);
+  const { conn } = makeFakeConn(responses);
+  const err = await assertRejects(
+    () => readResourceVersion("ds1", "Patient", "p1", "3", conn, state),
+    FhirError,
+  );
+  assertEquals(err.status, 410);
 });

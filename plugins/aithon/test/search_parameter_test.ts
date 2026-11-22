@@ -3,6 +3,7 @@ import {
   SearchParamRegistry,
   SearchParamType,
   generateSearchSql,
+  selectAlternative,
 } from "../functions/fhir/search_parameter.ts";
 import { ResourceRegistry } from "../functions/fhir/resource_registry.ts";
 import { DefinitionRegistry } from "../functions/fhir/structure_definition.ts";
@@ -686,4 +687,32 @@ Deno.test("loadDefault has Patient.name as string param", async () => {
   const sp = await SearchParamRegistry.loadDefault();
   const def = sp.get("Patient", "name");
   assert(def !== undefined);
+});
+
+Deno.test("selectAlternative picks the alternative for the resource type", () => {
+  const expr = "AllergyIntolerance.patient | CarePlan.subject.where(resolve() is Patient) | " +
+    "Observation.subject.where(resolve() is Patient) | ObservationDefinition.x";
+  assertEquals(selectAlternative(expr, "Observation"), "Observation.subject.where(resolve() is Patient)");
+  assertEquals(selectAlternative(expr, "AllergyIntolerance"), "AllergyIntolerance.patient");
+  assertEquals(selectAlternative(expr, "ObservationDefinition"), "ObservationDefinition.x");
+  assertEquals(selectAlternative("(Condition.onset as dateTime) | Observation.code", "Observation"), "Observation.code");
+  assertEquals(selectAlternative("Resource.id", "Patient"), "Resource.id");
+});
+
+Deno.test("generateSearchSql uses the per-type path of a shared reference param", () => {
+  const bundle = {
+    resourceType: "Bundle",
+    entry: [{
+      resource: {
+        resourceType: "SearchParameter",
+        code: "patient",
+        type: "reference",
+        base: ["AllergyIntolerance", "Observation"],
+        expression: "AllergyIntolerance.patient | Observation.subject.where(resolve() is Patient)",
+      },
+    }],
+  };
+  const reg = SearchParamRegistry.loadFromJson(JSON.stringify(bundle));
+  const sql = generateSearchSql(reg, new ResourceRegistry(), "Observation", { patient: "Patient/p1" });
+  assert(sql.includes("'$.subject.reference'"), sql);
 });
