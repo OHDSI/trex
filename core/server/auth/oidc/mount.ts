@@ -163,21 +163,28 @@ async function verifyHintLocally(hint: string): Promise<HintVerdict> {
  * id_token. The cookie is the one credential on this path that must still
  * verify.
  *
- * Readable here even though the end-session branch clears it: sb-access-token
- * is trex's own rather than Better Auth's, so the handler has not invalidated
- * it, and res.clearCookie only writes a response header.
+ * sb-access-token lives for one hour and nothing renews it while a relying
+ * party refreshes through /oauth2/token, so a page open longer than that
+ * arrives here with it gone. Better Auth's session cookie is the fallback: it
+ * is the session /oauth2/authorize itself trusts, and it slides for days. It
+ * has to be read BEFORE the handler runs, because a successful end-session
+ * deletes that session row.
  */
 async function verifiedSubject(req: express.Request): Promise<string | null> {
-  const cookie = req.headers.cookie
-    ?.split(";")
+  const cookies = req.headers.cookie;
+  if (!cookies) return null;
+  const accessToken = cookies
+    .split(";")
     .map((c) => c.trim())
     .find((c) => c.startsWith("sb-access-token="))
     ?.split("=")
     .slice(1)
     .join("=");
-  if (!cookie) return null;
-  const claims = await verifyAccessToken(cookie);
-  return claims?.sub ?? null;
+  const claims = accessToken ? await verifyAccessToken(accessToken) : null;
+  if (claims?.sub) return claims.sub;
+  const live = await auth.api.getSession({ headers: new Headers({ cookie: cookies }) })
+    .catch(() => null);
+  return live?.user?.id ?? null;
 }
 
 export function oidcHandler(): express.RequestHandler {
@@ -231,6 +238,8 @@ export function oidcHandler(): express.RequestHandler {
     }
 
     let rejectedHintVerdict: HintVerdict | null = null;
+    const isEndSession = path.startsWith("/oauth2/end-session");
+    const sessionSubject = isEndSession ? await verifiedSubject(req) : null;
     const response = await auth.handler(request);
 
     // Charged only on a refusal. A successful sign-in's call is a 200 and costs
@@ -243,7 +252,6 @@ export function oidcHandler(): express.RequestHandler {
     // not Better Auth's, and /auth/v1/logout — the only other place it is
     // cleared — is not on this path. Without it a browser that logs out through
     // the relying party keeps a bearer that same-origin iframes still read.
-    const isEndSession = path.startsWith("/oauth2/end-session");
     if (isEndSession) {
       res.clearCookie("sb-access-token", { path: "/" });
     }
@@ -270,7 +278,7 @@ export function oidcHandler(): express.RequestHandler {
     if (isEndSession && response.status >= 300 && response.status < 400) {
       const returnTo = response.headers.get("location");
       if (returnTo) {
-        const sub = await verifiedSubject(req);
+        const sub = sessionSubject;
         const hinted = subjectFromHint(hint);
         if (sub && hinted && hinted !== sub) {
           // Worth seeing: the hint the provider accepted names someone other
@@ -280,10 +288,10 @@ export function oidcHandler(): express.RequestHandler {
           );
         }
         if (!sub) {
-          // Fails closed. An end-session call arriving without a verifying
-          // session cookie -- a programmatic caller, or one whose token has
-          // expired -- leaves the upstream session open rather than acting on
-          // an unverified subject.
+          // Fails closed. An end-session call arriving with neither a
+          // verifying sb-access-token nor a live Better Auth session -- a
+          // programmatic caller, typically -- leaves the upstream session open
+          // rather than acting on an unverified subject.
           console.warn(
             "[oidc] end-session: no verifying session cookie; upstream session left open",
           );

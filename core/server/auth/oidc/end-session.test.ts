@@ -331,3 +331,76 @@ test("the session is gone whether or not the destination was registered", async 
     assertEquals(alive.rows.length, 0, post_logout_redirect_uri);
   }
 });
+
+/**
+ * Federates the fixture's user to a fresh upstream whose discovery document
+ * publishes `endSession`. The provider id is unique per call because
+ * upstream-logout.ts caches the endpoint per provider for the process.
+ */
+async function federated(m: NonNullable<typeof mod>, f: Fixture, endSession: string) {
+  const providerId = `end_session_up_${crypto.randomUUID().slice(0, 8).replaceAll("-", "")}`;
+  const issuer = `https://${providerId.replaceAll("_", "-")}.test/oidc`;
+  await m.db.pool.query(
+    `INSERT INTO trexdb.sso_provider
+       (id, "displayName", "clientId", "clientSecret", enabled, issuer, scopes,
+        claim_map, link_policy, auto_provision, email_domain_allowlist,
+        allow_elevated_auto_link)
+     VALUES ($1,$1,'cid','secret',true,$2,'openid profile',
+             '{"email":"username"}'::jsonb,'verified_email',false,null,false)`,
+    [providerId, issuer],
+  );
+  await m.db.pool.query(
+    `UPDATE trexdb."user" SET app_metadata = jsonb_build_object('idp', jsonb_build_object('provider', $2::text))
+      WHERE id = $1`,
+    [f.userId, providerId],
+  );
+  const real = globalThis.fetch;
+  const discovery = `${issuer}/.well-known/openid-configuration`;
+  globalThis.fetch = (input: string | URL | Request, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url !== discovery) return real(input, init);
+    return Promise.resolve(Response.json({ issuer, end_session_endpoint: endSession }));
+  };
+  return async () => {
+    globalThis.fetch = real;
+    await m.db.pool.query(`DELETE FROM trexdb.sso_provider WHERE id = $1`, [providerId]);
+  };
+}
+
+test("a federated logout reaches the upstream on the session cookie alone", async (m, f) => {
+  // sb-access-token lives an hour and nothing renews it, so a page open longer
+  // than that logs out with only Better Auth's session cookie. That session is
+  // deleted by the logout itself, so it has to be resolved before the handler.
+  const upstreamEnd = "https://upstream.test/oidc/session/end";
+  const restore = await federated(m, f, upstreamEnd);
+  try {
+    const session = await signedInWithIdToken(m, f);
+    assertEquals(session.cookie.includes("sb-access-token="), false);
+    const out = await endSession(f, session, { post_logout_redirect_uri: POST_LOGOUT_URI });
+    assertEquals(out.status, 302);
+    const next = new URL(out.location!);
+    assertEquals(next.origin + next.pathname, upstreamEnd);
+    assertEquals(
+      new URL(next.searchParams.get("post_logout_redirect_uri")!).origin +
+        new URL(next.searchParams.get("post_logout_redirect_uri")!).pathname,
+      POST_LOGOUT_URI,
+    );
+  } finally {
+    await restore();
+  }
+});
+
+test("a federated logout with no verifying cookie leaves the upstream alone", async (m, f) => {
+  const restore = await federated(m, f, "https://upstream.test/oidc/session/end");
+  try {
+    const session = await signedInWithIdToken(m, f);
+    const out = await endSession(f, { ...session, cookie: "" }, {
+      post_logout_redirect_uri: POST_LOGOUT_URI,
+    });
+    assertEquals(out.status, 302);
+    const next = new URL(out.location!);
+    assertEquals(next.origin + next.pathname, POST_LOGOUT_URI);
+  } finally {
+    await restore();
+  }
+});
