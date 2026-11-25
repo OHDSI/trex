@@ -111,6 +111,19 @@
       (is (re-find #"match_bm25" sql))
       (is (re-find #"LIMIT 100" sql)))))
 
+(deftest fts-schema-names-test
+  (testing "d2e-built caches put the FTS macro in fts_main_<db>_<schema>_concept"
+    (is (= "fts_main_mydb_vocab_concept" (vocab/legacy-fts-schema "mydb" "vocab"))))
+  (testing "datamart-built caches put it in fts_<schema>_concept inside the cache catalog"
+    (is (= "fts_vocab_concept" (vocab/datamart-fts-schema "vocab")))))
+
+(deftest build-fts-search-sql-with-macro-test
+  (testing "uses the macro prefix it is given"
+    (let [sql (vocab/build-fts-search-sql "mydb" "vocab" 10 "\"mydb\".\"fts_vocab_concept\"")]
+      (is (re-find #"\"mydb\"\.\"fts_vocab_concept\"\.match_bm25" sql))))
+  (testing "defaults to the d2e name"
+    (is (re-find #"fts_main_mydb_vocab_concept\.match_bm25" (vocab/build-fts-search-sql "mydb" "vocab" 10)))))
+
 (deftest build-fallback-search-sql-test
   (testing "builds fallback ILIKE search SQL with correct structure"
     (let [sql (vocab/build-fallback-search-sql "mydb" "vocab" 50)]

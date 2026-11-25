@@ -70,28 +70,62 @@
         :schema-name schema-name
         :max-rows (or (:max-rows clj-map) 1000)}))))
 
-(defn has-fts-index?
-  "Check if an FTS index exists for the concept table."
+(defn legacy-fts-schema
+  "FTS schema name of caches built by d2e's create_cachedb_file_plugin."
+  [database-code schema-name]
+  (format "fts_main_%s_%s_concept" database-code schema-name))
+
+(defn datamart-fts-schema
+  "FTS schema name DuckDB gives an index created on <catalog>.<schema>.concept,
+   as trexsql.datamart's cache build does; it lives inside that catalog."
+  [schema-name]
+  (format "fts_%s_concept" schema-name))
+
+(defn find-fts-macro
+  "Qualified prefix of the concept FTS index's match_bm25 macro, or nil when the
+   cache has no FTS index. Caches built by trexsql.datamart and by d2e name the
+   index differently; searching only the d2e name made every search on a
+   datamart-built cache fail its FTS step."
   [db database-code schema-name]
   (try
     (db/validate-identifier! database-code "database-code")
     (db/validate-identifier! schema-name "schema-name")
-    (let [fts-fn-name (format "fts_main_%s_%s_concept" database-code schema-name)
-          check-sql "SELECT * FROM duckdb_functions() WHERE function_name = ? LIMIT 1"
-          results (db/query-with-params db check-sql [fts-fn-name])]
-      (pos? (count results)))
+    (let [legacy (legacy-fts-schema database-code schema-name)
+          datamart (datamart-fts-schema schema-name)
+          rows (db/query-with-params
+                db
+                "SELECT database_name, schema_name FROM duckdb_functions() WHERE function_name = 'match_bm25' AND schema_name IN (?, ?)"
+                [legacy datamart])
+          found (set (map #(.get ^java.util.HashMap % "schema_name") rows))
+          in-catalog? (some #(and (= datamart (.get ^java.util.HashMap % "schema_name"))
+                                  (= database-code (.get ^java.util.HashMap % "database_name")))
+                            rows)]
+      (cond
+        in-catalog? (format "%s.%s" (db/escape-identifier database-code "database-code")
+                            (db/escape-identifier datamart "schema-name"))
+        (contains? found legacy) legacy
+        :else nil))
     (catch Exception _
-      false)))
+      nil)))
+
+(defn has-fts-index?
+  "Check if an FTS index exists for the concept table."
+  [db database-code schema-name]
+  (some? (find-fts-macro db database-code schema-name)))
 
 (defn build-fts-search-sql
-  "Build FTS search query using match_bm25 function."
-  [database-code schema-name max-rows]
+  "Build FTS search query using match_bm25 function. `fts-macro` is the
+   qualified macro prefix from find-fts-macro; defaults to the d2e name."
+  ([database-code schema-name max-rows]
+   (build-fts-search-sql database-code schema-name max-rows
+                         (legacy-fts-schema database-code schema-name)))
+  ([database-code schema-name max-rows fts-macro]
   (db/validate-identifier! database-code "database-code")
   (db/validate-identifier! schema-name "schema-name")
   (let [escaped-db (db/escape-identifier database-code "database-code")
         escaped-schema (db/escape-identifier schema-name "schema-name")
         table-ref (format "%s.%s.%s" escaped-db escaped-schema (db/escape-identifier "concept" "table"))
-        fts-fn (format "fts_main_%s_%s_concept" database-code schema-name)]
+        fts-fn fts-macro]
     (format "SELECT c.concept_id, c.concept_name, c.domain_id,
        c.vocabulary_id, c.concept_class_id, c.standard_concept,
        c.concept_code, fts.score
@@ -101,7 +135,7 @@ JOIN (SELECT concept_id, %s.match_bm25(concept_id, ?, fields := 'concept_name') 
 WHERE fts.score IS NOT NULL
 ORDER BY fts.score DESC
 LIMIT %d"
-            table-ref fts-fn table-ref max-rows)))
+            table-ref fts-fn table-ref max-rows))))
 
 (defn build-fallback-search-sql
   "Build fallback ILIKE search query for when FTS is not available."
@@ -127,8 +161,9 @@ LIMIT %d"
   [db database-code schema-name search-term max-rows]
   (try
     (util/load-fts-extension! db)
-    (let [sql (build-fts-search-sql database-code schema-name max-rows)]
-      (db/query-with-params db sql [search-term]))
+    (when-let [fts-macro (find-fts-macro db database-code schema-name)]
+      (let [sql (build-fts-search-sql database-code schema-name max-rows fts-macro)]
+        (db/query-with-params db sql [search-term])))
     (catch Exception e
       (log/debug "FTS search failed, trying fallback" e)
       nil)))
@@ -170,7 +205,9 @@ LIMIT %d"
           final-schema (or schema-name detected-schema database-code)]
       (log/debug (format "Using schema '%s' for search (provided=%s, detected=%s, database-code=%s)"
                          final-schema schema-name detected-schema database-code))
-      (or (execute-fts-search db database-code final-schema search-term max-rows)
+      ;; An empty FTS result falls through too: ILIKE also matches codes and
+      ;; partial words BM25 does not.
+      (or (not-empty (execute-fts-search db database-code final-schema search-term max-rows))
           (execute-fallback-search db database-code final-schema search-term max-rows)))))
 
 (defn result-row->concept-map

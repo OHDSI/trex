@@ -2411,9 +2411,8 @@ Deno.test("POST /chat: finish part carries usage in messageMetadata", async () =
 
 // ToolContext.emit on /chat interleaves a `data-${name}` UIMessage part into
 // the SAME stream useChat consumes (createUIMessageStream + writer.merge — see
-// handler.ts for the v6 API verification). No agents.steps write on this path
-// (unlike the session path) — /chat never persisted tool-call/tool-result steps
-// either.
+// handler.ts for the v6 API verification). No agents.steps write for the emit
+// itself (unlike the session path); tool calls and results are recorded.
 Deno.test("POST /chat interleaves ToolContext.emit as a data-* UIMessage part", async () => {
   const { handler } = await makeHandler({
     model: sequencedModel(toolCallChunks("emitter", {}), textChunks("done")),
@@ -2436,6 +2435,33 @@ Deno.test("POST /chat interleaves ToolContext.emit as a data-* UIMessage part", 
   const text = await res.text();
   assert(text.includes('"type":"data-progress"'), `no data-progress part in stream: ${text}`);
   assert(text.includes('"step":1'), `emitted payload missing from stream: ${text}`);
+});
+
+Deno.test("POST /chat records tool calls and results as steps, then the final text", async () => {
+  const { handler, db } = await makeHandler({
+    model: sequencedModel(toolCallChunks("lookup", { q: "diabetes" }), textChunks("found it")),
+    mutate: (agent) => {
+      agent.tools.lookup = {
+        description: "looks something up",
+        inputSchema: { type: "object", properties: { q: { type: "string" } } },
+        execute: () => Promise.resolve({ hits: 2 }),
+      };
+    },
+  });
+  const res = await handler(new Request(`${BASE}/chat`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", parts: [{ type: "text", text: "search" }] }] }),
+  }));
+  assertEquals(res.status, 200);
+  await res.text();
+  const mine = db.steps.filter((s) => s.turn_id === db.turns[0].id).sort((a, b) => a.seq - b.seq);
+  assertEquals(mine.map((s) => [s.kind, s.name]), [["tool-call", "lookup"], ["tool-result", "lookup"], ["text", null]]);
+  assertEquals(mine.map((s) => s.seq), [1, 2, 3]);
+  const call = JSON.parse(mine[0].payload as string);
+  assertEquals(call.input, { q: "diabetes" });
+  assertEquals(JSON.parse(mine[1].payload as string).output, { hits: 2 });
+  assertEquals(call.toolCallId, JSON.parse(mine[1].payload as string).toolCallId);
+  assertEquals(JSON.parse(mine[2].payload as string).text, "found it");
 });
 
 // /chat setup-phase failures must keep the same HTTP-error semantics as before.

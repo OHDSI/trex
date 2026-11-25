@@ -1983,6 +1983,10 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // passing the bare Promise as streamText's `messages`; awaiting it is
       // the only change, no effect on the endpoint contract.
       const modelMessages = await convertToModelMessages(body.messages);
+      let chatStepSeq = 0;
+      const persistChatStep = (kind: string, name: string | null, payload: unknown, usage?: unknown) =>
+        store.addStep(turn.id, ++chatStepSeq, kind, name, payload, usage)
+          .catch((e) => console.error("agents: chat persist failed:", e));
       // /chat's emit channel — writes a `data-${name}` UIMessage part
       // interleaved into the SAME stream useChat consumes, AI SDK v6's
       // documented convention for custom data parts. Unlike the session
@@ -2117,9 +2121,23 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
               cacheProviderOptions(model, agent.dir),
               reasoningEffortProviderOptions(model, agent.config.reasoningEffort, agent.dir),
             ),
+            // Record tool calls and results as steps, with the same kinds the
+            // session runner uses (runner.ts), so a /chat turn shows which tools
+            // ran and what they returned, not only its final text. A turn whose
+            // last segment ends without a client continuation has no other record
+            // of its tool calls.
+            onStepFinish: async (step) => {
+              for (const tc of step.toolCalls ?? []) {
+                const clientOnly = !(tools as Record<string, { execute?: unknown }>)[tc.toolName]?.execute;
+                await persistChatStep(clientOnly ? "client-tool-call" : "tool-call", tc.toolName,
+                  { toolCallId: tc.toolCallId, input: tc.input });
+              }
+              for (const tr of step.toolResults ?? []) {
+                await persistChatStep("tool-result", tr.toolName, { toolCallId: tr.toolCallId, output: tr.output });
+              }
+            },
             onFinish: async ({ text, totalUsage }) => {
-              await store.addStep(turn.id, 1, "text", null, { text }, totalUsage)
-                .catch((e) => console.error("agents: chat persist failed:", e));
+              await persistChatStep("text", null, { text }, totalUsage);
               await store.finishTurn(turn.id, "completed")
                 .catch((e) => console.error("agents: chat persist failed:", e));
             },
