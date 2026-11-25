@@ -21,7 +21,9 @@
 
 (defn- row->concept [^java.util.HashMap row]
   (let [c (Concept.)]
-    (set! (.conceptId c) (some-> (.get row "concept_id") long))
+    ;; Native query results arrive as strings: (long "201826") threw, and
+    ;; VocabularyService turned that into an empty result for every search.
+    (set! (.conceptId c) (some-> (.get row "concept_id") str Long/parseLong))
     (set! (.conceptName c) (.get row "concept_name"))
     (set! (.domainId c) (.get row "domain_id"))
     (set! (.vocabularyId c) (.get row "vocabulary_id"))
